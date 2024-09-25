@@ -10,16 +10,31 @@ import ghidra.util.Msg;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 import ghidrassist.GhidrAssistPlugin.CodeViewType;
+import scala.Console;
 import ghidra.util.task.TaskLauncher;
 
 import javax.swing.*;
 import javax.swing.event.HyperlinkEvent;
 import javax.swing.event.HyperlinkListener;
+import javax.swing.table.DefaultTableModel;
 
 import java.awt.*;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
+import java.io.StringReader;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSyntaxException;
+import com.google.gson.stream.JsonReader;
 import com.vladsch.flexmark.html.HtmlRenderer;
 import com.vladsch.flexmark.parser.Parser;
 import com.vladsch.flexmark.util.ast.Document;
@@ -43,9 +58,15 @@ public class GhidrAssistProvider extends ComponentProvider {
     private JTextArea queryTextArea;
     private JCheckBox useRAGCheckBox;
     
+    // Actions tab components
+    private JTable actionsTable;
+    private Map<String, JCheckBox> filterCheckBoxes;
+    private JButton analyzeFunctionButton;
+    private JButton analyzeClearButton;
+    private JButton applyActionsButton;
+
     // RLHF
     private RLHFDatabase rlhfDatabase;
-
     private String lastPrompt;
     private String lastResponse;
 
@@ -230,30 +251,75 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     private JPanel createActionsTab() {
         JPanel actionsPanel = new JPanel(new BorderLayout());
+        actionsTable = new JTable();
 
-        JTable actionsTable = new JTable(); // Set up table model as needed
+        // Create the table
+        DefaultTableModel tableModel = new DefaultTableModel(new Object[]{"Select", "Action", "Description", "Status", "Arguments"}, 0) {
+            private static final long serialVersionUID = 1L;
 
+			@Override
+            public Class<?> getColumnClass(int columnIndex) {
+                if (columnIndex == 0) {
+                    return Boolean.class; // First column is a checkbox
+                }
+                return String.class;
+            }
+        };
+        actionsTable.setModel(tableModel);
+
+        // Set the "Select" column to a minimum size
+        int w = actionsTable.getColumnModel().getColumn(0).getWidth();
+        actionsTable.getColumnModel().getColumn(0).setMaxWidth((int)((double) (w*0.8)));
+        // Hide the "Arguments" column from the user
+        actionsTable.getColumnModel().getColumn(4).setMinWidth(0);
+        actionsTable.getColumnModel().getColumn(4).setMaxWidth(0);
+        actionsTable.getColumnModel().getColumn(4).setWidth(0);
         JScrollPane tableScrollPane = new JScrollPane(actionsTable);
 
-        JButton analyzeFunctionButton = new JButton("Analyze Function");
-        JButton clearButton = new JButton("Clear");
-        JButton applyActionsButton = new JButton("Apply Actions");
+        // Create the filter checkboxes
+        JPanel filterPanel = new JPanel();
+        filterPanel.setLayout(new BoxLayout(filterPanel, BoxLayout.Y_AXIS));
+        filterPanel.setBorder(BorderFactory.createTitledBorder("Filters"));
+
+        filterCheckBoxes = new HashMap<>();
+        for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
+            if (fnTemplate.get("type").equals("function")) {
+                @SuppressWarnings("unchecked")
+				Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
+                String fnName = functionMap.get("name").toString();
+                String fnDescription = functionMap.get("description").toString();
+                String checkboxLabel = fnName.replace("_", " ") + ": " + fnDescription;
+                JCheckBox checkbox = new JCheckBox(checkboxLabel, true);
+                filterCheckBoxes.put(fnName, checkbox);
+                filterPanel.add(checkbox);
+            }
+        }
+        JScrollPane filterScrollPane = new JScrollPane(filterPanel);
+        filterScrollPane.setPreferredSize(new Dimension(200, 150));
+
+        // Create buttons
+        analyzeFunctionButton = new JButton("Analyze Function");
+        analyzeClearButton = new JButton("Clear");
+        applyActionsButton = new JButton("Apply Actions");
 
         JPanel buttonPanel = new JPanel();
         buttonPanel.add(analyzeFunctionButton);
-        buttonPanel.add(clearButton);
+        buttonPanel.add(analyzeClearButton);
         buttonPanel.add(applyActionsButton);
 
+        // Add action listeners
+        analyzeFunctionButton.addActionListener(e -> onAnalyzeFunctionClicked());
+        analyzeClearButton.addActionListener(e -> onAnalyzeClearClicked());
+        applyActionsButton.addActionListener(e -> onApplyActionsClicked());
+
+        // Assemble the panel
+        actionsPanel.add(filterScrollPane, BorderLayout.NORTH);
         actionsPanel.add(tableScrollPane, BorderLayout.CENTER);
         actionsPanel.add(buttonPanel, BorderLayout.SOUTH);
 
-        // Add action listeners
-        clearButton.addActionListener(e -> {
-            // Clear actions table (implement as needed)
-        });
-
         return actionsPanel;
     }
+
 
     private JPanel createRAGManagementTab() {
         JPanel ragPanel = new JPanel(new BorderLayout());
@@ -295,6 +361,267 @@ public class GhidrAssistProvider extends ComponentProvider {
             }
         }
     }
+
+    private void onAnalyzeFunctionClicked() {
+        Function currentFunction = plugin.getCurrentFunction();
+        if (currentFunction == null) {
+            Msg.showInfo(getClass(), panel, "No Function", "No function at current location.");
+            return;
+        }
+        TaskMonitor monitor = TaskMonitor.DUMMY; // Replace with actual monitor if needed
+
+        String code = getFunctionCode(currentFunction, monitor);
+        if (code == null) {
+            Msg.showError(this, panel, "Error", "Failed to get code from the current address.");
+            return;
+        }
+
+        boolean hasSelectedActions = false;
+
+        // Use LlmApi to send request
+        LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
+
+        // For each selected action, send an individual request
+        for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
+            if (entry.getValue().isSelected()) {
+                hasSelectedActions = true;
+                String action = entry.getKey();
+                String actionPromptTemplate = ToolCalling.ACTION_PROMPTS.get(action);
+                if (actionPromptTemplate != null) {
+                    String actionPrompt = actionPromptTemplate.replace("{code}", code);
+
+                    // Get the function definition for this action
+                    Map<String, Object> functionDefinition = null;
+                    for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
+                        @SuppressWarnings("unchecked")
+						Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
+                        if (functionMap.get("name").equals(action)) {
+                            functionDefinition = functionMap;
+                            break;
+                        }
+                    }
+
+                    if (functionDefinition == null) {
+                        Msg.showError(this, panel, "Error", "Function definition not found for action: " + action);
+                        continue;
+                    }
+
+                    // Send the request with this prompt and function definition
+                    ArrayList<Map<String, Object>> functions = new ArrayList<>();
+                    functions.add(functionDefinition);
+
+                    // Send the request
+                    llmApi.sendRequestAsyncWithFunctions(actionPrompt, functions, new LlmApi.LlmResponseHandler() {
+                        @Override
+                        public void onStart() {
+                            // No need to clear the results here; already done
+                        }
+
+                        @Override
+                        public void onUpdate(String partialResponse) {
+                            // No streaming in function calling
+                        }
+
+                        @Override
+                        public void onComplete(String fullResponse) {
+                            SwingUtilities.invokeLater(() -> {
+                                // Parse the response and populate the table
+                                parseAndDisplayActions(fullResponse);
+                            });
+                        }
+
+                        @Override
+                        public void onError(Throwable error) {
+                            SwingUtilities.invokeLater(() -> {
+                                Msg.showError(this, panel, "Error", "An error occurred: " + error.getMessage());
+                            });
+                        }
+                    });
+                }
+            }
+        }
+
+        if (!hasSelectedActions) {
+            Msg.showError(this, panel, "Error", "No actions selected.");
+        }
+    }
+
+    private void parseAndDisplayActions(String response) {
+        try {
+            Gson gson = new Gson();
+
+            String responseJson = preprocessJsonResponse(response);
+
+            // Create a JsonReader with lenient mode enabled
+            JsonReader jsonReader = new JsonReader(new StringReader(responseJson));
+            jsonReader.setLenient(true);
+
+            JsonElement jsonElement = gson.fromJson(jsonReader, JsonElement.class);
+
+            if (!jsonElement.isJsonObject()) {
+            	Console.println("Error: Unexpected JSON structure in response");
+                return;
+            }
+
+            JsonObject jsonObject = jsonElement.getAsJsonObject();
+
+            // Check if the JSON object contains "tool_calls"
+            if (jsonObject.has("tool_calls")) {
+                JsonArray toolCallsArray = jsonObject.getAsJsonArray("tool_calls");
+
+                for (JsonElement toolCallElement : toolCallsArray) {
+                    if (toolCallElement.isJsonObject()) {
+                        JsonObject toolCallObject = toolCallElement.getAsJsonObject();
+
+                        String functionName = null;
+                        JsonObject arguments = null;
+
+                        if (toolCallObject.has("name") && toolCallObject.has("arguments")) {
+                            functionName = toolCallObject.get("name").getAsString();
+                            arguments = toolCallObject.getAsJsonObject("arguments");
+                        } else {
+                            Console.println("Error: Tool call does not contain 'name' and 'arguments' fields");
+                            continue;
+                        }
+
+                        // Only process actions that are in our function templates
+                        ArrayList<String> functionNames = new ArrayList<>();
+                        for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
+                            functionNames.add(functionMap.get("name").toString());
+                        }
+
+                        if (!functionNames.contains(functionName)) {
+                        	Console.println("Error: Unknown function: " + functionName);
+                            continue;
+                        }
+
+                        // Add to actions table
+                        DefaultTableModel model = (DefaultTableModel) actionsTable.getModel();
+                        Object[] rowData = new Object[]{
+                            Boolean.FALSE, // Deselected by default
+                            functionName.replace("_", " "),
+                            formatDescription(functionName, arguments),
+                            "", // Status
+                            arguments.toString() // Store arguments as a string (you might add a hidden column)
+                        };
+                        model.addRow(rowData);
+                    } else {
+                        Console.println("Error: Unexpected structure in 'tool_calls' array");
+                    }
+                }
+            } else {
+            	Console.println("Error: Response does not contain 'tool_calls' field");
+                return;
+            }
+
+        } catch (JsonSyntaxException e) {
+            Console.println("Error: Failed to parse LLM response: " + e.getMessage());
+        }
+    }
+
+
+    private String preprocessJsonResponse(String response) {
+        String json = response.trim();
+
+        // Define regex patterns to match code block markers
+        Pattern codeBlockPattern = Pattern.compile("(?s)^[`']{3}(\\w+)?\\s*(.*?)\\s*[`']{3}$");
+        Matcher matcher = codeBlockPattern.matcher(json);
+
+        if (matcher.find()) {
+            // Extract the content inside the code block
+            json = matcher.group(2).trim();
+        } else {
+            // If no code block markers, attempt to find the JSON content directly
+            // Remove any leading or trailing quotes
+            if ((json.startsWith("\"") && json.endsWith("\"")) || (json.startsWith("'") && json.endsWith("'"))) {
+                json = json.substring(1, json.length() - 1).trim();
+            }
+        }
+
+        return json;
+    }
+    
+    private String formatDescription(String functionName, JsonObject arguments) {
+    	try {
+	        switch (functionName) {
+	            case "rename_function":
+	                return arguments.get("new_name").getAsString();
+	            case "rename_variable":
+	                return arguments.get("var_name").getAsString() + " -> " + arguments.get("new_name").getAsString();
+	            case "retype_variable":
+	                return arguments.get("var_name").getAsString() + " -> " + arguments.get("new_type").getAsString();
+	            case "auto_create_struct":
+	                return arguments.get("var_name").getAsString();
+	            default:
+	                return "";
+	        }
+    	}
+    	catch(Exception e) {
+    		Console.println("Error: Failed to parse Json: " + e.getMessage());
+    	}
+    	return "";
+    }
+
+    private void onAnalyzeClearClicked() {
+        // Get the table model
+        DefaultTableModel model = (DefaultTableModel) actionsTable.getModel();
+
+        // Clear all rows
+        model.setRowCount(0);
+    }
+    
+    private void onApplyActionsClicked() {
+        DefaultTableModel model = (DefaultTableModel) actionsTable.getModel();
+        Program program = plugin.getCurrentProgram();
+        Address currentAddress = plugin.getCurrentAddress();
+
+        for (int row = 0; row < model.getRowCount(); row++) {
+            Boolean isSelected = (Boolean) model.getValueAt(row, 0);
+            if (isSelected) {
+                String action = model.getValueAt(row, 1).toString().replace(" ", "_");
+                String argumentsJson = model.getValueAt(row, 4).toString(); // Column 4 stores arguments
+
+                // Parse arguments
+                Gson gson = new Gson();
+                JsonObject arguments = gson.fromJson(argumentsJson, JsonObject.class);
+
+                // Call the appropriate handler
+                switch (action) {
+                    case "rename_function":
+                        String newName = arguments.get("new_name").getAsString();
+                        ToolCalling.handle_rename_function(program, currentAddress, newName);
+                        model.setValueAt("Applied", row, 3);
+                        break;
+                    case "rename_variable":
+                        String funcName = arguments.get("func_name").getAsString();
+                        String varName = arguments.get("var_name").getAsString();
+                        String newVarName = arguments.get("new_name").getAsString();
+                        ToolCalling.handle_rename_variable(program, currentAddress, funcName, varName, newVarName);
+                        model.setValueAt("Applied", row, 3);
+                        break;
+                    case "retype_variable":
+                        funcName = arguments.get("func_name").getAsString();
+                        varName = arguments.get("var_name").getAsString();
+                        String newType = arguments.get("new_type").getAsString();
+                        ToolCalling.handle_retype_variable(program, currentAddress, funcName, varName, newType);
+                        model.setValueAt("Applied", row, 3);
+                        break;
+                    case "auto_create_struct":
+                        funcName = arguments.get("func_name").getAsString();
+                        varName = arguments.get("var_name").getAsString();
+                        ToolCalling.handle_auto_create_struct(program, currentAddress, funcName, varName);
+                        model.setValueAt("Applied", row, 3);
+                        break;
+                    default:
+                        model.setValueAt("Failed: Unknown action", row, 3);
+                        break;
+                }
+            }
+        }
+    }
+
 
     private void onExplainFunctionClicked() {
         Function currentFunction = plugin.getCurrentFunction();

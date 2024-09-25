@@ -1,5 +1,7 @@
 package ghidrassist;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.launchableinc.openai.client.OpenAiApi;
 import com.launchableinc.openai.service.OpenAiService;
 import okhttp3.Interceptor;
@@ -7,6 +9,7 @@ import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import retrofit2.Retrofit;
+import retrofit2.adapter.rxjava2.RxJava2CallAdapterFactory;
 import retrofit2.converter.jackson.JacksonConverterFactory;
 import java.io.IOException;
 import java.time.Duration;
@@ -35,12 +38,7 @@ public class CustomOpenAiService {
      */
     public CustomOpenAiService(String apiKey, String apiHost, Duration timeout) {
         OkHttpClient client = buildClient(apiKey, timeout);
-
-        Retrofit retrofit = new Retrofit.Builder()
-                .baseUrl(apiHost)
-                .client(client)
-                .addConverterFactory(JacksonConverterFactory.create())
-                .build();
+        Retrofit retrofit = buildRetrofit(client, apiHost);
 
         OpenAiApi api = retrofit.create(OpenAiApi.class);
         this.openAiService = new OpenAiService(api);
@@ -93,7 +91,19 @@ public class CustomOpenAiService {
             throw new RuntimeException("Failed to create a custom OkHttpClient with disabled SSL validation", e);
         }
     }
+    
+    private Retrofit buildRetrofit(OkHttpClient client, String apiHost) {
+        // Create a custom ObjectMapper
+        ObjectMapper objectMapper = new ObjectMapper()
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
+        return new Retrofit.Builder()
+                .baseUrl(apiHost)
+                .client(client)
+                .addCallAdapterFactory(RxJava2CallAdapterFactory.create())
+                .addConverterFactory(JacksonConverterFactory.create(objectMapper)) // Use the custom ObjectMapper
+                .build();
+    }
     /**
      * Returns the configured OpenAiService instance.
      *
