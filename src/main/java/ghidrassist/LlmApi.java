@@ -5,9 +5,6 @@ import com.launchableinc.openai.completion.chat.*;
 import com.launchableinc.openai.service.OpenAiService;
 import ghidra.util.Msg;
 import io.reactivex.Flowable;
-import okhttp3.Call;
-import okhttp3.Response;
-
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
