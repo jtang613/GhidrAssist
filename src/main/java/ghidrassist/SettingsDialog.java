@@ -28,6 +28,10 @@ public class SettingsDialog extends DialogComponentProvider {
     // Components for RLHF Database Path
     private JTextField rlhfDbPathField;
     private JButton rlhfDbBrowseButton;
+    
+    // Components for the RAG index path
+    private JTextField luceneIndexPathField;
+    private JButton luceneIndexBrowseButton;
 
     public SettingsDialog(Component parent, String title) {
         super(title, true, false, true, false);
@@ -43,6 +47,9 @@ public class SettingsDialog extends DialogComponentProvider {
 
         // Load the RLHF database path
         String rlhfDbPath = Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db");
+
+        // Load the Lucene index path
+        String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "");
 
         // Initialize the UI components
         JPanel panel = new JPanel(new BorderLayout());
@@ -103,11 +110,24 @@ public class SettingsDialog extends DialogComponentProvider {
         rlhfDbPanel.add(rlhfDbPathField);
         rlhfDbPanel.add(rlhfDbBrowseButton);
 
+        // Create the Lucene index path components
+        JLabel luceneIndexPathLabel = new JLabel("Lucene Index Path:");
+        luceneIndexPathField = new JTextField(luceneIndexPath, 20);
+        luceneIndexBrowseButton = new JButton("Browse...");
+
+        luceneIndexBrowseButton.addActionListener(e -> onBrowseLuceneIndexPath());
+
+        JPanel luceneIndexPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        luceneIndexPanel.add(luceneIndexPathLabel);
+        luceneIndexPanel.add(luceneIndexPathField);
+        luceneIndexPanel.add(luceneIndexBrowseButton);
+
         // Create a panel to hold the active provider panel and RLHF database panel
         JPanel topPanel = new JPanel();
         topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
         topPanel.add(activeProviderPanel);
         topPanel.add(rlhfDbPanel);
+        topPanel.add(luceneIndexPanel);
 
         // Add components to the panel
         panel.add(topPanel, BorderLayout.NORTH);
@@ -122,6 +142,26 @@ public class SettingsDialog extends DialogComponentProvider {
         setRememberSize(false);
     }
 
+    private void onBrowseLuceneIndexPath() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("Select Lucene Index Directory");
+        fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+
+        // Set current directory to the existing path if it exists
+        String currentPath = luceneIndexPathField.getText();
+        if (!currentPath.isEmpty()) {
+            File currentFile = new File(currentPath);
+            fileChooser.setCurrentDirectory(currentFile.getParentFile());
+            fileChooser.setSelectedFile(currentFile);
+        }
+
+        int result = fileChooser.showOpenDialog(getComponent());
+        if (result == JFileChooser.APPROVE_OPTION) {
+            File selectedDir = fileChooser.getSelectedFile();
+            luceneIndexPathField.setText(selectedDir.getAbsolutePath());
+        }
+    }
+    
     private void onBrowseRLHFDbPath() {
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setDialogTitle("Select RLHF Database File");
@@ -260,12 +300,14 @@ public class SettingsDialog extends DialogComponentProvider {
 
         // Get the RLHF database path from the text field
         String rlhfDbPath = rlhfDbPathField.getText().trim();
+        // Get the Lucene index path from the text field
+        String luceneIndexPath = luceneIndexPathField.getText().trim();
 
         // Store settings
         Preferences.setProperty("GhidrAssist.APIProviders", providersJson);
         Preferences.setProperty("GhidrAssist.SelectedAPIProvider", selectedProviderName);
         Preferences.setProperty("GhidrAssist.RLHFDatabasePath", rlhfDbPath);
-
+        Preferences.setProperty("GhidrAssist.LuceneIndexPath", luceneIndexPath);
         Preferences.store(); // Save preferences to disk
 
         close();

@@ -18,11 +18,18 @@ import javax.swing.event.HyperlinkEvent;
 import javax.swing.event.HyperlinkListener;
 import javax.swing.table.DefaultTableModel;
 
-import java.awt.*;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Dimension;
+//import java.awt.*;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
+import java.io.File;
+import java.io.IOException;
 import java.io.StringReader;
+import java.util.List;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -69,6 +76,19 @@ public class GhidrAssistProvider extends ComponentProvider {
     private String lastPrompt;
     private String lastResponse;
 
+    // RAG Tab components
+    private JTextField indexPathField;
+    private JButton setIndexPathButton;
+    private JButton ingestFilesButton;
+    private JTable filesTable;
+    private DefaultTableModel filesTableModel;
+    private JButton deleteFilesButton;
+    private JTextField searchField;
+    private JButton searchButton;
+    private JTextArea resultsArea;
+
+    private RAGEngine ragEngine;
+    
     // Flexmark parser and renderer
     private Parser markdownParser;
     private HtmlRenderer htmlRenderer;
@@ -93,7 +113,6 @@ public class GhidrAssistProvider extends ComponentProvider {
         htmlRenderer = HtmlRenderer.builder(options).build();
 
         buildPanel();
-        createActions();
 
         setVisible(true);
     }
@@ -195,13 +214,13 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         queryTextArea = new JTextArea();
         JScrollPane queryScrollPane = new JScrollPane(queryTextArea);
-        queryTextArea.setRows(5);
+        queryTextArea.setRows(4);
 
         // Set hint text for queryTextArea
         addHintTextToQueryTextArea();
 
         JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, responseScrollPane, queryScrollPane);
-        splitPane.setResizeWeight(0.8);
+        splitPane.setResizeWeight(0.9);
 
         JButton submitButton = new JButton("Submit");
         JButton clearButton = new JButton("Clear");
@@ -338,14 +357,91 @@ public class GhidrAssistProvider extends ComponentProvider {
         ragPanel.add(listScrollPane, BorderLayout.CENTER);
         ragPanel.add(buttonPanel, BorderLayout.SOUTH);
 
+        // Initialize RagEngine
+        initializeRagEngine();
+
         // Add action listeners
+        addDocumentsButton.addActionListener(e -> onAddDocumentsClicked(documentList));
+        deleteSelectedButton.addActionListener(e -> onDeleteSelectedClicked(documentList));
+        refreshListButton.addActionListener(e -> loadIndexedFiles(documentList));
+
+        // Load the indexed files into the document list
+        loadIndexedFiles(documentList);
 
         return ragPanel;
     }
-
-    private void createActions() {
-        // Create any actions if needed
+    
+    private void initializeRagEngine() {
+        try {
+            if (ragEngine != null) {
+                ragEngine.close();
+            }
+            ragEngine = new RAGEngine();
+        } catch (IOException ex) {
+            Msg.showError(this, panel, "Error", "Failed to initialize RagEngine: " + ex.getMessage());
+        }
     }
+    
+    private void loadIndexedFiles(JList<String> documentList) {
+        if (ragEngine == null) {
+            return;
+        }
+        try {
+            ArrayList<String> fileNames = (ArrayList<String>) ragEngine.listIndexedFiles();
+            // Update the documentList JList
+            documentList.setListData(fileNames.toArray(new String[0]));
+        } catch (IOException ex) {
+            Msg.showError(this, panel, "Error", "Failed to load indexed files: " + ex.getMessage());
+        }
+    }
+
+    private void onAddDocumentsClicked(JList<String> documentList) {
+        if (ragEngine == null) {
+            Msg.showError(this, panel, "Error", "Lucene index path is not set. Please set it in the Settings.");
+            return;
+        }
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("Select Documents to Add to RAG");
+        fileChooser.setMultiSelectionEnabled(true);
+        fileChooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Text and Markdown Files", "txt", "md"));
+
+        int result = fileChooser.showOpenDialog(panel);
+        if (result == JFileChooser.APPROVE_OPTION) {
+            File[] files = fileChooser.getSelectedFiles();
+            try {
+                ragEngine.ingestDocuments(Arrays.asList(files));
+                loadIndexedFiles(documentList);
+                Msg.showInfo(this, panel, "Success", "Documents added to RAG.");
+            } catch (IOException ex) {
+                Msg.showError(this, panel, "Error", "Failed to ingest documents: " + ex.getMessage());
+            }
+        }
+    }
+
+    private void onDeleteSelectedClicked(JList<String> documentList) {
+        if (ragEngine == null) {
+            Msg.showError(this, panel, "Error", "Lucene index path is not set. Please set it in the Settings.");
+            return;
+        }
+        ArrayList<String> selectedFiles = (ArrayList<String>) documentList.getSelectedValuesList();
+        if (selectedFiles.isEmpty()) {
+            Msg.showInfo(this, panel, "No Selection", "No documents selected for deletion.");
+            return;
+        }
+        int confirmation = JOptionPane.showConfirmDialog(panel, "Are you sure you want to delete the selected documents?", "Confirm Deletion", JOptionPane.YES_NO_OPTION);
+        if (confirmation == JOptionPane.YES_OPTION) {
+            try {
+                for (String fileName : selectedFiles) {
+                    ragEngine.deleteDocument(fileName);
+                }
+                loadIndexedFiles(documentList);
+                Msg.showInfo(this, panel, "Success", "Selected documents deleted from RAG.");
+            } catch (IOException ex) {
+                Msg.showError(this, panel, "Error", "Failed to delete documents: " + ex.getMessage());
+            }
+        }
+    }
+
 
     @Override
     public JComponent getComponent() {
@@ -665,7 +761,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 String html = markdownToHtml(partialResponse);
                                 explainTextPane.setText(html);
-                                explainTextPane.setCaretPosition(0); // Scroll to top
+                                //explainTextPane.setCaretPosition(0); // Scroll to top
                             });
                         }
 
@@ -749,7 +845,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 String html = markdownToHtml(partialResponse);
                                 explainTextPane.setText(html);
-                                explainTextPane.setCaretPosition(0); // Scroll to top
+                                //explainTextPane.setCaretPosition(0); // Scroll to top
                             });
                         }
 
@@ -792,8 +888,36 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         // Process macros in the query
         String processedQuery = processMacrosInQuery(query);
-        lastPrompt = processedQuery;
 
+        // If 'Use RAG' is selected, perform a RAG search and prepend context
+        if (useRAGCheckBox.isSelected()) {
+            if (ragEngine == null) {
+                Msg.showError(this, panel, "Error", "RAG engine is not initialized. Please set the index path in the settings.");
+                return;
+            }
+            try {
+                // Perform RAG search
+                List<RAGEngine.SearchResult> results = ragEngine.search(query, 5); // Retrieve top 5 results
+                if (!results.isEmpty()) {
+                    StringBuilder contextBuilder = new StringBuilder();
+                    contextBuilder.append("<context>\n");
+                    for (RAGEngine.SearchResult result : results) {
+                        contextBuilder.append(result.getContentSnippet()).append("\n");
+                    }
+                    contextBuilder.append("</context>\n");
+
+                    // Prepend context to the processed query
+                    processedQuery = contextBuilder.toString() + processedQuery;
+                }
+            } catch (Exception e) {
+                Msg.showError(this, panel, "Error", "Failed to perform RAG search: " + e.getMessage());
+                return;
+            }
+        }
+        
+        lastPrompt = processedQuery;
+        Console.println("==================\n" + processedQuery + "\n==================");
+        final String prompt = processedQuery;
 
         Task task = new Task("Custom Query", true, true, true) {
             @Override
@@ -802,7 +926,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 
                     // Use LlmApi to send request
                     LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
-                    llmApi.sendRequestAsync(processedQuery, new LlmApi.LlmResponseHandler() {
+                    llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
                             SwingUtilities.invokeLater(() -> {
@@ -815,7 +939,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 String html = markdownToHtml(partialResponse);
                                 responseTextPane.setText(html);
-                                responseTextPane.setCaretPosition(0); // Scroll to top
+                                //responseTextPane.setCaretPosition(0); // Scroll to top
                             });
                         }
 
