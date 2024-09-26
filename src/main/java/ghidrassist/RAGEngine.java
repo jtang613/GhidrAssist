@@ -6,6 +6,7 @@ import org.apache.lucene.document.*;
 import org.apache.lucene.index.*;
 import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
+import org.apache.lucene.search.similarities.BM25Similarity;
 import org.apache.lucene.store.*;
 import org.apache.lucene.util.BytesRef;
 
@@ -104,28 +105,77 @@ public class RAGEngine {
     /**
      * Searches the index based on a text prompt.
      */
+    private static final int MAX_SNIPPET_LENGTH = 500;
+
     public List<SearchResult> search(String queryStr, int maxResults) throws Exception {
         List<SearchResult> results = new ArrayList<>();
 
         try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
             IndexSearcher searcher = new IndexSearcher(reader);
 
-            // Use QueryParser for text search
-            QueryParser parser = new QueryParser("content", analyzer);
-            Query query = parser.parse(QueryParser.escape(queryStr));
+            // Use BM25Similarity for better relevance scoring
+            searcher.setSimilarity(new BM25Similarity());
 
-            TopDocs topDocs = searcher.search(query, maxResults);
+            // Create a multi-field query
+            BooleanQuery.Builder queryBuilder = new BooleanQuery.Builder();
 
-            for (ScoreDoc sd : topDocs.scoreDocs) {
+            // Add content field query with higher boost
+            QueryParser contentParser = new QueryParser("content", analyzer);
+            Query contentQuery = contentParser.parse(QueryParser.escape(queryStr));
+            queryBuilder.add(new BoostQuery(contentQuery, 2.0f), BooleanClause.Occur.SHOULD);
+
+            // Add filename field query
+            QueryParser filenameParser = new QueryParser("filename", analyzer);
+            Query filenameQuery = filenameParser.parse(QueryParser.escape(queryStr));
+            queryBuilder.add(filenameQuery, BooleanClause.Occur.SHOULD);
+
+            // Execute the query
+            TopDocs topDocs = searcher.search(queryBuilder.build(), maxResults * 3); // Fetch more results initially
+
+            // Post-processing for better snippet generation and result ranking
+            List<ScoreDoc> scoreDocs = Arrays.asList(topDocs.scoreDocs);
+            scoreDocs.sort((a, b) -> Float.compare(b.score, a.score)); // Sort by descending score
+
+            Set<String> uniqueFiles = new HashSet<>();
+            for (ScoreDoc sd : scoreDocs) {
                 Document doc = searcher.storedFields().document(sd.doc);
                 String filename = doc.get("filename");
                 String content = doc.get("content");
                 int chunkId = doc.getField("chunk_id").numericValue().intValue();
-                results.add(new SearchResult(filename, content, sd.score, chunkId));
+
+                // Ensure we don't have duplicate files in the results
+                if (!uniqueFiles.contains(filename) && uniqueFiles.size() < maxResults) {
+                    String snippet = generateSnippet(content, queryStr);
+                    results.add(new SearchResult(filename, snippet, sd.score, chunkId));
+                    uniqueFiles.add(filename);
+                }
             }
         }
 
         return results;
+    }
+
+    private String generateSnippet(String content, String query) {
+        // Simple snippet generation: find the first occurrence of any query term
+        String[] queryTerms = query.toLowerCase().split("\\s+");
+        int bestPosition = content.length();
+        for (String term : queryTerms) {
+            int pos = content.toLowerCase().indexOf(term);
+            if (pos != -1 && pos < bestPosition) {
+                bestPosition = pos;
+            }
+        }
+
+        // Extract snippet around the best position
+        int start = Math.max(0, bestPosition - MAX_SNIPPET_LENGTH / 2);
+        int end = Math.min(content.length(), start + MAX_SNIPPET_LENGTH);
+        String snippet = content.substring(start, end);
+
+        // Add ellipsis if necessary
+        if (start > 0) snippet = "..." + snippet;
+        if (end < content.length()) snippet = snippet + "...";
+
+        return snippet;
     }
 
     /**
