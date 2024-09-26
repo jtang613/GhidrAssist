@@ -39,7 +39,6 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
-import com.google.gson.Strictness;
 import com.google.gson.stream.JsonReader;
 import com.vladsch.flexmark.html.HtmlRenderer;
 import com.vladsch.flexmark.parser.Parser;
@@ -539,7 +538,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 
             // Create a JsonReader with lenient mode enabled
             JsonReader jsonReader = new JsonReader(new StringReader(responseJson));
-            jsonReader.setStrictness(Strictness.LENIENT);
+            jsonReader.setLenient(true);
 
             JsonElement jsonElement = gson.fromJson(jsonReader, JsonElement.class);
 
