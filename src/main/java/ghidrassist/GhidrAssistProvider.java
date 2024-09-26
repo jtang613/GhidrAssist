@@ -21,7 +21,6 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
-//import java.awt.*;
 import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
 import java.io.File;
@@ -40,6 +39,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
+import com.google.gson.Strictness;
 import com.google.gson.stream.JsonReader;
 import com.vladsch.flexmark.html.HtmlRenderer;
 import com.vladsch.flexmark.parser.Parser;
@@ -77,16 +77,6 @@ public class GhidrAssistProvider extends ComponentProvider {
     private String lastResponse;
 
     // RAG Tab components
-    private JTextField indexPathField;
-    private JButton setIndexPathButton;
-    private JButton ingestFilesButton;
-    private JTable filesTable;
-    private DefaultTableModel filesTableModel;
-    private JButton deleteFilesButton;
-    private JTextField searchField;
-    private JButton searchButton;
-    private JTextArea resultsArea;
-
     private RAGEngine ragEngine;
     
     // Flexmark parser and renderer
@@ -387,7 +377,7 @@ public class GhidrAssistProvider extends ComponentProvider {
             return;
         }
         try {
-            ArrayList<String> fileNames = (ArrayList<String>) ragEngine.listIndexedFiles();
+            List<String> fileNames = (ArrayList<String>) ragEngine.listIndexedFiles();
             // Update the documentList JList
             documentList.setListData(fileNames.toArray(new String[0]));
         } catch (IOException ex) {
@@ -423,7 +413,7 @@ public class GhidrAssistProvider extends ComponentProvider {
             Msg.showError(this, panel, "Error", "Lucene index path is not set. Please set it in the Settings.");
             return;
         }
-        ArrayList<String> selectedFiles = (ArrayList<String>) documentList.getSelectedValuesList();
+        List<String> selectedFiles = (ArrayList<String>) documentList.getSelectedValuesList();
         if (selectedFiles.isEmpty()) {
             Msg.showInfo(this, panel, "No Selection", "No documents selected for deletion.");
             return;
@@ -502,7 +492,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                     }
 
                     // Send the request with this prompt and function definition
-                    ArrayList<Map<String, Object>> functions = new ArrayList<>();
+                    List<Map<String, Object>> functions = new ArrayList<>();
                     functions.add(functionDefinition);
 
                     // Send the request
@@ -549,7 +539,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 
             // Create a JsonReader with lenient mode enabled
             JsonReader jsonReader = new JsonReader(new StringReader(responseJson));
-            jsonReader.setLenient(true);
+            jsonReader.setStrictness(Strictness.LENIENT);
 
             JsonElement jsonElement = gson.fromJson(jsonReader, JsonElement.class);
 
@@ -580,7 +570,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                         }
 
                         // Only process actions that are in our function templates
-                        ArrayList<String> functionNames = new ArrayList<>();
+                        List<String> functionNames = new ArrayList<>();
                         for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
                             @SuppressWarnings("unchecked")
                             Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");

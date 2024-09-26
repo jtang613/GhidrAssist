@@ -2,18 +2,12 @@ package ghidrassist;
 
 import docking.DialogComponentProvider;
 import ghidra.framework.preferences.Preferences;
-import ghidra.util.layout.PairLayout;
-
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
-import java.awt.event.ActionEvent;
-import java.awt.event.ActionListener;
 import java.io.File;
 import java.lang.reflect.Type;
 import java.util.List;
-import java.util.ArrayList;
-
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 

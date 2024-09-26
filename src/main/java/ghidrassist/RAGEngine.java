@@ -45,24 +45,55 @@ public class RAGEngine {
     }
 
     /**
-     * Ingests and indexes a list of files.
+     * Ingests and indexes a list of files with chunked content.
      */
     public void ingestDocuments(List<File> files) throws IOException {
         for (File file : files) {
             String content = readFileContent(file);
             if (content != null && !content.isEmpty()) {
-                Document doc = new Document();
-                doc.add(new StringField("filename", file.getName(), Field.Store.YES));
-                doc.add(new TextField("content", content, Field.Store.YES));
-                // You can add more fields if needed
-                indexWriter.addDocument(doc);
+                List<String> chunks = chunkContent(content);
+                for (int i = 0; i < chunks.size(); i++) {
+                    Document doc = new Document();
+                    doc.add(new StringField("filename", file.getName(), Field.Store.YES));
+                    doc.add(new IntPoint("chunk_id", i)); // Indexed but not stored
+                    doc.add(new StoredField("chunk_id", i)); // Stored for retrieval
+                    doc.add(new TextField("content", chunks.get(i), Field.Store.YES));
+                    indexWriter.addDocument(doc);
+                }
             }
         }
         indexWriter.commit();
     }
 
     /**
-     * Deletes a document from the index by file name.
+     * Splits content into chunks based on the specified criteria.
+     */
+    private List<String> chunkContent(String content) {
+        List<String> chunks = new ArrayList<>();
+        int start = 0;
+        while (start < content.length()) {
+            int end = start + 1000;
+            if (end >= content.length()) {
+                chunks.add(content.substring(start));
+                break;
+            }
+            // Look for the next "\n\n" after position end
+            int splitPos = content.indexOf("\n\n", end);
+            if (splitPos == -1) {
+                // No more "\n\n", take the rest of the content
+                chunks.add(content.substring(start));
+                break;
+            } else {
+                // Include up to splitPos + 2 (length of "\n\n")
+                chunks.add(content.substring(start, splitPos + 2));
+                start = splitPos + 2;
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * Deletes a document and all its related chunks from the index by file name.
      */
     public void deleteDocument(String fileName) throws IOException {
         Term term = new Term("filename", fileName);
@@ -86,10 +117,11 @@ public class RAGEngine {
             TopDocs topDocs = searcher.search(query, maxResults);
 
             for (ScoreDoc sd : topDocs.scoreDocs) {
-                Document doc = searcher.doc(sd.doc);
+                Document doc = searcher.storedFields().document(sd.doc);
                 String filename = doc.get("filename");
                 String content = doc.get("content");
-                results.add(new SearchResult(filename, content, sd.score));
+                int chunkId = doc.getField("chunk_id").numericValue().intValue();
+                results.add(new SearchResult(filename, content, sd.score, chunkId));
             }
         }
 
@@ -121,6 +153,7 @@ public class RAGEngine {
 
         return fileNames.stream().distinct().collect(Collectors.toList());
     }
+
 
     /**
      * Closes the index writer and directory.
@@ -157,11 +190,13 @@ public class RAGEngine {
         private String fileName;
         private String contentSnippet;
         private float score;
+        private int chunkId;
 
-        public SearchResult(String fileName, String contentSnippet, float score) {
+        public SearchResult(String fileName, String contentSnippet, float score, int chunkId) {
             this.fileName = fileName;
             this.contentSnippet = contentSnippet;
             this.score = score;
+            this.chunkId = chunkId;
         }
 
         public String getFileName() {
@@ -174,6 +209,10 @@ public class RAGEngine {
 
         public float getScore() {
             return score;
+        }
+
+        public int getChunkId() {
+            return chunkId;
         }
     }
 }
