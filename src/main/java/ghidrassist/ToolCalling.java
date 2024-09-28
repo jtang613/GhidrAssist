@@ -172,42 +172,56 @@ public class ToolCalling {
     }
 
     public static void handle_retype_variable(Program program, Address address, String funcName, String varName, String newTypeStr) {
-    	int transaction = program.startTransaction("Retype Variable");
+        int transaction = program.startTransaction("Retype Variable");
         boolean success = false;
-    	try {
-	        Function function = program.getFunctionManager().getFunctionContaining(address);
-	        if (function == null) {
-	            Msg.showError(null, null, "Retype Variable Error", "Function not found: " + funcName);
-	            return;
-	        }
-	        Variable[] variables = function.getAllVariables();
-	        for (Variable var : variables) {
-	            if (var.getName().equals(varName)) {
+        try {
+            Function function = program.getFunctionManager().getFunctionContaining(address);
+            if (function == null) {
+                Msg.showError(null, null, "Retype Variable Error", "Function not found: " + funcName);
+                return;
+            }
+            Variable[] variables = function.getAllVariables();
+            for (Variable var : variables) {
+                if (var.getName().equals(varName)) {
                     DataTypeManager dtm = program.getDataTypeManager();
-                    DataType newType = dtm.getDataType(new CategoryPath("/"), newTypeStr);
-                    if (newType == null) {
-                        newType = parseDataType(newTypeStr, dtm);
+                    DataType newType = getDataType(newTypeStr, dtm, program);
+                    if (newType != null) {
+                        var.setDataType(newType, true, true, SourceType.USER_DEFINED);
+                        success = true;
+                        break;
+                    } else {
+                        Msg.showError(null, null, "Retype Variable Error", "Failed to parse data type: " + newTypeStr);
+                        return;
                     }
-                    var.setDataType(newType, true, true, SourceType.USER_DEFINED);
-                    success = true;
-	            }
-	        }
-	        if (success == false) {
-	        	Msg.showError(null, null, "Retype Variable Error", "Variable not found: " + varName);
-	        }
+                }
+            }
+            if (!success) {
+                Msg.showError(null, null, "Retype Variable Error", "Variable not found: " + varName);
+            }
         } catch (Exception e) {
             Msg.showError(null, null, "Retype Variable Error", "Failed to retype variable: " + e.getMessage());
-            return;
-	    } finally {
-	        program.endTransaction(transaction, success);
-	    }
+        } finally {
+            program.endTransaction(transaction, success);
+        }
     }
 
-    private static DataType parseDataType(String dataTypeStr, DataTypeManager dtm) throws Exception {
-        // Use Ghidra's parser to parse the data type string
-        DataTypeParser parser = new DataTypeParser(dtm, dtm, null, null);
+    private static DataType getDataType(String dataTypeStr, DataTypeManager dtm, Program program) {
+        // First, try to get the data type directly
+        DataType dataType = dtm.getDataType(new CategoryPath("/"), dataTypeStr);
         
-        DataType dataType = parser.parse(dataTypeStr);
+        // If not found, try to parse it
+        if (dataType == null) {
+            try {
+            	DataTypeParser parser = new DataTypeParser(dtm, program.getDataTypeManager(), null, DataTypeParser.AllowedDataTypes.ALL);
+//                DataTypeParser parser = new DataTypeParser(dtm, program.getDataTypeManager(), 
+//                                                           DataTypeParser.AllowedDataTypes.ALL, 
+//                                                           program.getDataTypeManager());
+                dataType = parser.parse(dataTypeStr);
+            } catch (Exception e) {
+                Msg.error(null, "Failed to parse data type: " + dataTypeStr, e);
+            }
+        }
+        
         return dataType;
     }
 

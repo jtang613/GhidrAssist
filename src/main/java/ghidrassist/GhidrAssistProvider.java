@@ -62,6 +62,10 @@ public class GhidrAssistProvider extends ComponentProvider {
     private JEditorPane responseTextPane;
     private JTextArea queryTextArea;
     private JCheckBox useRAGCheckBox;
+    private StringBuilder conversationHistory;
+    private StringBuilder currentResponse;
+    private Timer updateTimer;
+    private static final int UPDATE_DELAY = 500; // milliseconds
     
     // Actions tab components
     private JTable actionsTable;
@@ -100,7 +104,14 @@ public class GhidrAssistProvider extends ComponentProvider {
         options.set(HtmlRenderer.SOFT_BREAK, "<br />\n");
         markdownParser = Parser.builder(options).build();
         htmlRenderer = HtmlRenderer.builder(options).build();
+        
+        conversationHistory = new StringBuilder();
+        currentResponse = new StringBuilder();
 
+        // Initialize update timer
+        updateTimer = new Timer(UPDATE_DELAY, e -> updateConversationDisplay());
+        updateTimer.setRepeats(false);
+        
         buildPanel();
 
         setVisible(true);
@@ -228,6 +239,8 @@ public class GhidrAssistProvider extends ComponentProvider {
             responseTextPane.setText("");
             queryTextArea.setText("");
             addHintTextToQueryTextArea(); // Reset hint text
+            conversationHistory.setLength(0);
+            updateConversationDisplay();
         });
 
         return queryPanel;
@@ -674,27 +687,27 @@ public class GhidrAssistProvider extends ComponentProvider {
                 // Call the appropriate handler
                 switch (action) {
                     case "rename_function":
-                        String newName = arguments.get("new_name").getAsString();
+                        String newName = arguments.get("new_name").getAsString().strip();
                         ToolCalling.handle_rename_function(program, currentAddress, newName);
                         model.setValueAt("Applied", row, 3);
                         break;
                     case "rename_variable":
-                        String funcName = arguments.get("func_name").getAsString();
-                        String varName = arguments.get("var_name").getAsString();
-                        String newVarName = arguments.get("new_name").getAsString();
+                        String funcName = arguments.get("func_name").getAsString().strip();
+                        String varName = arguments.get("var_name").getAsString().strip();
+                        String newVarName = arguments.get("new_name").getAsString().strip();
                         ToolCalling.handle_rename_variable(program, currentAddress, funcName, varName, newVarName);
                         model.setValueAt("Applied", row, 3);
                         break;
                     case "retype_variable":
-                        funcName = arguments.get("func_name").getAsString();
-                        varName = arguments.get("var_name").getAsString();
-                        String newType = arguments.get("new_type").getAsString();
+                        funcName = arguments.get("func_name").getAsString().strip();
+                        varName = arguments.get("var_name").getAsString().strip();
+                        String newType = arguments.get("new_type").getAsString().strip();
                         ToolCalling.handle_retype_variable(program, currentAddress, funcName, varName, newType);
                         model.setValueAt("Applied", row, 3);
                         break;
                     case "auto_create_struct":
-                        funcName = arguments.get("func_name").getAsString();
-                        varName = arguments.get("var_name").getAsString();
+                        funcName = arguments.get("func_name").getAsString().strip();
+                        varName = arguments.get("var_name").getAsString().strip();
                         ToolCalling.handle_auto_create_struct(program, currentAddress, funcName, varName);
                         model.setValueAt("Applied", row, 3);
                         break;
@@ -891,9 +904,14 @@ public class GhidrAssistProvider extends ComponentProvider {
                     StringBuilder contextBuilder = new StringBuilder();
                     contextBuilder.append("<context>\n");
                     for (RAGEngine.SearchResult result : results) {
-                        contextBuilder.append(result.getContentSnippet()).append("\n");
+                    	contextBuilder.append("<result>\n");
+                    	contextBuilder.append("<file>" + result.getFileName() + "</file>").append("\n");
+                    	contextBuilder.append("<chunkid>" + result.getChunkId() + "</chunkid>").append("\n");
+                    	contextBuilder.append("<score>" + result.getScore() + "</score>").append("\n");
+                        contextBuilder.append("<content>\n" + result.getContentSnippet() + "\n</content>").append("\n");
+                    	contextBuilder.append("\n</result>\n");
                     }
-                    contextBuilder.append("</context>\n");
+                    contextBuilder.append("\n</context>\n");
 
                     // Prepend context to the processed query
                     processedQuery = contextBuilder.toString() + processedQuery;
@@ -905,14 +923,16 @@ public class GhidrAssistProvider extends ComponentProvider {
         }
         
         lastPrompt = processedQuery;
-        Console.println("==================\n" + processedQuery + "\n==================");
         final String prompt = processedQuery;
+
+        // Add user query to conversation history
+        conversationHistory.append("**User**:\n").append(prompt).append("\n\n");
+        currentResponse.setLength(0);
 
         Task task = new Task("Custom Query", true, true, true) {
             @Override
             public void run(TaskMonitor monitor) {
                 try {
-
                     // Use LlmApi to send request
                     LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
@@ -925,31 +945,28 @@ public class GhidrAssistProvider extends ComponentProvider {
 
                         @Override
                         public void onUpdate(String partialResponse) {
-                            SwingUtilities.invokeLater(() -> {
-                                String html = markdownToHtml(partialResponse);
-                                responseTextPane.setText(html);
-                                //responseTextPane.setCaretPosition(0); // Scroll to top
-                            });
+                            currentResponse.append(partialResponse);
+                            scheduleUpdate();
                         }
 
                         @Override
                         public void onComplete(String fullResponse) {
                             SwingUtilities.invokeLater(() -> {
                                 lastResponse = fullResponse;
-                                String html = markdownToHtml(fullResponse);
-                                responseTextPane.setText(html);
-                                responseTextPane.setCaretPosition(0); // Scroll to top
+                                conversationHistory.append("**Assistant**:\n").append(fullResponse).append("\n\n");
+                                currentResponse.setLength(0);
+                                updateConversationDisplay();
                             });
                         }
 
                         @Override
                         public void onError(Throwable error) {
                             SwingUtilities.invokeLater(() -> {
-                                responseTextPane.setText("An error occurred: " + error.getMessage());
+                                conversationHistory.append("**Error**:\n").append(error.getMessage()).append("\n\n");
+                                updateConversationDisplay();
                             });
                         }
                     });
-
 
                 } catch (Exception e) {
                     Msg.showError(getClass(), panel, "Error", "Failed to perform query: " + e.getMessage());
@@ -960,6 +977,20 @@ public class GhidrAssistProvider extends ComponentProvider {
         new TaskLauncher(task, plugin.getTool().getToolFrame());
     }
 
+    private void scheduleUpdate() {
+        if (!updateTimer.isRunning()) {
+            updateTimer.restart();
+        }
+    }
+
+    private void updateConversationDisplay() {
+        String fullConversation = conversationHistory.toString() + "**Assistant**:\n" + currentResponse.toString();
+        String html = markdownToHtml(fullConversation);
+        responseTextPane.setText(html);
+        responseTextPane.setCaretPosition(responseTextPane.getDocument().getLength());
+    }
+
+    
     private String processMacrosInQuery(String query) {
         // Replace macros with actual code/data
         // Handle #line, #func, #addr, #range(start,end)
@@ -1204,5 +1235,4 @@ public class GhidrAssistProvider extends ComponentProvider {
             Msg.showError(getClass(), panel, "Error", "No explain response to provide feedback on.");
         }
     }
-
 }
