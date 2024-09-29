@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -51,6 +52,9 @@ public class GhidrAssistProvider extends ComponentProvider {
     private JTabbedPane tabbedPane;
     private GhidrAssistPlugin plugin;
 
+    // For stopping running queries
+    private AtomicBoolean isQueryRunning = new AtomicBoolean(false);
+    
     // Components for Explain tab
     private JTextField offsetField;
     private JEditorPane explainTextPane;
@@ -64,6 +68,7 @@ public class GhidrAssistProvider extends ComponentProvider {
     private JCheckBox useRAGCheckBox;
     private StringBuilder conversationHistory;
     private StringBuilder currentResponse;
+    private JButton submitButton;
     private Timer updateTimer;
     private static final int UPDATE_DELAY = 500; // milliseconds
     
@@ -222,7 +227,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, responseScrollPane, queryScrollPane);
         splitPane.setResizeWeight(0.9);
 
-        JButton submitButton = new JButton("Submit");
+        submitButton = new JButton("Submit");
         JButton clearButton = new JButton("Clear");
 
         JPanel buttonPanel = new JPanel();
@@ -339,7 +344,6 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         return actionsPanel;
     }
-
 
     private JPanel createRAGManagementTab() {
         JPanel ragPanel = new JPanel(new BorderLayout());
@@ -458,8 +462,17 @@ public class GhidrAssistProvider extends ComponentProvider {
             }
         }
     }
-
+    
     private void onAnalyzeFunctionClicked() {
+        if (isQueryRunning.get()) {
+            // If the query is running, stop it
+            isQueryRunning.set(false);
+            return;
+        }
+        // Set the button to "Stop" and set the query as running
+        analyzeFunctionButton.setText("Stop");
+        isQueryRunning.set(true);
+        
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
             Msg.showInfo(getClass(), panel, "No Function", "No function at current location.");
@@ -524,6 +537,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 // Parse the response and populate the table
                                 parseAndDisplayActions(fullResponse);
+                                analyzeFunctionButton.setText("Analyze Function");
+                                isQueryRunning.set(false);
                             });
                         }
 
@@ -532,7 +547,14 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                             	error.printStackTrace();
                                 Msg.showError(this, panel, "Error", "An error occurred: " + error.getMessage());
+                                analyzeFunctionButton.setText("Analyze Function");
+                                isQueryRunning.set(false);
                             });
+                        }
+                        
+                        @Override
+                        public boolean shouldContinue() {
+                            return isQueryRunning.get();  // Only continue if query is running
                         }
                     });
                 }
@@ -688,29 +710,49 @@ public class GhidrAssistProvider extends ComponentProvider {
                 // Call the appropriate handler
                 switch (action) {
                     case "rename_function":
-                        String newName = arguments.get("new_name").getAsString().strip();
-                        ToolCalling.handle_rename_function(program, currentAddress, newName);
-                        model.setValueAt("Applied", row, 3);
+                    	try {
+	                        String newName = arguments.get("new_name").getAsString().strip();
+	                        ToolCalling.handle_rename_function(program, currentAddress, newName);
+	                        model.setValueAt("Applied", row, 3);
+                    	}
+                    	catch (Exception e) {
+                    		model.setValueAt("Failed: " + e.getMessage(), row, 3);
+                    	}
                         break;
                     case "rename_variable":
-                        String funcName = arguments.get("func_name").getAsString().strip();
-                        String varName = arguments.get("var_name").getAsString().strip();
-                        String newVarName = arguments.get("new_name").getAsString().strip();
-                        ToolCalling.handle_rename_variable(program, currentAddress, funcName, varName, newVarName);
-                        model.setValueAt("Applied", row, 3);
+                    	try {
+	                        String funcName = arguments.get("func_name").getAsString().strip();
+	                        String varName = arguments.get("var_name").getAsString().strip();
+	                        String newVarName = arguments.get("new_name").getAsString().strip();
+	                        ToolCalling.handle_rename_variable(program, currentAddress, funcName, varName, newVarName);
+	                        model.setValueAt("Applied", row, 3);
+                    	}
+                    	catch (Exception e) {
+                    		model.setValueAt("Failed: " + e.getMessage(), row, 3);
+                    	}
                         break;
                     case "retype_variable":
-                        funcName = arguments.get("func_name").getAsString().strip();
-                        varName = arguments.get("var_name").getAsString().strip();
-                        String newType = arguments.get("new_type").getAsString().strip();
-                        ToolCalling.handle_retype_variable(program, currentAddress, funcName, varName, newType);
-                        model.setValueAt("Applied", row, 3);
+                    	try {
+	                        String funcName = arguments.get("func_name").getAsString().strip();
+	                        String varName = arguments.get("var_name").getAsString().strip();
+	                        String newType = arguments.get("new_type").getAsString().strip();
+	                        ToolCalling.handle_retype_variable(program, currentAddress, funcName, varName, newType);
+	                        model.setValueAt("Applied", row, 3);
+                    	}
+                    	catch (Exception e) {
+                    		model.setValueAt("Failed: " + e.getMessage(), row, 3);
+                    	}
                         break;
                     case "auto_create_struct":
-                        funcName = arguments.get("func_name").getAsString().strip();
-                        varName = arguments.get("var_name").getAsString().strip();
-                        ToolCalling.handle_auto_create_struct(program, currentAddress, funcName, varName);
-                        model.setValueAt("Applied", row, 3);
+                    	try {
+	                        String funcName = arguments.get("func_name").getAsString().strip();
+	                        String varName = arguments.get("var_name").getAsString().strip();
+	                        ToolCalling.handle_auto_create_struct(program, currentAddress, funcName, varName);
+	                        model.setValueAt("Applied", row, 3);
+                    	}
+                    	catch (Exception e) {
+                    		model.setValueAt("Failed: " + e.getMessage(), row, 3);
+                    	}
                         break;
                     default:
                         model.setValueAt("Failed: Unknown action", row, 3);
@@ -722,6 +764,15 @@ public class GhidrAssistProvider extends ComponentProvider {
 
 
     private void onExplainFunctionClicked() {
+        if (isQueryRunning.get()) {
+            // If the query is running, stop it
+            isQueryRunning.set(false);
+            return;
+        }
+        // Set the button to "Stop" and set the query as running
+        explainFunctionButton.setText("Stop");
+        isQueryRunning.set(true);
+        
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
             Msg.showInfo(getClass(), panel, "No Function", "No function at current location.");
@@ -775,6 +826,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                                 String html = markdownToHtml(fullResponse);
                                 explainTextPane.setText(html);
                                 explainTextPane.setCaretPosition(0); // Scroll to top
+                                explainFunctionButton.setText("Explain Function");
+                                isQueryRunning.set(false);
                             });
                         }
 
@@ -782,7 +835,14 @@ public class GhidrAssistProvider extends ComponentProvider {
                         public void onError(Throwable error) {
                             SwingUtilities.invokeLater(() -> {
                                 explainTextPane.setText("An error occurred: " + error.getMessage());
+                                explainFunctionButton.setText("Explain Function");
+                                isQueryRunning.set(false);
                             });
+                        }
+                        
+                        @Override
+                        public boolean shouldContinue() {
+                            return isQueryRunning.get();  // Only continue if query is running
                         }
                     });
 
@@ -797,6 +857,15 @@ public class GhidrAssistProvider extends ComponentProvider {
     }
 
     private void onExplainLineClicked() {
+        if (isQueryRunning.get()) {
+            // If the query is running, stop it
+            isQueryRunning.set(false);
+            return;
+        }
+        // Set the button to "Stop" and set the query as running
+        explainLineButton.setText("Stop");
+        isQueryRunning.set(true);
+        
         Address currentAddress = plugin.getCurrentAddress();
         if (currentAddress == null) {
             Msg.showInfo(getClass(), panel, "No Address", "No address at current location.");
@@ -859,6 +928,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                                 String html = markdownToHtml(fullResponse);
                                 explainTextPane.setText(html);
                                 explainTextPane.setCaretPosition(0); // Scroll to top
+                                explainLineButton.setText("Explain Line");
+                                isQueryRunning.set(false);
                             });
                         }
 
@@ -866,7 +937,14 @@ public class GhidrAssistProvider extends ComponentProvider {
                         public void onError(Throwable error) {
                             SwingUtilities.invokeLater(() -> {
                                 explainTextPane.setText("An error occurred: " + error.getMessage());
+                                explainLineButton.setText("Explain Line");
+                                isQueryRunning.set(false);
                             });
+                        }
+                        
+                        @Override
+                        public boolean shouldContinue() {
+                            return isQueryRunning.get();  // Only continue if query is running
                         }
                     });
 
@@ -881,6 +959,15 @@ public class GhidrAssistProvider extends ComponentProvider {
     }
 
     private void onQuerySubmitClicked() {
+        if (isQueryRunning.get()) {
+            // If the query is running, stop it
+            isQueryRunning.set(false);
+            return;
+        }
+        // Set the button to "Stop" and set the query as running
+        submitButton.setText("Stop");
+        isQueryRunning.set(true);
+        
         String query = queryTextArea.getText();
 
         // Check if the query is just the hint text
@@ -944,11 +1031,19 @@ public class GhidrAssistProvider extends ComponentProvider {
                             });
                         }
 
+                        private String previousResponseChunk = "";
+
                         @Override
                         public void onUpdate(String partialResponse) {
-                            currentResponse.append(partialResponse);
-                            scheduleUpdate();
+                            // Append only the new portion of the response
+                            if (!partialResponse.equals(previousResponseChunk)) {
+                                String newChunk = partialResponse.substring(previousResponseChunk.length());
+                                currentResponse.append(newChunk);
+                                previousResponseChunk = partialResponse;
+                                scheduleUpdate();
+                            }
                         }
+
 
                         @Override
                         public void onComplete(String fullResponse) {
@@ -957,6 +1052,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                                 conversationHistory.append("**Assistant**:\n").append(fullResponse).append("\n\n");
                                 currentResponse.setLength(0);
                                 updateConversationDisplay();
+                                submitButton.setText("Submit");
+                                isQueryRunning.set(false);
                             });
                         }
 
@@ -965,6 +1062,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 conversationHistory.append("**Error**:\n").append(error.getMessage()).append("\n\n");
                                 updateConversationDisplay();
+                                submitButton.setText("Submit");
+                                isQueryRunning.set(false);
                             });
                         }
                     });

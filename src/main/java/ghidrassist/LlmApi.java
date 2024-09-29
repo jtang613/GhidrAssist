@@ -5,6 +5,8 @@ import com.launchableinc.openai.completion.chat.*;
 import com.launchableinc.openai.service.OpenAiService;
 import ghidra.util.Msg;
 import io.reactivex.Flowable;
+import io.reactivex.schedulers.Schedulers;
+
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -76,6 +78,9 @@ public class LlmApi {
                 throw new CompletionException(e);
             }
         }).thenAccept(chatCompletionResult -> {
+            if (!responseHandler.shouldContinue()) {  // Check if the process should continue after receiving the result
+                return;
+            }
             if (chatCompletionResult != null && !chatCompletionResult.getChoices().isEmpty()) {
                 ChatMessage message = chatCompletionResult.getChoices().get(0).getMessage();
                 if (message.getFunctionCall() != null) {
@@ -125,13 +130,18 @@ public class LlmApi {
 
         flowable.subscribe(
                 chunk -> {
-                    ChatMessage delta = chunk.getChoices().get(0).getMessage();
-                    if (delta.getContent() != null) {
-                        if (isFirst.getAndSet(false)) {
-                            responseHandler.onStart();
-                        }
-                        responseBuilder.append(delta.getContent());
-                        responseHandler.onUpdate(responseBuilder.toString());
+                	if (responseHandler.shouldContinue()) {
+	                    ChatMessage delta = chunk.getChoices().get(0).getMessage();
+	                    if (delta.getContent() != null) {
+	                        if (isFirst.getAndSet(false)) {
+	                            responseHandler.onStart();
+	                        }
+	                        responseBuilder.append(delta.getContent());
+	                        responseHandler.onUpdate(responseBuilder.toString());
+	                    }
+                	} else {
+                        // Query was cancelled, stop further execution
+                        flowable.unsubscribeOn(Schedulers.io());
                     }
                 },
                 error -> {
@@ -149,5 +159,9 @@ public class LlmApi {
         void onUpdate(String partialResponse);
         void onComplete(String fullResponse);
         void onError(Throwable error);
+        // This method checks if the process should continue or stop
+        default boolean shouldContinue() {
+            return true; // Override this method for cancellation logic
+        }
     }
 }
