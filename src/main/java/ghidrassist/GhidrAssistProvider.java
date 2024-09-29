@@ -469,9 +469,11 @@ public class GhidrAssistProvider extends ComponentProvider {
             isQueryRunning.set(false);
             return;
         }
-        // Set the button to "Stop" and set the query as running
-        analyzeFunctionButton.setText("Stop");
-        isQueryRunning.set(true);
+        else {
+	        // Set the button to "Stop" and set the query as running
+	        analyzeFunctionButton.setText("Stop");
+	        isQueryRunning.set(true);
+        }
         
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
@@ -762,16 +764,17 @@ public class GhidrAssistProvider extends ComponentProvider {
         }
     }
 
-
     private void onExplainFunctionClicked() {
         if (isQueryRunning.get()) {
             // If the query is running, stop it
             isQueryRunning.set(false);
             return;
         }
-        // Set the button to "Stop" and set the query as running
-        explainFunctionButton.setText("Stop");
-        isQueryRunning.set(true);
+        else {
+            // Set the button to "Stop" and set the query as running
+            explainFunctionButton.setText("Stop");
+            isQueryRunning.set(true);
+        }
         
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
@@ -862,9 +865,11 @@ public class GhidrAssistProvider extends ComponentProvider {
             isQueryRunning.set(false);
             return;
         }
-        // Set the button to "Stop" and set the query as running
-        explainLineButton.setText("Stop");
-        isQueryRunning.set(true);
+        else {
+            // Set the button to "Stop" and set the query as running
+            explainLineButton.setText("Stop");
+            isQueryRunning.set(true);
+        }
         
         Address currentAddress = plugin.getCurrentAddress();
         if (currentAddress == null) {
@@ -964,9 +969,11 @@ public class GhidrAssistProvider extends ComponentProvider {
             isQueryRunning.set(false);
             return;
         }
-        // Set the button to "Stop" and set the query as running
-        submitButton.setText("Stop");
-        isQueryRunning.set(true);
+        else {
+	        // Set the button to "Stop" and set the query as running
+	        submitButton.setText("Stop");
+	        isQueryRunning.set(true);
+        }
         
         String query = queryTextArea.getText();
 

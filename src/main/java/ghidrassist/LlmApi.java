@@ -122,6 +122,10 @@ public class LlmApi {
                 //.temperature(0.7)
                 .stream(true) // Enable streaming
                 .build();
+        
+        if(!responseHandler.shouldContinue()) {
+        	return;
+        }
 
         Flowable<ChatCompletionChunk> flowable = service.streamChatCompletion(chatCompletionRequest);
 
