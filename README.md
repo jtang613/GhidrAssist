@@ -36,8 +36,8 @@ Future Roadmap:
 * Open GhidrAssist with the GhidrAssist option in the Windows menu and start exploring.
 
 ## Screenshot
-![Screenshot](https://raw.githubusercontent.com/jtang613/GhidrAssist/refs/heads/master/res/screenshot1.png)
-![Screenshots](/res/screenshot1.png)
+![Screenshot](/res/screenshot1.png)
+![Screenshots](/res/screenshots_anim.gif)
 
 ## Homepage
 https://github.com/jtang613/GhidrAssist

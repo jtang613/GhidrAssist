@@ -50,14 +50,13 @@ public class ToolCalling {
 
     static {
         ACTION_PROMPTS.put("rename_function",
-            "Use the 'rename_function' tool:\n```\n{code}\n```\n" +
-            "Examine the code functionality, strings, and log parameters.\n" +
+			"Use the 'rename_function' tool:\n```\n{code}\n```\n" +
+            "Examine the code functionality, strings and log parameters.\n" +
             "If you detect C++ Super::Derived::Method or Class::Method style class names, recommend that name first.\n" +
-            "CREATE A FUNCTION CALL LIST WITH SUGGESTIONS FOR THREE POSSIBLE FUNCTION NAMES " +
+            "CREATE A JSON TOOL_CALL LIST WITH SUGGESTIONS FOR THREE POSSIBLE FUNCTION NAMES " +
             "THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT THE CODE ABOVE DOES.\n" +
-            "RESPOND ONLY WITH A FUNCTION CALL FORMATTED AS: [\"tool_calls\": {\"name\": \"rename_function\", \"type\": \"function\", \"arguments\": {\"new_name\": \"proposed name\"}}, <additional entries>] " +
-            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS. DO NOT INCLUDE ANY OTHER TEXT.\n" +
-            "ONLY RESPOND WITH 'rename_function' CALLS."
+            "RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETER (new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +
+            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n"
         );
         ACTION_PROMPTS.put("rename_variable",
             "Use the 'rename_variable' tool:\n```\n{code}\n```\n" +

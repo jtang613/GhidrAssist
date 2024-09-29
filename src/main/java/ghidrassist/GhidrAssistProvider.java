@@ -530,6 +530,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                         @Override
                         public void onError(Throwable error) {
                             SwingUtilities.invokeLater(() -> {
+                            	error.printStackTrace();
                                 Msg.showError(this, panel, "Error", "An error occurred: " + error.getMessage());
                             });
                         }

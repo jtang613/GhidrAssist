@@ -16,14 +16,15 @@ public class LlmApi {
     private APIProvider provider;
 
     private final String SYSTEM_PROMPT =  
-			"You are a professional software reverse engineer specializing in cybersecurity. " +
-            "You are intimately familiar with x86_64, ARM, PPC and MIPS architectures. " +
-            "You are an expert C and C++ developer. " +
-            "You always respond to queries in a structured format using Markdown styling for headings and lists. " +
-            "You format code blocks using back-tick code-fencing.";
+			"    You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
+			+ "    familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
+			+ "    You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
+			+ "    such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.\n"
+			+ "    You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
+			+ "    You format code blocks using back-tick code-fencing.\\n";
     private final String FUNCTION_PROMPT = "USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.";
     private final String FORMAT_PROMPT = 
-    "The output MUST strictly adhere to the following JSON format, and NO other text MUST be included.\n" +
+    "The output MUST strictly adhere to the following JSON format, do not include any other text.\n" +
     "The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.\n" +
     "```\n" +
     "{\n" +
@@ -113,7 +114,7 @@ public class LlmApi {
                 .model(this.provider.getModel())
                 .messages(messages)
                 .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
-                .temperature(0.7)
+                //.temperature(0.7)
                 .stream(true) // Enable streaming
                 .build();
 

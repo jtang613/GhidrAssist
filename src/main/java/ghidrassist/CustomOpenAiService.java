@@ -4,10 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.launchableinc.openai.client.OpenAiApi;
 import com.launchableinc.openai.service.OpenAiService;
-import okhttp3.Interceptor;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
+import okhttp3.*;
 import retrofit2.Retrofit;
 import retrofit2.adapter.rxjava2.RxJava2CallAdapterFactory;
 import retrofit2.converter.jackson.JacksonConverterFactory;
@@ -19,23 +16,10 @@ public class CustomOpenAiService {
 
     private final OpenAiService openAiService;
 
-    /**
-     * Constructor that accepts the API key and API host.
-     *
-     * @param apiKey  Your OpenAI API key.
-     * @param apiHost The API host URL (e.g., "https://api.openai.com/").
-     */
     public CustomOpenAiService(String apiKey, String apiHost) {
-        this(apiKey, apiHost, Duration.ofSeconds(60));
+        this(apiKey, apiHost, Duration.ofSeconds(240)); // Default timeout of 30 seconds
     }
 
-    /**
-     * Constructor that accepts the API key, API host, and timeout duration.
-     *
-     * @param apiKey  Your OpenAI API key.
-     * @param apiHost The API host URL.
-     * @param timeout The timeout duration for API calls.
-     */
     public CustomOpenAiService(String apiKey, String apiHost, Duration timeout) {
         OkHttpClient client = buildClient(apiKey, timeout);
         Retrofit retrofit = buildRetrofit(client, apiHost);
@@ -44,27 +28,15 @@ public class CustomOpenAiService {
         this.openAiService = new OpenAiService(api);
     }
 
-    /**
-     * Builds a custom OkHttpClient with the API key, timeout, and disabled SSL certificate validation.
-     *
-     * @param apiKey  Your OpenAI API key.
-     * @param timeout The timeout duration for API calls.
-     * @return Configured OkHttpClient instance.
-     */
     private OkHttpClient buildClient(String apiKey, Duration timeout) {
         try {
-            // Create a trust manager that does not validate certificate chains
-            final TrustManager[] trustAllCerts = new TrustManager[]{
+            TrustManager[] trustAllCerts = new TrustManager[]{
                 new X509TrustManager() {
                     @Override
-                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) {
-                        // Do nothing: Trust all client certificates
-                    }
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) {}
 
                     @Override
-                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) {
-                        // Do nothing: Trust all server certificates
-                    }
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) {}
 
                     @Override
                     public java.security.cert.X509Certificate[] getAcceptedIssuers() {
@@ -73,27 +45,26 @@ public class CustomOpenAiService {
                 }
             };
 
-            // Install the all-trusting trust manager
-            final SSLContext sslContext = SSLContext.getInstance("SSL");
+            SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
 
-            // Create an SSL socket factory with our all-trusting manager
-            final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
-
-            OkHttpClient.Builder builder = new OkHttpClient.Builder();
-            builder.callTimeout(timeout)
-                    .sslSocketFactory(sslSocketFactory, (X509TrustManager) trustAllCerts[0])
-                    .hostnameVerifier((hostname, session) -> true) // Trust all hostnames
-                    .addInterceptor(new AuthenticationInterceptor(apiKey));
+            OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .sslSocketFactory(sslContext.getSocketFactory(), (X509TrustManager) trustAllCerts[0])
+                .hostnameVerifier((hostname, session) -> true)
+                .addInterceptor(new AuthenticationInterceptor(apiKey))
+                .connectTimeout(timeout)
+                .readTimeout(timeout)
+                .writeTimeout(timeout)
+                .retryOnConnectionFailure(true)
+                .addInterceptor(new RetryInterceptor(3)); // Add retry interceptor
 
             return builder.build();
         } catch (Exception e) {
-            throw new RuntimeException("Failed to create a custom OkHttpClient with disabled SSL validation", e);
+            throw new RuntimeException("Failed to create a custom OkHttpClient", e);
         }
     }
     
     private Retrofit buildRetrofit(OkHttpClient client, String apiHost) {
-        // Create a custom ObjectMapper
         ObjectMapper objectMapper = new ObjectMapper()
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
 
@@ -101,21 +72,14 @@ public class CustomOpenAiService {
                 .baseUrl(apiHost)
                 .client(client)
                 .addCallAdapterFactory(RxJava2CallAdapterFactory.create())
-                .addConverterFactory(JacksonConverterFactory.create(objectMapper)) // Use the custom ObjectMapper
+                .addConverterFactory(JacksonConverterFactory.create(objectMapper))
                 .build();
     }
-    /**
-     * Returns the configured OpenAiService instance.
-     *
-     * @return OpenAiService instance.
-     */
+
     public OpenAiService getOpenAiService() {
         return this.openAiService;
     }
 
-    /**
-     * Interceptor to add the Authorization header to requests.
-     */
     private static class AuthenticationInterceptor implements Interceptor {
         private final String apiKey;
 
@@ -126,13 +90,49 @@ public class CustomOpenAiService {
         @Override
         public Response intercept(Chain chain) throws IOException {
             Request original = chain.request();
-
-            // Add the Authorization header with the API key
             Request request = original.newBuilder()
                     .header("Authorization", "Bearer " + apiKey)
                     .build();
-
             return chain.proceed(request);
+        }
+    }
+
+    private static class RetryInterceptor implements Interceptor {
+        private final int maxRetries;
+
+        RetryInterceptor(int maxRetries) {
+            this.maxRetries = maxRetries;
+        }
+
+        @Override
+        public Response intercept(Chain chain) throws IOException {
+            Request request = chain.request();
+            Response response = null;
+            IOException exception = null;
+
+            int tryCount = 0;
+            while (tryCount < maxRetries) {
+                try {
+                    response = chain.proceed(request);
+                    if (response.isSuccessful()) {
+                        return response;
+                    } else {
+                        response.close();
+                    }
+                } catch (IOException e) {
+                    exception = e;
+                }
+
+                tryCount++;
+                try {
+                    Thread.sleep(1000 * tryCount); // Exponential backoff
+                } catch (InterruptedException ignored) {}
+            }
+
+            if (exception != null) {
+                throw exception;
+            }
+            return response;
         }
     }
 }
