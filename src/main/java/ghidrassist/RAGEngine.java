@@ -208,13 +208,17 @@ public class RAGEngine {
     /**
      * Closes the index writer and directory.
      */
-    public void close() throws IOException {
-        if (indexWriter != null) {
-            indexWriter.close();
-        }
-        if (indexDirectory != null) {
-            indexDirectory.close();
-        }
+    public void close() {
+    	try {
+	        if (indexWriter != null) {
+	            indexWriter.close();
+	        }
+	        if (indexDirectory != null) {
+	            indexDirectory.close();
+	        }
+    	} catch (Exception e) {
+    		
+    	}
     }
 
     /**

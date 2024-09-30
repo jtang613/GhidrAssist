@@ -121,6 +121,8 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         setVisible(true);
     }
+    
+    
 
     private void buildPanel() {
         panel = new JPanel(new BorderLayout());
@@ -1341,5 +1343,9 @@ public class GhidrAssistProvider extends ComponentProvider {
         } else {
             Msg.showError(getClass(), panel, "Error", "No explain response to provide feedback on.");
         }
+    }
+    
+    public void deactivateProvider() {
+    	ragEngine.close();
     }
 }

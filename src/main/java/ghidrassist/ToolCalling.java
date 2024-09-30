@@ -52,7 +52,7 @@ public class ToolCalling {
         ACTION_PROMPTS.put("rename_function",
 			"Use the 'rename_function' tool:\n```\n{code}\n```\n" +
             "Examine the code functionality, strings and log parameters.\n" +
-            "If you detect C++ Super::Derived::Method or Class::Method style class names, recommend that name first.\n" +
+            "If you detect C++ Super::Derived::Method or Class::Method style class names, recommend that name first, OTHERWISE USE PROCEDURAL NAMING.\n" +
             "CREATE A JSON TOOL_CALL LIST WITH SUGGESTIONS FOR THREE POSSIBLE FUNCTION NAMES " +
             "THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT THE CODE ABOVE DOES.\n" +
             "RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETER (new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +

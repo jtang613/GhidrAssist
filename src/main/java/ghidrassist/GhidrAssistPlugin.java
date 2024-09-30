@@ -11,6 +11,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
+import scala.Console;
 
 import java.lang.reflect.Type;
 import java.util.List;
@@ -34,7 +35,7 @@ import docking.action.MenuData;
 )
 public class GhidrAssistPlugin extends ProgramPlugin {
 
-    private GhidrAssistProvider provider;
+	private GhidrAssistProvider provider;
     private String lastActiveProvider;
     
     public enum CodeViewType {
@@ -135,4 +136,17 @@ public class GhidrAssistPlugin extends ProgramPlugin {
         return null;
     }
     
+    @Override
+	protected void programClosed(Program program) {
+    	provider.deactivateProvider();
+		super.programClosed(program);
+	}
+
+	@Override
+	protected void dispose() {
+    	provider.deactivateProvider();
+		super.dispose();
+	}
+
+
 }
