@@ -10,7 +10,6 @@ import ghidra.util.Msg;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
 import ghidrassist.GhidrAssistPlugin.CodeViewType;
-import scala.Console;
 import ghidra.util.task.TaskLauncher;
 
 import javax.swing.*;
@@ -32,6 +31,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -54,6 +54,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     // For stopping running queries
     private AtomicBoolean isQueryRunning = new AtomicBoolean(false);
+    private AtomicInteger numRunners = new AtomicInteger(0);
     
     // Components for Explain tab
     private JTextField offsetField;
@@ -468,20 +469,28 @@ public class GhidrAssistProvider extends ComponentProvider {
     private void onAnalyzeFunctionClicked() {
         if (isQueryRunning.get()) {
             // If the query is running, stop it
+            analyzeFunctionButton.setText("Analyze Function");
             isQueryRunning.set(false);
             return;
+        } else {
+            // Count number of request types
+            for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
+                if (entry.getValue().isSelected()) {
+                	numRunners.getAndIncrement();
+                	System.out.println("numRunners: " + numRunners.get());
+                }
+            }
+            // Set the button to "Stop" and set the query as running
+            analyzeFunctionButton.setText("Stop");
+            isQueryRunning.set(true);
         }
-        else {
-	        // Set the button to "Stop" and set the query as running
-	        analyzeFunctionButton.setText("Stop");
-	        isQueryRunning.set(true);
-        }
-        
+
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
             Msg.showInfo(getClass(), panel, "No Function", "No function at current location.");
             return;
         }
+
         TaskMonitor monitor = TaskMonitor.DUMMY; // Replace with actual monitor if needed
 
         String code = getFunctionCode(currentFunction, monitor);
@@ -497,6 +506,10 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         // For each selected action, send an individual request
         for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
+            if (!isQueryRunning.get()) {
+                break; // If "Stop" is pressed, exit the loop
+            }
+
             if (entry.getValue().isSelected()) {
                 hasSelectedActions = true;
                 String action = entry.getKey();
@@ -508,7 +521,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                     Map<String, Object> functionDefinition = null;
                     for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
                         @SuppressWarnings("unchecked")
-						Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
+                        Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
                         if (functionMap.get("name").equals(action)) {
                             functionDefinition = functionMap;
                             break;
@@ -541,21 +554,30 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 // Parse the response and populate the table
                                 parseAndDisplayActions(fullResponse);
-                                analyzeFunctionButton.setText("Analyze Function");
-                                isQueryRunning.set(false);
+                                
+                                if (numRunners.get() <= 1) {
+                                	System.out.println("===numRunners: " + numRunners.get());
+                                    // After all actions, reset the button text and stop the query
+                                    analyzeFunctionButton.setText("Analyze Function");
+                                    isQueryRunning.set(false);
+                                }
+                                else {
+                                	System.out.println("numRunners: " + numRunners.get());
+                                	numRunners.decrementAndGet();
+                                }
                             });
                         }
 
                         @Override
                         public void onError(Throwable error) {
                             SwingUtilities.invokeLater(() -> {
-                            	error.printStackTrace();
-                                Msg.showError(this, panel, "Error", "An error occurred: " + error.getMessage());
+                                // After all actions, reset the button text and stop the query
                                 analyzeFunctionButton.setText("Analyze Function");
-                                isQueryRunning.set(false);
+                                error.printStackTrace();
+                                Msg.showError(this, panel, "Error", "An error occurred: " + error.getMessage());
                             });
                         }
-                        
+
                         @Override
                         public boolean shouldContinue() {
                             return isQueryRunning.get();  // Only continue if query is running
@@ -570,6 +592,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         }
     }
 
+
     private void parseAndDisplayActions(String response) {
         try {
             Gson gson = new Gson();
@@ -583,7 +606,7 @@ public class GhidrAssistProvider extends ComponentProvider {
             JsonElement jsonElement = gson.fromJson(jsonReader, JsonElement.class);
 
             if (!jsonElement.isJsonObject()) {
-            	Console.println("Error: Unexpected JSON structure in response");
+            	System.out.println("Error: Unexpected JSON structure in response");
                 return;
             }
 
@@ -604,7 +627,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                             functionName = toolCallObject.get("name").getAsString();
                             arguments = toolCallObject.getAsJsonObject("arguments");
                         } else {
-                            Console.println("Error: Tool call does not contain 'name' and 'arguments' fields");
+                            System.out.println("Error: Tool call does not contain 'name' and 'arguments' fields");
                             continue;
                         }
 
@@ -617,7 +640,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                         }
 
                         if (!functionNames.contains(functionName)) {
-                        	Console.println("Error: Unknown function: " + functionName);
+                        	System.out.println("Error: Unknown function: " + functionName);
                             continue;
                         }
 
@@ -632,16 +655,16 @@ public class GhidrAssistProvider extends ComponentProvider {
                         };
                         model.addRow(rowData);
                     } else {
-                        Console.println("Error: Unexpected structure in 'tool_calls' array");
+                        System.out.println("Error: Unexpected structure in 'tool_calls' array");
                     }
                 }
             } else {
-            	Console.println("Error: Response does not contain 'tool_calls' field");
+            	System.out.println("Error: Response does not contain 'tool_calls' field");
                 return;
             }
 
         } catch (JsonSyntaxException e) {
-            Console.println("Error: Failed to parse LLM response: " + e.getMessage());
+            System.out.println("Error: Failed to parse LLM response: " + e.getMessage());
         }
     }
 
@@ -683,7 +706,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 	        }
     	}
     	catch(Exception e) {
-    		Console.println("Error: Failed to parse Json: " + e.getMessage());
+    		System.out.println("Error: Failed to parse Json: " + e.getMessage());
     	}
     	return "";
     }
@@ -718,6 +741,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 	                        String newName = arguments.get("new_name").getAsString().strip();
 	                        ToolCalling.handle_rename_function(program, currentAddress, newName);
 	                        model.setValueAt("Applied", row, 3);
+	                        model.setValueAt(Boolean.FALSE, row, 0);
                     	}
                     	catch (Exception e) {
                     		model.setValueAt("Failed: " + e.getMessage(), row, 3);
@@ -730,6 +754,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 	                        String newVarName = arguments.get("new_name").getAsString().strip();
 	                        ToolCalling.handle_rename_variable(program, currentAddress, funcName, varName, newVarName);
 	                        model.setValueAt("Applied", row, 3);
+	                        model.setValueAt(Boolean.FALSE, row, 0);
                     	}
                     	catch (Exception e) {
                     		model.setValueAt("Failed: " + e.getMessage(), row, 3);
@@ -742,6 +767,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 	                        String newType = arguments.get("new_type").getAsString().strip();
 	                        ToolCalling.handle_retype_variable(program, currentAddress, funcName, varName, newType);
 	                        model.setValueAt("Applied", row, 3);
+	                        model.setValueAt(Boolean.FALSE, row, 0);
                     	}
                     	catch (Exception e) {
                     		model.setValueAt("Failed: " + e.getMessage(), row, 3);
@@ -753,6 +779,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 	                        String varName = arguments.get("var_name").getAsString().strip();
 	                        ToolCalling.handle_auto_create_struct(program, currentAddress, funcName, varName);
 	                        model.setValueAt("Applied", row, 3);
+	                        model.setValueAt(Boolean.FALSE, row, 0);
                     	}
                     	catch (Exception e) {
                     		model.setValueAt("Failed: " + e.getMessage(), row, 3);

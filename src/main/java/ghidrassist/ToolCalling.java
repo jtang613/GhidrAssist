@@ -2,11 +2,20 @@ package ghidrassist;
 
 import java.util.*;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.data.*;
 import ghidra.program.model.symbol.*;
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
+import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.model.address.*;
 import ghidra.util.Msg;
 import ghidra.util.data.DataTypeParser;
+import ghidra.util.exception.CancelledException;
+import ghidra.util.exception.DuplicateNameException;
+import ghidra.util.exception.InvalidInputException;
+import ghidra.util.task.TaskMonitor;
 
 public class ToolCalling {
 
@@ -123,102 +132,97 @@ public class ToolCalling {
     }
 
     // Handler methods for each action
-    public static void handle_rename_function(Program program, Address address, String newName) {
+    public static void handle_rename_function(Program program, Address address, String newName) throws InvalidInputException, DuplicateNameException {
     	int transaction = program.startTransaction("Rename Function");
         boolean success = false;
-    	try {
-	    	FunctionManager functionManager = program.getFunctionManager();
-	        Function function = functionManager.getFunctionContaining(address);
-	        if (function != null) {
-                function.setName(newName, SourceType.USER_DEFINED);
-                success = true;
-	        } else {
-	            Msg.showError(null, null, "Rename Function Error", "Function not found at address: " + address.toString());
-	        }
-        } catch (Exception e) {
-            Msg.showError(null, null, "Rename Function Error", "Failed to rename function: " + e.getMessage());
-	    } finally {
-	        program.endTransaction(transaction, success);
-	    }
+    	FunctionManager functionManager = program.getFunctionManager();
+        Function function = functionManager.getFunctionContaining(address);
+        if (function != null) {
+            function.setName(newName, SourceType.USER_DEFINED);
+            success = true;
+        } else {
+            program.endTransaction(transaction, success);
+            throw new InvalidInputException("Function not found at address: " + address.toString());
+        }
+        program.endTransaction(transaction, success);
     }
 
-    public static void handle_rename_variable(Program program, Address address, String funcName, String varName, String newName) {
+    public static void handle_rename_variable(Program program, Address address, String funcName, String varName, String newName) throws InvalidInputException, DuplicateNameException {
     	int transaction = program.startTransaction("Rename Variable");
         boolean success = false;
-    	try {
-	        Function function = program.getFunctionManager().getFunctionContaining(address);
-	        if (function == null) {
-	            Msg.showError(null, null, "Rename Variable Error", "Function not found: " + funcName);
-	            return;
-	        }
-	        Variable[] variables = function.getAllVariables();
-	        for (Variable var : variables) {
-	            if (var.getName().equals(varName)) {
-                    var.setName(newName, SourceType.USER_DEFINED);
-	                success = true;
-	                break;
-	            }
-	        }
-	        if (success == false) {
-		        Msg.showError(null, null, "Rename Variable Error", "Variable not found: " + varName);
-	        }
-        } catch (Exception e) {
-            Msg.showError(null, null, "Rename Variable Error", "Failed to rename variable: " + e.getMessage());
-            return;
-	    } finally {
-	        program.endTransaction(transaction, success);
-	    }
+        Function function = program.getFunctionManager().getFunctionContaining(address);
+        if (function == null) {
+        	program.endTransaction(transaction, success);
+            throw new InvalidInputException("Function not found: " + funcName);
+        }
+        // Combine variables from getAllVariables() and getLocalVariables()
+        commitLocalNames(program, function);
+        List<Variable> combinedVariables = new ArrayList<>(Arrays.asList(function.getAllVariables()));
+        combinedVariables.addAll(Arrays.asList(function.getAllVariables())); // Locals
+        combinedVariables.addAll(Arrays.asList(function.getParameters()));  // Parameters
+
+        for (Variable var : function.getParameters()) {
+        	System.out.println("Parameter: " + var);
+        }
+        // Search for the variable by name in the combined list
+        for (Variable var : combinedVariables) {
+        	System.out.println("Var: " + var.getName());
+            if (var.getName().equals(varName)) {
+                var.setName(newName, SourceType.USER_DEFINED);
+                success = true;
+                break;
+            }
+        }
+        if (success == false) {
+	        throw new InvalidInputException("Variable not found: " + varName);
+        }
+        program.endTransaction(transaction, success);
     }
 
-    public static void handle_retype_variable(Program program, Address address, String funcName, String varName, String newTypeStr) {
+    public static void handle_retype_variable(Program program, Address address, String funcName, String varName, String newTypeStr) throws InvalidDataTypeException, CancelledException, InvalidInputException {
         int transaction = program.startTransaction("Retype Variable");
         boolean success = false;
-        try {
-            Function function = program.getFunctionManager().getFunctionContaining(address);
-            if (function == null) {
-                Msg.showError(null, null, "Retype Variable Error", "Function not found: " + funcName);
-                return;
-            }
-            Variable[] variables = function.getAllVariables();
-            for (Variable var : variables) {
-                if (var.getName().equals(varName)) {
-                    DataTypeManager dtm = program.getDataTypeManager();
-                    DataType newType = getDataType(newTypeStr, dtm, program);
-                    if (newType != null) {
-                        var.setDataType(newType, true, true, SourceType.USER_DEFINED);
-                        success = true;
-                        break;
-                    } else {
-                        Msg.showError(null, null, "Retype Variable Error", "Failed to parse data type: " + newTypeStr);
-                        return;
-                    }
+        Function function = program.getFunctionManager().getFunctionContaining(address);
+        if (function == null) {
+        	program.endTransaction(transaction, success);
+            throw new InvalidInputException("Function not found: " + funcName);
+        }
+        // Combine variables from getAllVariables() and getLocalVariables()
+        commitLocalNames(program, function);
+        List<Variable> combinedVariables = new ArrayList<>(Arrays.asList(function.getAllVariables()));
+        combinedVariables.addAll(Arrays.asList(function.getAllVariables())); // Locals
+        combinedVariables.addAll(Arrays.asList(function.getParameters()));  // Parameters
+
+        // Search for the variable by name in the combined list
+        for (Variable var : combinedVariables) {
+            if (var.getName().equals(varName)) {
+                DataTypeManager dtm = program.getDataTypeManager();
+                DataType newType = getDataType(newTypeStr, dtm, program);
+                if (newType != null) {
+                    var.setDataType(newType, true, true, SourceType.USER_DEFINED);
+                    success = true;
+                    break;
+                } else {
+                    program.endTransaction(transaction, success);
+                    throw new InvalidDataTypeException("Failed to parse data type: " + newTypeStr);
                 }
             }
-            if (!success) {
-                Msg.showError(null, null, "Retype Variable Error", "Variable not found: " + varName);
-            }
-        } catch (Exception e) {
-            Msg.showError(null, null, "Retype Variable Error", "Failed to retype variable: " + e.getMessage());
-        } finally {
-            program.endTransaction(transaction, success);
         }
+        if (!success) {
+        	program.endTransaction(transaction, success);
+            throw new InvalidInputException("Variable not found: " + varName);
+        }
+        program.endTransaction(transaction, success);
     }
 
-    private static DataType getDataType(String dataTypeStr, DataTypeManager dtm, Program program) {
+    private static DataType getDataType(String dataTypeStr, DataTypeManager dtm, Program program) throws InvalidDataTypeException, CancelledException {
         // First, try to get the data type directly
         DataType dataType = dtm.getDataType(new CategoryPath("/"), dataTypeStr);
         
         // If not found, try to parse it
         if (dataType == null) {
-            try {
-            	DataTypeParser parser = new DataTypeParser(dtm, program.getDataTypeManager(), null, DataTypeParser.AllowedDataTypes.ALL);
-//                DataTypeParser parser = new DataTypeParser(dtm, program.getDataTypeManager(), 
-//                                                           DataTypeParser.AllowedDataTypes.ALL, 
-//                                                           program.getDataTypeManager());
-                dataType = parser.parse(dataTypeStr);
-            } catch (Exception e) {
-                Msg.error(null, "Failed to parse data type: " + dataTypeStr, e);
-            }
+        	DataTypeParser parser = new DataTypeParser(dtm, program.getDataTypeManager(), null, DataTypeParser.AllowedDataTypes.ALL);
+            dataType = parser.parse(dataTypeStr);
         }
         
         return dataType;
@@ -229,4 +233,23 @@ public class ToolCalling {
         // This is a complex task and may require in-depth analysis
         Msg.showInfo(null, null, "Auto Create Struct", "Functionality not implemented yet.");
     }
+    
+    public static void commitLocalNames(Program program, Function function) {
+        DecompInterface ifc = new DecompInterface();
+        ifc.openProgram(program);
+        
+        DecompileResults res = ifc.decompileFunction(function, 30, null);
+        if (res.decompileCompleted()) {
+            try {
+                HighFunction hf = res.getHighFunction();
+                HighFunctionDBUtil.commitLocalNamesToDatabase(hf, SourceType.ANALYSIS);
+                HighFunctionDBUtil.commitParamsToDatabase(hf, true, null, SourceType.ANALYSIS);
+            } catch (Exception e) {
+                Msg.error(ToolCalling.class, "Error committing local names: " + e.getMessage());
+            }
+        }
+        
+        ifc.closeProgram();
+    }
+
 }
