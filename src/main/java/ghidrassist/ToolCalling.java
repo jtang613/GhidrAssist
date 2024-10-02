@@ -2,13 +2,25 @@ package ghidrassist;
 
 import java.util.*;
 import ghidra.program.model.listing.*;
+import ghidra.program.model.listing.Function.FunctionUpdateType;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
+import ghidra.program.model.pcode.HighParam;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.HighVariable;
+import ghidra.program.model.pcode.LocalSymbolMap;
+import ghidra.program.model.pcode.PcodeOp;
+import ghidra.program.model.pcode.PcodeOpAST;
+import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.data.*;
+import ghidra.program.model.lang.DynamicVariableStorage;
 import ghidra.program.model.symbol.*;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.decompiler.util.FillOutStructureCmd;
+import ghidra.app.decompiler.util.FillOutStructureHelper;
+import ghidra.app.plugin.core.datamgr.DataTypesActionContext;
 import ghidra.program.model.address.*;
 import ghidra.util.Msg;
 import ghidra.util.data.DataTypeParser;
@@ -161,12 +173,8 @@ public class ToolCalling {
         combinedVariables.addAll(Arrays.asList(function.getAllVariables())); // Locals
         combinedVariables.addAll(Arrays.asList(function.getParameters()));  // Parameters
 
-        for (Variable var : function.getParameters()) {
-        	System.out.println("Parameter: " + var);
-        }
         // Search for the variable by name in the combined list
         for (Variable var : combinedVariables) {
-        	System.out.println("Var: " + var.getName());
             if (var.getName().equals(varName)) {
                 var.setName(newName, SourceType.USER_DEFINED);
                 success = true;
@@ -179,7 +187,7 @@ public class ToolCalling {
         program.endTransaction(transaction, success);
     }
 
-    public static void handle_retype_variable(Program program, Address address, String funcName, String varName, String newTypeStr) throws InvalidDataTypeException, CancelledException, InvalidInputException {
+    public static void handle_retype_variable(Program program, Address address, String funcName, String varName, String newTypeStr) throws InvalidDataTypeException, CancelledException, InvalidInputException, DuplicateNameException {
         int transaction = program.startTransaction("Retype Variable");
         boolean success = false;
         Function function = program.getFunctionManager().getFunctionContaining(address);
@@ -228,12 +236,122 @@ public class ToolCalling {
         return dataType;
     }
 
-    public static void handle_auto_create_struct(Program program, Address address, String funcName, String varName) {
-        // Implementation of auto_create_struct
-        // This is a complex task and may require in-depth analysis
-        Msg.showInfo(null, null, "Auto Create Struct", "Functionality not implemented yet.");
+    public static void handle_auto_create_struct(Program program, Address address, String funcName, String varName) throws InvalidInputException, DuplicateNameException, CancelledException {
+        int transaction = program.startTransaction("Auto Create Struct");
+        boolean success = false;
+
+        try {
+            // Retrieve the function at the specified address
+            Function function = program.getFunctionManager().getFunctionContaining(address);
+            if (function == null) {
+                throw new InvalidInputException("Function not found: " + funcName);
+            }
+            
+            // Combine variables from getAllVariables() and getParameters()
+            commitLocalNames(program, function);
+            List<Variable> combinedVariables = new ArrayList<>();
+            combinedVariables.addAll(Arrays.asList(function.getAllVariables()));
+            combinedVariables.addAll(Arrays.asList(function.getParameters())); // Parameters
+
+            // Decompile the function
+            DecompInterface decompiler = new DecompInterface();
+            DecompileOptions options = new DecompileOptions();
+            options.grabFromProgram(program);
+            decompiler.setOptions(options);
+            decompiler.openProgram(program);
+            DecompileResults decompileResults = decompiler.decompileFunction(function, 30, null);
+
+            if (!decompileResults.decompileCompleted()) {
+                throw new InvalidInputException("Decompilation failed for function: " + funcName);
+            }
+
+            HighFunction highFunction = decompileResults.getHighFunction();
+
+            // Find the HighVariable for varName
+            HighVariable highVar = findHighVariable(highFunction, varName);
+            if (highVar == null) {
+                throw new InvalidInputException("Variable not found: " + varName);
+            }
+
+            // Use FillOutStructureHelper
+            TaskMonitor monitor = TaskMonitor.DUMMY;
+            FillOutStructureHelper fillHelper = new FillOutStructureHelper(program, options, monitor);
+            Structure structDT = fillHelper.processStructure(highVar, function, false, true);
+
+            if (structDT == null) {
+                throw new InvalidInputException("Failed to create structure for variable: " + varName);
+            }
+
+            // Add the struct to the DataTypeManager
+            DataTypeManager dtm = program.getDataTypeManager();
+            structDT = (Structure) dtm.addDataType(structDT, DataTypeConflictHandler.DEFAULT_HANDLER);
+
+            // Create a pointer to the struct
+            PointerDataType ptrStruct = new PointerDataType(structDT);
+
+            // Apply the data type to the variable
+            Variable var = null;
+            for (Variable v : combinedVariables) {
+                if (v.getName().equals(varName)) {
+                    var = v;
+                    break;
+                }
+            }
+            
+            if (var != null && var instanceof AutoParameterImpl) {
+                // Modify the function signature to change the data type of the auto-parameter
+                Parameter[] parameters = function.getParameters();
+                Parameter[] newParams = new Parameter[parameters.length];
+
+                for (int i = 0; i < parameters.length; i++) {
+                    if (parameters[i].getName().equals(varName)) {
+                        newParams[i] = new ParameterImpl(
+                            parameters[i].getName(),
+                            ptrStruct,
+                            parameters[i].getVariableStorage(),
+                            program,
+                            SourceType.USER_DEFINED
+                        );
+                    } else {
+                        newParams[i] = parameters[i];
+                    }
+                }
+
+                // Update the function signature
+                function.updateFunction(
+                    function.getCallingConventionName(),
+                    null, // Return type remains the same
+                    FunctionUpdateType.CUSTOM_STORAGE,
+                    true, // Force the update
+                    SourceType.USER_DEFINED,
+                    newParams
+                );
+            } else {
+                // Update local variable
+                HighFunctionDBUtil.updateDBVariable(highVar.getSymbol(), null, ptrStruct, SourceType.USER_DEFINED);
+            }
+
+            success = true;
+
+        } catch (Exception e) {
+            throw new InvalidInputException("Error in auto-creating struct: " + e.getMessage());
+        } finally {
+            program.endTransaction(transaction, success);
+        }
     }
-    
+
+    private static HighVariable findHighVariable(HighFunction highFunction, String varName) {
+        // Retrieve all high-level variables from the function and search by name
+        Iterator<HighSymbol> highVariables = highFunction.getLocalSymbolMap().getSymbols();
+        while (highVariables.hasNext()) {
+        	HighSymbol highVar = highVariables.next(); 
+            if (highVar.getName().equals(varName)) {
+                return highVar.getHighVariable();
+            }
+        }
+        return null;
+    }
+
     public static void commitLocalNames(Program program, Function function) {
         DecompInterface ifc = new DecompInterface();
         ifc.openProgram(program);
@@ -241,6 +359,7 @@ public class ToolCalling {
         DecompileResults res = ifc.decompileFunction(function, 30, null);
         if (res.decompileCompleted()) {
             try {
+                function.setName(function.getName(), SourceType.USER_DEFINED); // Commit the function parameters
                 HighFunction hf = res.getHighFunction();
                 HighFunctionDBUtil.commitLocalNamesToDatabase(hf, SourceType.ANALYSIS);
                 HighFunctionDBUtil.commitParamsToDatabase(hf, true, null, SourceType.ANALYSIS);

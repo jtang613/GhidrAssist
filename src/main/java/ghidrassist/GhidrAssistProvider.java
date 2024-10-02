@@ -299,9 +299,9 @@ public class GhidrAssistProvider extends ComponentProvider {
         int w = actionsTable.getColumnModel().getColumn(0).getWidth();
         actionsTable.getColumnModel().getColumn(0).setMaxWidth((int)((double) (w*0.8)));
         // Hide the "Arguments" column from the user
-        actionsTable.getColumnModel().getColumn(4).setMinWidth(0);
-        actionsTable.getColumnModel().getColumn(4).setMaxWidth(0);
-        actionsTable.getColumnModel().getColumn(4).setWidth(0);
+//        actionsTable.getColumnModel().getColumn(4).setMinWidth(0);
+//        actionsTable.getColumnModel().getColumn(4).setMaxWidth(0);
+//        actionsTable.getColumnModel().getColumn(4).setWidth(0);
         JScrollPane tableScrollPane = new JScrollPane(actionsTable);
 
         // Create the filter checkboxes
@@ -477,7 +477,6 @@ public class GhidrAssistProvider extends ComponentProvider {
             for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
                 if (entry.getValue().isSelected()) {
                 	numRunners.getAndIncrement();
-                	System.out.println("numRunners: " + numRunners.get());
                 }
             }
             // Set the button to "Stop" and set the query as running
@@ -554,16 +553,13 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 // Parse the response and populate the table
                                 parseAndDisplayActions(fullResponse);
+                            	numRunners.decrementAndGet();
                                 
-                                if (numRunners.get() <= 1) {
-                                	System.out.println("===numRunners: " + numRunners.get());
+                                if (numRunners.get() <= 0) {
+                                	numRunners.set(0);
                                     // After all actions, reset the button text and stop the query
                                     analyzeFunctionButton.setText("Analyze Function");
                                     isQueryRunning.set(false);
-                                }
-                                else {
-                                	System.out.println("numRunners: " + numRunners.get());
-                                	numRunners.decrementAndGet();
                                 }
                             });
                         }
@@ -573,6 +569,15 @@ public class GhidrAssistProvider extends ComponentProvider {
                             SwingUtilities.invokeLater(() -> {
                                 // After all actions, reset the button text and stop the query
                                 analyzeFunctionButton.setText("Analyze Function");
+                            	numRunners.decrementAndGet();
+                                
+                                if (numRunners.get() <= 0) {
+                                	numRunners.set(0);
+                                    // After all actions, reset the button text and stop the query
+                                    analyzeFunctionButton.setText("Analyze Function");
+                                    isQueryRunning.set(false);
+                                }
+
                                 error.printStackTrace();
                                 Msg.showError(this, panel, "Error", "An error occurred: " + error.getMessage());
                             });
