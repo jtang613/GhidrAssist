@@ -43,7 +43,7 @@ public class SettingsDialog extends DialogComponentProvider {
         String rlhfDbPath = Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db");
 
         // Load the Lucene index path
-        String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "");
+        String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene");
 
         // Initialize the UI components
         JPanel panel = new JPanel(new BorderLayout());
