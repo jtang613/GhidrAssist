@@ -135,18 +135,4 @@ public class GhidrAssistPlugin extends ProgramPlugin {
         // If not found, return null or handle as needed
         return null;
     }
-    
-    @Override
-	protected void programClosed(Program program) {
-    	provider.deactivateProvider();
-		super.programClosed(program);
-	}
-
-	@Override
-	protected void dispose() {
-    	provider.deactivateProvider();
-		super.dispose();
-	}
-
-
 }

@@ -85,9 +85,6 @@ public class GhidrAssistProvider extends ComponentProvider {
     private String lastPrompt;
     private String lastResponse;
 
-    // RAG Tab components
-    private RAGEngine ragEngine;
-    
     // Flexmark parser and renderer
     private Parser markdownParser;
     private HtmlRenderer htmlRenderer;
@@ -366,9 +363,6 @@ public class GhidrAssistProvider extends ComponentProvider {
         ragPanel.add(listScrollPane, BorderLayout.CENTER);
         ragPanel.add(buttonPanel, BorderLayout.SOUTH);
 
-        // Initialize RagEngine
-        initializeRagEngine();
-
         // Add action listeners
         addDocumentsButton.addActionListener(e -> onAddDocumentsClicked(documentList));
         deleteSelectedButton.addActionListener(e -> onDeleteSelectedClicked(documentList));
@@ -380,23 +374,9 @@ public class GhidrAssistProvider extends ComponentProvider {
         return ragPanel;
     }
     
-    private void initializeRagEngine() {
-        try {
-            if (ragEngine != null) {
-                ragEngine.close();
-            }
-            ragEngine = new RAGEngine();
-        } catch (IOException ex) {
-            Msg.showError(this, panel, "Error", "Failed to initialize RagEngine: " + ex.getMessage());
-        }
-    }
-    
     private void loadIndexedFiles(JList<String> documentList) {
-        if (ragEngine == null) {
-            return;
-        }
         try {
-            List<String> fileNames = (ArrayList<String>) ragEngine.listIndexedFiles();
+            List<String> fileNames = (ArrayList<String>) RAGEngine.listIndexedFiles();
             // Update the documentList JList
             documentList.setListData(fileNames.toArray(new String[0]));
         } catch (IOException ex) {
@@ -405,10 +385,6 @@ public class GhidrAssistProvider extends ComponentProvider {
     }
 
     private void onAddDocumentsClicked(JList<String> documentList) {
-        if (ragEngine == null) {
-            Msg.showError(this, panel, "Error", "Lucene index path is not set. Please set it in the Settings.");
-            return;
-        }
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setDialogTitle("Select Documents to Add to RAG");
         fileChooser.setMultiSelectionEnabled(true);
@@ -418,7 +394,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         if (result == JFileChooser.APPROVE_OPTION) {
             File[] files = fileChooser.getSelectedFiles();
             try {
-                ragEngine.ingestDocuments(Arrays.asList(files));
+                RAGEngine.ingestDocuments(Arrays.asList(files));
                 loadIndexedFiles(documentList);
                 Msg.showInfo(this, panel, "Success", "Documents added to RAG.");
             } catch (IOException ex) {
@@ -428,10 +404,6 @@ public class GhidrAssistProvider extends ComponentProvider {
     }
 
     private void onDeleteSelectedClicked(JList<String> documentList) {
-        if (ragEngine == null) {
-            Msg.showError(this, panel, "Error", "Lucene index path is not set. Please set it in the Settings.");
-            return;
-        }
         List<String> selectedFiles = (ArrayList<String>) documentList.getSelectedValuesList();
         if (selectedFiles.isEmpty()) {
             Msg.showInfo(this, panel, "No Selection", "No documents selected for deletion.");
@@ -441,7 +413,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         if (confirmation == JOptionPane.YES_OPTION) {
             try {
                 for (String fileName : selectedFiles) {
-                    ragEngine.deleteDocument(fileName);
+                    RAGEngine.deleteDocument(fileName);
                 }
                 loadIndexedFiles(documentList);
                 Msg.showInfo(this, panel, "Success", "Selected documents deleted from RAG.");
@@ -1022,13 +994,9 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         // If 'Use RAG' is selected, perform a RAG search and prepend context
         if (useRAGCheckBox.isSelected()) {
-            if (ragEngine == null) {
-                Msg.showError(this, panel, "Error", "RAG engine is not initialized. Please set the index path in the settings.");
-                return;
-            }
             try {
                 // Perform RAG search
-                List<RAGEngine.SearchResult> results = ragEngine.search(query, 5); // Retrieve top 5 results
+                List<RAGEngine.SearchResult> results = RAGEngine.search(query, 5); // Retrieve top 5 results
                 if (!results.isEmpty()) {
                     StringBuilder contextBuilder = new StringBuilder();
                     contextBuilder.append("<context>\n");
@@ -1375,9 +1343,5 @@ public class GhidrAssistProvider extends ComponentProvider {
         } else {
             Msg.showError(getClass(), panel, "Error", "No explain response to provide feedback on.");
         }
-    }
-    
-    public void deactivateProvider() {
-    	ragEngine.close();
     }
 }
