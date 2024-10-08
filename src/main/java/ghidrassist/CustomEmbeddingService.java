@@ -1,0 +1,158 @@
+package ghidrassist;
+
+import java.io.IOException;
+import java.security.cert.CertificateException;
+import javax.net.ssl.*;
+import okhttp3.*;
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+
+import ghidra.framework.preferences.Preferences;
+
+public class CustomEmbeddingService {
+
+    private String apiKey;
+    private String apiUrl;
+    private String apiModel;
+    private static final Gson gson = new Gson();
+    private static final OkHttpClient client = createUnsafeOkHttpClient();
+    private EmbeddingProvider embeddingProvider;
+    
+
+    public CustomEmbeddingService() {
+    	APIProvider currentProvider = GhidrAssistPlugin.getCurrentAPIProvider();
+        this.apiKey = currentProvider.getKey();
+        this.apiUrl = currentProvider.getUrl();
+        this.apiModel = currentProvider.getModel();
+    }
+
+    public enum EmbeddingProvider {
+        OPENAI, OLLAMA, NONE
+    }
+
+    public double[] getEmbedding(String text) throws IOException {
+    	APIProvider currentProvider = GhidrAssistPlugin.getCurrentAPIProvider();
+        this.apiKey = currentProvider.getKey();
+        this.apiUrl = currentProvider.getUrl();
+        this.apiModel = currentProvider.getModel();
+    	embeddingProvider = EmbeddingProvider.valueOf(Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE"));
+        switch (embeddingProvider) {
+            case OLLAMA:
+                return getOllamaEmbedding(text);
+            case OPENAI:
+                return getOpenAIEmbedding(text);
+            case NONE:
+            default:
+                return new double[0]; // Return an empty result list
+        }
+    }
+
+    private static OkHttpClient createUnsafeOkHttpClient() {
+        try {
+            // Create a trust manager that does not validate certificate chains
+            final TrustManager[] trustAllCerts = new TrustManager[] {
+                new X509TrustManager() {
+                    @Override
+                    public void checkClientTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {}
+                    @Override
+                    public void checkServerTrusted(java.security.cert.X509Certificate[] chain, String authType) throws CertificateException {}
+                    @Override
+                    public java.security.cert.X509Certificate[] getAcceptedIssuers() { return new java.security.cert.X509Certificate[]{}; }
+                }
+            };
+
+            // Install the all-trusting trust manager
+            final SSLContext sslContext = SSLContext.getInstance("SSL");
+            sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
+            // Create an ssl socket factory with our all-trusting manager
+            final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
+
+            OkHttpClient.Builder builder = new OkHttpClient.Builder();
+            builder.sslSocketFactory(sslSocketFactory, (X509TrustManager)trustAllCerts[0]);
+            builder.hostnameVerifier((hostname, session) -> true);
+
+            return builder.build();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private double[] getOllamaEmbedding(String text) throws IOException {
+        String url = apiUrl.replace("v1/", "ollama/api/") + "embeddings";
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", this.apiModel);
+        payload.addProperty("keep_alive", 0);
+        payload.addProperty("prompt", text);
+        payload.add("options", new JsonObject());
+
+        RequestBody body = RequestBody.create(MediaType.get("application/json; charset=utf-8"), gson.toJson(payload));
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "application/json")
+                .post(body)
+                .build();
+
+        Response response = client.newCall(request).execute();
+        if (!response.isSuccessful()) {
+            System.out.println("Failed to get embedding: " + response.code() + "\n" + response.message());
+            throw new IOException("Failed to get embedding: " + response.code() + "\n" + response.message());
+        }
+
+        String responseString = response.body().string();
+        JsonObject responseObject = (JsonObject) gson.fromJson(responseString, JsonElement.class);
+        JsonArray embeddingsArray = responseObject.getAsJsonArray("embedding");
+        if (embeddingsArray == null || embeddingsArray.size() == 0) {
+            throw new IOException("No embeddings found in the response");
+        }
+
+        JsonArray embeddings = embeddingsArray;
+        double[] embeddingArray = new double[embeddings.size()];
+        for (int i = 0; i < embeddings.size(); i++) {
+            embeddingArray[i] = embeddings.get(i).getAsDouble();
+        }
+        return embeddingArray;
+    }
+
+    private double[] getOpenAIEmbedding(String text) throws IOException {
+        String url = apiUrl + "embeddings";
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", "text-embedding-ada-002");
+        payload.addProperty("encoding_format", "float");
+        payload.addProperty("input", text);
+
+        RequestBody body = RequestBody.create(MediaType.get("application/json; charset=utf-8"), gson.toJson(payload));
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .addHeader("Content-Type", "application/json")
+                .post(body)
+                .build();
+
+        Response response = client.newCall(request).execute();
+        if (!response.isSuccessful()) {
+            System.out.println("Failed to get embedding: " + response.code() + "\n" + response.message());
+            throw new IOException("Failed to get embedding: " + response.code() + "\n" + response.message());
+        }
+
+        String responseString = response.body().string();
+        JsonObject responseObject = gson.fromJson(responseString, JsonObject.class);
+        JsonArray dataArray = responseObject.getAsJsonArray("data");
+        JsonArray embeddingsArray = dataArray.get(0).getAsJsonObject().getAsJsonArray("embedding");
+        if (embeddingsArray == null || embeddingsArray.size() == 0) {
+            throw new IOException("No embeddings found in the response");
+        }
+
+        JsonArray embeddings = embeddingsArray;
+        double[] embeddingArray = new double[embeddings.size()];
+        for (int i = 0; i < embeddings.size(); i++) {
+            embeddingArray[i] = embeddings.get(i).getAsDouble();
+        }
+        return embeddingArray;
+    }
+}

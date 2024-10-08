@@ -116,7 +116,7 @@ public class GhidrAssistPlugin extends ProgramPlugin {
 	    }
 	}
 
-    public APIProvider getCurrentAPIProvider() {
+    public static APIProvider getCurrentAPIProvider() {
         // Load the list of API providers from preferences
         String providersJson = Preferences.getProperty("GhidrAssist.APIProviders", "[]");
         Gson gson = new Gson();
