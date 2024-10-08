@@ -5,3 +5,4 @@ os/
 .gradle/
 .settings/
 .classpath
+/ghidrassist_rlhf.db
