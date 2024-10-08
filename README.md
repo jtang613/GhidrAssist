@@ -17,11 +17,11 @@ Current features include:
 * General query - Query the LLM directly from the UI.
 * Propose actions - Provide a list of proposed actions to apply.
 * Function calling - Allow agent to call functions to navigate the binary, rename functions and variables.
+* RAG augmentation - Supports adding contextual documents to refine query effectiveness.
 * RLHF dataset generation - To enable model fine tuning.
 * Settings to modify API host, key, model name and max tokens.
 
 Future Roadmap:
-* RAG augmentation - Supports adding contextual documents to refine query effectiveness.
 * Agentic assistant - Use Autogen or similar framework for self-guided binary RE.
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 

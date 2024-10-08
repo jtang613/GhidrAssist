@@ -267,8 +267,8 @@ public class ToolCalling {
 
             // Use FillOutStructureHelper
             TaskMonitor monitor = TaskMonitor.DUMMY;
-            FillOutStructureHelper fillHelper = new FillOutStructureHelper(program, options, monitor);
-            Structure structDT = fillHelper.processStructure(highVar, function, false, true);
+            FillOutStructureHelper fillHelper = new FillOutStructureHelper(program, monitor);
+            Structure structDT = fillHelper.processStructure(highVar, function, false, true, decompiler);
 
             if (structDT == null) {
                 throw new InvalidInputException("Failed to create structure for variable: " + varName);

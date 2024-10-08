@@ -46,6 +46,8 @@ import com.vladsch.flexmark.parser.Parser;
 import com.vladsch.flexmark.util.ast.Document;
 import com.vladsch.flexmark.util.data.MutableDataSet;
 
+import ghidrassist.SearchResult; 
+
 public class GhidrAssistProvider extends ComponentProvider {
 
     private JPanel panel;
@@ -473,7 +475,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         boolean hasSelectedActions = false;
 
         // Use LlmApi to send request
-        LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
+        LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
 
         // For each selected action, send an individual request
         for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
@@ -810,7 +812,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                     lastPrompt = prompt;
 
                     // Use LlmApi to send request
-                    LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
+                    LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -914,7 +916,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                     lastPrompt = prompt;
 
                     // Use LlmApi to send request
-                    LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
+                    LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -996,16 +998,16 @@ public class GhidrAssistProvider extends ComponentProvider {
         if (useRAGCheckBox.isSelected()) {
             try {
                 // Perform RAG search
-                List<RAGEngine.SearchResult> results = RAGEngine.search(query, 5); // Retrieve top 5 results
+                List<SearchResult> results = RAGEngine.hybridSearch(processedQuery, 5); // Retrieve top 5 results
                 if (!results.isEmpty()) {
                     StringBuilder contextBuilder = new StringBuilder();
                     contextBuilder.append("<context>\n");
-                    for (RAGEngine.SearchResult result : results) {
+                    for (SearchResult result : results) {
                     	contextBuilder.append("<result>\n");
-                    	contextBuilder.append("<file>" + result.getFileName() + "</file>").append("\n");
+                    	contextBuilder.append("<file>" + result.getFilename() + "</file>").append("\n");
                     	contextBuilder.append("<chunkid>" + result.getChunkId() + "</chunkid>").append("\n");
                     	contextBuilder.append("<score>" + result.getScore() + "</score>").append("\n");
-                        contextBuilder.append("<content>\n" + result.getContentSnippet() + "\n</content>").append("\n");
+                        contextBuilder.append("<content>\n" + result.getSnippet() + "\n</content>").append("\n");
                     	contextBuilder.append("\n</result>\n");
                     }
                     contextBuilder.append("\n</context>\n");
@@ -1031,7 +1033,7 @@ public class GhidrAssistProvider extends ComponentProvider {
             public void run(TaskMonitor monitor) {
                 try {
                     // Use LlmApi to send request
-                    LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
+                    LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -1233,10 +1235,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         while (instructions.hasNext()) {
             Instruction instr = instructions.next();
-            sb.append(instr.getAddress().toString());
-            sb.append("  ");
-            sb.append(instr.toString());
-            sb.append("\n");
+            sb.append(instr.getAddress().toString() + "  " + instr.toString() + "\n");
         }
 
         return sb.toString();
@@ -1335,8 +1334,8 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     private void storeRLHFFeedback(int feedback) {
         if (lastPrompt != null && lastResponse != null) {
-            LlmApi llmApi = new LlmApi(plugin.getCurrentAPIProvider());
-            String modelName = plugin.getCurrentAPIProvider().getModel();
+            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+            String modelName = GhidrAssistPlugin.getCurrentAPIProvider().getModel();
             String systemContext = llmApi.getSystemPrompt();
             rlhfDatabase.storeFeedback(modelName, lastPrompt, systemContext, lastResponse, feedback);
             Msg.showInfo(getClass(), panel, "Feedback", "Thank you for your feedback!");

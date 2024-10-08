@@ -66,7 +66,12 @@ public class CustomOpenAiService {
     
     private Retrofit buildRetrofit(OkHttpClient client, String apiHost) {
         ObjectMapper objectMapper = new ObjectMapper()
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        		.configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false)
+                .configure(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES, false)
+                .configure(DeserializationFeature.FAIL_ON_UNRESOLVED_OBJECT_IDS, false);
+
+
 
         return new Retrofit.Builder()
                 .baseUrl(apiHost)

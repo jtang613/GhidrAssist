@@ -27,6 +27,10 @@ public class SettingsDialog extends DialogComponentProvider {
     private JTextField luceneIndexPathField;
     private JButton luceneIndexBrowseButton;
 
+    // RAG Provider
+    private JComboBox<String> ragProviderComboBox;
+    private String selectedRagProviderName;
+
     public SettingsDialog(Component parent, String title) {
         super(title, true, false, true, false);
 
@@ -43,7 +47,8 @@ public class SettingsDialog extends DialogComponentProvider {
         String rlhfDbPath = Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db");
 
         // Load the Lucene index path
-        String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "");
+        String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene");
+        
 
         // Initialize the UI components
         JPanel panel = new JPanel(new BorderLayout());
@@ -115,6 +120,15 @@ public class SettingsDialog extends DialogComponentProvider {
         luceneIndexPanel.add(luceneIndexPathLabel);
         luceneIndexPanel.add(luceneIndexPathField);
         luceneIndexPanel.add(luceneIndexBrowseButton);
+        
+        String[] ragProviders = { "OPENAI", "OLLAMA", "NONE" };
+        ragProviderComboBox = new JComboBox<>(ragProviders);
+        selectedRagProviderName = Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE");
+        ragProviderComboBox.setSelectedItem(selectedRagProviderName);
+
+        JPanel ragProviderPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        ragProviderPanel.add(new JLabel("RAG Provider:"));
+        ragProviderPanel.add(ragProviderComboBox);
 
         // Create a panel to hold the active provider panel and RLHF database panel
         JPanel topPanel = new JPanel();
@@ -122,6 +136,7 @@ public class SettingsDialog extends DialogComponentProvider {
         topPanel.add(activeProviderPanel);
         topPanel.add(rlhfDbPanel);
         topPanel.add(luceneIndexPanel);
+        topPanel.add(ragProviderPanel);
 
         // Add components to the panel
         panel.add(topPanel, BorderLayout.NORTH);
@@ -287,6 +302,8 @@ public class SettingsDialog extends DialogComponentProvider {
         // Save settings
         // Get the selected provider name
         selectedProviderName = (String) activeProviderComboBox.getSelectedItem();
+        selectedRagProviderName = (String) ragProviderComboBox.getSelectedItem();
+
 
         // Serialize the list of providers to JSON
         Gson gson = new Gson();
@@ -300,6 +317,7 @@ public class SettingsDialog extends DialogComponentProvider {
         // Store settings
         Preferences.setProperty("GhidrAssist.APIProviders", providersJson);
         Preferences.setProperty("GhidrAssist.SelectedAPIProvider", selectedProviderName);
+        Preferences.setProperty("GhidrAssist.SelectedRAGProvider", selectedRagProviderName);
         Preferences.setProperty("GhidrAssist.RLHFDatabasePath", rlhfDbPath);
         Preferences.setProperty("GhidrAssist.LuceneIndexPath", luceneIndexPath);
         Preferences.store(); // Save preferences to disk
