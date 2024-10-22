@@ -390,7 +390,8 @@ public class GhidrAssistProvider extends ComponentProvider {
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setDialogTitle("Select Documents to Add to RAG");
         fileChooser.setMultiSelectionEnabled(true);
-        fileChooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Text and Markdown Files", "txt", "md"));
+        fileChooser.addChoosableFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Text and Markdown Files", "txt", "md"));
+        fileChooser.addChoosableFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Source Code", "c", "h", "cpp", "hpp", "py", "java", "rs", "asm"));
 
         int result = fileChooser.showOpenDialog(panel);
         if (result == JFileChooser.APPROVE_OPTION) {
@@ -1004,11 +1005,11 @@ public class GhidrAssistProvider extends ComponentProvider {
                     contextBuilder.append("<context>\n");
                     for (SearchResult result : results) {
                     	contextBuilder.append("<result>\n");
-                    	contextBuilder.append("<file>" + result.getFilename() + "</file>").append("\n");
-                    	contextBuilder.append("<chunkid>" + result.getChunkId() + "</chunkid>").append("\n");
-                    	contextBuilder.append("<score>" + result.getScore() + "</score>").append("\n");
-                        contextBuilder.append("<content>\n" + result.getSnippet() + "\n</content>").append("\n");
-                    	contextBuilder.append("\n</result>\n");
+                    	contextBuilder.append("</br><file>" + result.getFilename() + "</file>").append("\n");
+                    	contextBuilder.append("</br><chunkid>" + result.getChunkId() + "</chunkid>").append("\n");
+                    	contextBuilder.append("</br><score>" + result.getScore() + "</score>").append("\n");
+                        contextBuilder.append("</br><content>\n" + result.getSnippet() + "\n</content>").append("\n");
+                    	contextBuilder.append("\n</result>\n\n");
                     }
                     contextBuilder.append("\n</context>\n");
 

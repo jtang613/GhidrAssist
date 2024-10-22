@@ -39,8 +39,14 @@ public class RAGEngine {
 
     private static void initialize() throws IOException {
         String indexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "");
+        GAUtils.OperatingSystem os = GAUtils.OperatingSystem.detect();
+
         if (indexPath == null || indexPath.isEmpty()) {
-            throw new IOException("Lucene index path is not set in preferences.");
+            indexPath = GAUtils.getDefaultLucenePath(os);
+            System.out.println("No index path specified. Using default: " + indexPath);
+
+            // Create the directory if it doesn't exist
+            Files.createDirectories(Paths.get(indexPath));
         }
         initializeIndex(indexPath);
 

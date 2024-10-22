@@ -10,6 +10,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import ghidra.framework.preferences.Preferences;
+import ghidra.util.Msg;
 
 public class CustomEmbeddingService {
 
@@ -22,10 +23,18 @@ public class CustomEmbeddingService {
     
 
     public CustomEmbeddingService() {
-    	APIProvider currentProvider = GhidrAssistPlugin.getCurrentAPIProvider();
-        this.apiKey = currentProvider.getKey();
-        this.apiUrl = currentProvider.getUrl();
-        this.apiModel = currentProvider.getModel();
+    }
+
+    public void init() {
+    	try {
+	    	APIProvider currentProvider = GhidrAssistPlugin.getCurrentAPIProvider();
+	        this.apiKey = currentProvider.getKey();
+	        this.apiUrl = currentProvider.getUrl();
+	        this.apiModel = currentProvider.getModel();
+    	}
+    	catch (Exception e) {
+    		Msg.showError(this, null, "Service Error", "You must configure at least one API Provider.");
+    	}
     }
 
     public enum EmbeddingProvider {
@@ -33,10 +42,7 @@ public class CustomEmbeddingService {
     }
 
     public double[] getEmbedding(String text) throws IOException {
-    	APIProvider currentProvider = GhidrAssistPlugin.getCurrentAPIProvider();
-        this.apiKey = currentProvider.getKey();
-        this.apiUrl = currentProvider.getUrl();
-        this.apiModel = currentProvider.getModel();
+    	this.init();
     	embeddingProvider = EmbeddingProvider.valueOf(Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE"));
         switch (embeddingProvider) {
             case OLLAMA:
