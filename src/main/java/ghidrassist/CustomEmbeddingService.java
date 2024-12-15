@@ -17,8 +17,9 @@ public class CustomEmbeddingService {
     private String apiKey;
     private String apiUrl;
     private String apiModel;
+    private boolean disableTlsVerification;
     private static final Gson gson = new Gson();
-    private static final OkHttpClient client = createUnsafeOkHttpClient();
+    private OkHttpClient client;
     private EmbeddingProvider embeddingProvider;
     
 
@@ -31,6 +32,7 @@ public class CustomEmbeddingService {
 	        this.apiKey = currentProvider.getKey();
 	        this.apiUrl = currentProvider.getUrl();
 	        this.apiModel = currentProvider.getModel();
+	        this.disableTlsVerification = currentProvider.isDisableTlsVerification();
     	}
     	catch (Exception e) {
     		Msg.showError(this, null, "Service Error", "You must configure at least one API Provider.");
@@ -55,8 +57,14 @@ public class CustomEmbeddingService {
         }
     }
 
-    private static OkHttpClient createUnsafeOkHttpClient() {
+    private static OkHttpClient createHttpClient(boolean disableTlsVerification) {
         try {
+            OkHttpClient.Builder builder = new OkHttpClient.Builder();
+
+            if (!disableTlsVerification) {
+                return builder.build();
+            }
+
             // Create a trust manager that does not validate certificate chains
             final TrustManager[] trustAllCerts = new TrustManager[] {
                 new X509TrustManager() {
@@ -75,7 +83,6 @@ public class CustomEmbeddingService {
             // Create an ssl socket factory with our all-trusting manager
             final SSLSocketFactory sslSocketFactory = sslContext.getSocketFactory();
 
-            OkHttpClient.Builder builder = new OkHttpClient.Builder();
             builder.sslSocketFactory(sslSocketFactory, (X509TrustManager)trustAllCerts[0]);
             builder.hostnameVerifier((hostname, session) -> true);
 
@@ -103,6 +110,7 @@ public class CustomEmbeddingService {
                 .post(body)
                 .build();
 
+        client = createHttpClient(disableTlsVerification);
         Response response = client.newCall(request).execute();
         if (!response.isSuccessful()) {
             System.out.println("Failed to get embedding: " + response.code() + "\n" + response.message());
@@ -140,6 +148,7 @@ public class CustomEmbeddingService {
                 .post(body)
                 .build();
 
+        client = createHttpClient(disableTlsVerification);
         Response response = client.newCall(request).execute();
         if (!response.isSuccessful()) {
             System.out.println("Failed to get embedding: " + response.code() + "\n" + response.message());

@@ -16,20 +16,32 @@ public class CustomOpenAiService {
 
     private final OpenAiService openAiService;
 
-    public CustomOpenAiService(String apiKey, String apiHost) {
-        this(apiKey, apiHost, Duration.ofSeconds(240)); // Default timeout of 30 seconds
+    public CustomOpenAiService(String apiKey, String apiHost, boolean disableTlsVerification) {
+        this(apiKey, apiHost, disableTlsVerification, Duration.ofSeconds(240)); // Default timeout of 30 seconds
     }
 
-    public CustomOpenAiService(String apiKey, String apiHost, Duration timeout) {
-        OkHttpClient client = buildClient(apiKey, timeout);
+    public CustomOpenAiService(String apiKey, String apiHost, boolean disableTlsVerification, Duration timeout) {
+        OkHttpClient client = buildClient(apiKey, disableTlsVerification, timeout);
         Retrofit retrofit = buildRetrofit(client, apiHost);
 
         OpenAiApi api = retrofit.create(OpenAiApi.class);
         this.openAiService = new OpenAiService(api);
     }
 
-    private OkHttpClient buildClient(String apiKey, Duration timeout) {
+    private OkHttpClient buildClient(String apiKey, boolean disableTlsVerification, Duration timeout) {
         try {
+            OkHttpClient.Builder builder = new OkHttpClient.Builder()
+                .addInterceptor(new AuthenticationInterceptor(apiKey))
+                .connectTimeout(timeout)
+                .readTimeout(timeout)
+                .writeTimeout(timeout)
+                .retryOnConnectionFailure(true)
+                .addInterceptor(new RetryInterceptor(3)); // Add retry interceptor
+
+            if (!disableTlsVerification) {
+                return builder.build();
+            }
+
             TrustManager[] trustAllCerts = new TrustManager[]{
                 new X509TrustManager() {
                     @Override
@@ -48,15 +60,8 @@ public class CustomOpenAiService {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, trustAllCerts, new java.security.SecureRandom());
 
-            OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                .sslSocketFactory(sslContext.getSocketFactory(), (X509TrustManager) trustAllCerts[0])
-                .hostnameVerifier((hostname, session) -> true)
-                .addInterceptor(new AuthenticationInterceptor(apiKey))
-                .connectTimeout(timeout)
-                .readTimeout(timeout)
-                .writeTimeout(timeout)
-                .retryOnConnectionFailure(true)
-                .addInterceptor(new RetryInterceptor(3)); // Add retry interceptor
+            builder.sslSocketFactory(sslContext.getSocketFactory(), (X509TrustManager) trustAllCerts[0]);
+            builder.hostnameVerifier((hostname, session) -> true);
 
             return builder.build();
         } catch (Exception e) {

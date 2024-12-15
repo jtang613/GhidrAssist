@@ -40,7 +40,7 @@ public class LlmApi {
     
     public LlmApi(APIProvider provider) {
     	this.provider = provider;
-        this.service = new CustomOpenAiService(this.provider.getKey(), this.provider.getUrl()).getOpenAiService();
+        this.service = new CustomOpenAiService(this.provider.getKey(), this.provider.getUrl(), this.provider.isDisableTlsVerification()).getOpenAiService();
     }
 
     public String getSystemPrompt() {
