@@ -54,7 +54,7 @@ public class SettingsDialog extends DialogComponentProvider {
         JPanel panel = new JPanel(new BorderLayout());
 
         // Create the table
-        String[] columnNames = {"Name", "Model", "Max Tokens", "URL", "Key"};
+        String[] columnNames = {"Name", "Model", "Max Tokens", "URL", "Key", "Disable TLS Verify"};
         tableModel = new DefaultTableModel(columnNames, 0);
         table = new JTable(tableModel);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
@@ -66,9 +66,14 @@ public class SettingsDialog extends DialogComponentProvider {
                 provider.getModel(),
                 provider.getMaxTokens(),
                 provider.getUrl(),
-                provider.getKey()
+                provider.getKey(),
+                provider.isDisableTlsVerification()
             });
         }
+
+        // Make the TLS column use checkboxes
+        table.getColumnModel().getColumn(5).setCellRenderer(table.getDefaultRenderer(Boolean.class));
+        table.getColumnModel().getColumn(5).setCellEditor(table.getDefaultEditor(Boolean.class));
 
         JScrollPane tableScrollPane = new JScrollPane(table);
 
@@ -192,7 +197,7 @@ public class SettingsDialog extends DialogComponentProvider {
     }
 
     private void onAddProvider() {
-        APIProvider newProvider = new APIProvider("", "", "", "", "");
+        APIProvider newProvider = new APIProvider("", "", "", "", "", false);
         boolean isSaved = openProviderDialog(newProvider);
         if (isSaved) {
             apiProviders.add(newProvider);
@@ -201,7 +206,8 @@ public class SettingsDialog extends DialogComponentProvider {
                 newProvider.getModel(),
                 newProvider.getMaxTokens(),
                 newProvider.getUrl(),
-                newProvider.getKey()
+                newProvider.getKey(),
+                newProvider.isDisableTlsVerification()
             });
             activeProviderComboBox.addItem(newProvider.getName());
         }
@@ -216,7 +222,8 @@ public class SettingsDialog extends DialogComponentProvider {
                 provider.getModel(),
                 provider.getMaxTokens(),
                 provider.getUrl(),
-                provider.getKey()
+                provider.getKey(),
+                provider.isDisableTlsVerification()
             );
             boolean isSaved = openProviderDialog(editedProvider);
             if (isSaved) {
@@ -226,12 +233,14 @@ public class SettingsDialog extends DialogComponentProvider {
                 provider.setMaxTokens(editedProvider.getMaxTokens());
                 provider.setUrl(editedProvider.getUrl());
                 provider.setKey(editedProvider.getKey());
+                provider.setDisableTlsVerification(editedProvider.isDisableTlsVerification());
                 // Update the table model
                 tableModel.setValueAt(provider.getName(), selectedRow, 0);
                 tableModel.setValueAt(provider.getModel(), selectedRow, 1);
                 tableModel.setValueAt(provider.getMaxTokens(), selectedRow, 2);
                 tableModel.setValueAt(provider.getUrl(), selectedRow, 3);
                 tableModel.setValueAt(provider.getKey(), selectedRow, 4);
+                tableModel.setValueAt(provider.isDisableTlsVerification(), selectedRow, 5);
                 // Update the combo box
                 activeProviderComboBox.removeItemAt(selectedRow);
                 activeProviderComboBox.insertItemAt(provider.getName(), selectedRow);
@@ -270,6 +279,7 @@ public class SettingsDialog extends DialogComponentProvider {
         JTextField maxTokensField = new JTextField(provider.getMaxTokens(), 20);
         JTextField urlField = new JTextField(provider.getUrl(), 20);
         JTextField keyField = new JTextField(provider.getKey(), 20);
+        JCheckBox disableTlsVerifyCheckbox = new JCheckBox("Disable TLS Certificate Verification", provider.isDisableTlsVerification());
 
         JPanel panel = new JPanel(new GridLayout(0, 2));
         panel.add(new JLabel("Name:"));
@@ -282,6 +292,8 @@ public class SettingsDialog extends DialogComponentProvider {
         panel.add(urlField);
         panel.add(new JLabel("Key:"));
         panel.add(keyField);
+        panel.add(new JLabel("Insecure TLS:"));
+        panel.add(disableTlsVerifyCheckbox);
 
         int result = JOptionPane.showConfirmDialog(getComponent(), panel, "API Provider", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
 
@@ -291,6 +303,7 @@ public class SettingsDialog extends DialogComponentProvider {
             provider.setMaxTokens(maxTokensField.getText().trim());
             provider.setUrl(urlField.getText().trim());
             provider.setKey(keyField.getText().trim());
+            provider.setDisableTlsVerification(disableTlsVerifyCheckbox.isSelected());
             return true;
         } else {
             return false;
