@@ -4,6 +4,8 @@ import docking.DialogComponentProvider;
 import ghidra.framework.preferences.Preferences;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.event.TableModelEvent;
+import javax.swing.event.TableModelListener;
 import java.awt.*;
 import java.io.File;
 import java.lang.reflect.Type;
@@ -31,6 +33,22 @@ public class SettingsDialog extends DialogComponentProvider {
     private JComboBox<String> ragProviderComboBox;
     private String selectedRagProviderName;
 
+    // Define a table model that automatically trims whitespace when edited
+    static class TrimmedTableModel extends DefaultTableModel {
+
+        public TrimmedTableModel(Object[] columnNames, int rowCount) {
+            super(columnNames, rowCount);
+        }
+
+        @Override
+        public void setValueAt(Object aValue, int row, int column) {
+            if (aValue instanceof String) {
+                aValue = ((String) aValue).trim();
+            }
+            super.setValueAt(aValue, row, column);
+        }
+    }
+
     public SettingsDialog(Component parent, String title) {
         super(title, true, false, true, false);
 
@@ -55,7 +73,41 @@ public class SettingsDialog extends DialogComponentProvider {
 
         // Create the table
         String[] columnNames = {"Name", "Model", "Max Tokens", "URL", "Key", "Disable TLS Verify"};
-        tableModel = new DefaultTableModel(columnNames, 0);
+        tableModel = new TrimmedTableModel(columnNames, 0);
+        tableModel.addTableModelListener(new TableModelListener() {
+            @Override
+            public void tableChanged(TableModelEvent e) {
+                if (e.getType() == TableModelEvent.UPDATE) {
+                    // Update the provider when the table is edited
+                    int firstRow = e.getFirstRow();
+                    int lastRow = e.getLastRow();  // In case multiple rows are updated at once
+
+                    for (int row = firstRow; row <= lastRow; row++) {
+                        APIProvider provider = apiProviders.get(row);
+                        switch (e.getColumn()) {
+                            case 0:
+                                provider.setName((String) tableModel.getValueAt(row, 0));
+                                break;
+                            case 1:
+                                provider.setModel((String) tableModel.getValueAt(row, 1));
+                                break;
+                            case 2:
+                                provider.setMaxTokens((String) tableModel.getValueAt(row, 2));
+                                break;
+                            case 3:
+                                provider.setUrl((String) tableModel.getValueAt(row, 3));
+                                break;
+                            case 4:
+                                provider.setKey((String) tableModel.getValueAt(row, 4));
+                                break;
+                            case 5:
+                                provider.setDisableTlsVerification((Boolean) tableModel.getValueAt(row, 5));
+                                break;
+                        }
+                    }
+                }
+            }
+        });
         table = new JTable(tableModel);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
 
@@ -227,20 +279,13 @@ public class SettingsDialog extends DialogComponentProvider {
             );
             boolean isSaved = openProviderDialog(editedProvider);
             if (isSaved) {
-                // Update the provider
-                provider.setName(editedProvider.getName());
-                provider.setModel(editedProvider.getModel());
-                provider.setMaxTokens(editedProvider.getMaxTokens());
-                provider.setUrl(editedProvider.getUrl());
-                provider.setKey(editedProvider.getKey());
-                provider.setDisableTlsVerification(editedProvider.isDisableTlsVerification());
                 // Update the table model
-                tableModel.setValueAt(provider.getName(), selectedRow, 0);
-                tableModel.setValueAt(provider.getModel(), selectedRow, 1);
-                tableModel.setValueAt(provider.getMaxTokens(), selectedRow, 2);
-                tableModel.setValueAt(provider.getUrl(), selectedRow, 3);
-                tableModel.setValueAt(provider.getKey(), selectedRow, 4);
-                tableModel.setValueAt(provider.isDisableTlsVerification(), selectedRow, 5);
+                tableModel.setValueAt(editedProvider.getName(), selectedRow, 0);
+                tableModel.setValueAt(editedProvider.getModel(), selectedRow, 1);
+                tableModel.setValueAt(editedProvider.getMaxTokens(), selectedRow, 2);
+                tableModel.setValueAt(editedProvider.getUrl(), selectedRow, 3);
+                tableModel.setValueAt(editedProvider.getKey(), selectedRow, 4);
+                tableModel.setValueAt(editedProvider.isDisableTlsVerification(), selectedRow, 5);
                 // Update the combo box
                 activeProviderComboBox.removeItemAt(selectedRow);
                 activeProviderComboBox.insertItemAt(provider.getName(), selectedRow);
