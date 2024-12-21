@@ -71,8 +71,27 @@ dependencies {
 	implementation 'org.apache.lucene:lucene-core:9.11.1'
 	implementation 'org.apache.lucene:lucene-analysis-common:9.11.1'
 	implementation 'org.apache.lucene:lucene-queryparser:9.11.1'
+	implementation 'org.jruby:jruby-complete:9.4.9.0'
 
 }
+
+def gemInstallDir = "${project.buildDir}/jruby.home"
+
+task installRougeGem(type: Exec) {
+	// Ensure this task runs after dependencies are resolved
+	dependsOn configurations.runtimeClasspath
+
+	doFirst {
+		// Install rouge
+		def jrubyJar = configurations.runtimeClasspath.filter { it.name.contains('jruby-complete') }.first()
+		println "Using JRuby JAR: ${jrubyJar.absolutePath}"
+		commandLine 'java', '-jar', jrubyJar.absolutePath, '-S', 'gem', 'install', '-i', gemInstallDir, 'rouge', '-v', '4.5.1', '--no-document'
+	}
+}
+
+// Include the Ruby gems in the JAR file
+jar.into('META-INF/jruby.home') { from gemInstallDir }
+jar.dependsOn installRougeGem
 
 // Exclude additional files from the built extension
 // Ex: buildExtension.exclude '.idea/**'
