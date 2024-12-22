@@ -317,16 +317,6 @@ public class SettingsDialog extends DialogComponentProvider {
         selectedProviderName = (String) activeProviderComboBox.getSelectedItem();
         selectedRagProviderName = (String) ragProviderComboBox.getSelectedItem();
 
-        // Sync table data to apiProviders list
-        for (int i = 0; i < tableModel.getRowCount(); i++) {
-            APIProvider provider = apiProviders.get(i);
-            provider.setName((String) tableModel.getValueAt(i, 0));
-            provider.setModel((String) tableModel.getValueAt(i, 1));
-            provider.setMaxTokens((String) tableModel.getValueAt(i, 2));
-            provider.setUrl((String) tableModel.getValueAt(i, 3));
-            provider.setKey((String) tableModel.getValueAt(i, 4));
-            provider.setDisableTlsVerification((Boolean) tableModel.getValueAt(i, 5));
-        }
 
         // Serialize the list of providers to JSON
         Gson gson = new Gson();
