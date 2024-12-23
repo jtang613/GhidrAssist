@@ -15,6 +15,7 @@ import ghidra.util.task.TaskLauncher;
 import javax.swing.*;
 import javax.swing.event.HyperlinkEvent;
 import javax.swing.event.HyperlinkListener;
+import javax.swing.text.html.HTMLEditorKit;
 import javax.swing.table.DefaultTableModel;
 
 import java.awt.BorderLayout;
@@ -143,6 +144,13 @@ public class GhidrAssistProvider extends ComponentProvider {
         panel.add(tabbedPane, BorderLayout.CENTER);
     }
 
+    static class SecureHTMLEditorKit extends HTMLEditorKit {
+        @Override
+        public HTMLEditorKit.Parser getParser() {
+            return new SecureParserDelegator();
+        }
+    }
+
     private JPanel createExplainTab() {
         JPanel explainPanel = new JPanel(new BorderLayout());
 
@@ -157,6 +165,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         explainTextPane = new JEditorPane();
         explainTextPane.setEditable(false);
         explainTextPane.setContentType("text/html"); // Set content type to HTML
+        explainTextPane.setEditorKit(new SecureHTMLEditorKit());
         explainTextPane.addHyperlinkListener(new HyperlinkListener() {
             @Override
             public void hyperlinkUpdate(HyperlinkEvent e) {
@@ -203,6 +212,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         responseTextPane = new JEditorPane();
         responseTextPane.setEditable(false);
         responseTextPane.setContentType("text/html"); // Set content type to HTML
+        responseTextPane.setEditorKit(new SecureHTMLEditorKit());
         responseTextPane.addHyperlinkListener(new HyperlinkListener() {
             @Override
             public void hyperlinkUpdate(HyperlinkEvent e) {
