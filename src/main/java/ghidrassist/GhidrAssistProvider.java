@@ -29,7 +29,9 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
@@ -41,10 +43,25 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.stream.JsonReader;
+import com.vladsch.flexmark.ast.FencedCodeBlock;
 import com.vladsch.flexmark.html.HtmlRenderer;
+import com.vladsch.flexmark.html.HtmlRenderer.Builder;
+import com.vladsch.flexmark.html.HtmlRenderer.HtmlRendererExtension;
+import com.vladsch.flexmark.html.HtmlRendererOptions;
+import com.vladsch.flexmark.html.renderer.CoreNodeRenderer;
+import com.vladsch.flexmark.html.renderer.DelegatingNodeRendererFactory;
+import com.vladsch.flexmark.html.renderer.NodeRenderer;
+import com.vladsch.flexmark.html.renderer.NodeRenderingHandler;
 import com.vladsch.flexmark.parser.Parser;
 import com.vladsch.flexmark.util.ast.Document;
+import com.vladsch.flexmark.util.ast.Node;
+import com.vladsch.flexmark.util.data.DataHolder;
+import com.vladsch.flexmark.util.data.MutableDataHolder;
 import com.vladsch.flexmark.util.data.MutableDataSet;
+import com.vladsch.flexmark.util.sequence.BasedSequence;
+import org.jruby.embed.LocalContextScope;
+import org.jruby.embed.ScriptingContainer;
+import org.jetbrains.annotations.NotNull;
 
 import ghidrassist.SearchResult; 
 
@@ -106,6 +123,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         
         // Initialize Markdown parser and renderer
         MutableDataSet options = new MutableDataSet();
+        options.set(Parser.EXTENSIONS, Arrays.asList(HighlightedFencedCodeBlockExtension.create()));
         options.set(HtmlRenderer.SOFT_BREAK, "<br />\n");
         markdownParser = Parser.builder(options).build();
         htmlRenderer = HtmlRenderer.builder(options).build();
@@ -1314,6 +1332,94 @@ public class GhidrAssistProvider extends ComponentProvider {
             return instruction.getAddressString(true, true) + "  " + instruction.toString();
         } else {
             return null;
+        }
+    }
+
+    static class HighlightedFencedCodeBlockRenderer implements NodeRenderer {
+        final private boolean codeContentBlock;
+
+        final private ScriptingContainer jruby;
+
+        private String highlightWithRouge(String language, String code) {
+            String highlightedCode = (String) jruby.callMethod(jruby, "highlight_code", "base16.solarized.light", language, code);
+            return highlightedCode;
+        }
+
+        public HighlightedFencedCodeBlockRenderer(DataHolder options) {
+            codeContentBlock = Parser.FENCED_CODE_CONTENT_BLOCK.get(options);
+
+            // Initialize JRuby and Rouge
+            System.setProperty("jruby.gem.path", "uri:classloader:/META-INF/jruby.home/gems");
+            jruby = new ScriptingContainer(LocalContextScope.SINGLETON);
+            jruby.runScriptlet("$LOAD_PATH << 'uri:classloader:/META-INF/jruby.home/gems/rouge-4.5.1/lib'");
+            jruby.runScriptlet("require 'rouge'");
+            String highlightCodeFunction = ""
+                + "def highlight_code(theme, language, code)\n"
+                + "  lexer = Rouge::Lexer.find_fancy(language) || Rouge::Lexers::PlainText\n"
+                + "  formatter = Rouge::Formatters::HTMLInline.new(Rouge::Theme.find(theme))\n"
+                + "  formatter.format(lexer.lex(code))\n"
+                + "end\n";
+            jruby.runScriptlet(highlightCodeFunction);
+        }
+
+        public static class Factory implements DelegatingNodeRendererFactory {
+            @NotNull
+            @Override
+            public NodeRenderer apply(@NotNull DataHolder options) {
+                return new HighlightedFencedCodeBlockRenderer(options);
+            }
+
+            @Override
+            public Set<Class<?>> getDelegates() {
+                return null;
+            }
+        }
+
+        @Override
+        public Set<NodeRenderingHandler<?>> getNodeRenderingHandlers() {
+            HashSet<NodeRenderingHandler<?>> set = new HashSet<>();
+            set.add(new NodeRenderingHandler<>(FencedCodeBlock.class, (node, context, html) -> {
+                html.line();
+                html.srcPosWithTrailingEOL(node.getChars()).withAttr().tag("pre").openPre();
+
+                HtmlRendererOptions htmlOptions = context.getHtmlOptions();
+
+                //html.srcPosWithEOL(node.getContentChars()).withAttr(CoreNodeRenderer.CODE_CONTENT).tag("code");
+                if (codeContentBlock) {
+                    context.renderChildren(node);
+                } else {
+                    String language = "";
+                    BasedSequence info = node.getInfo();
+                    if (info.isNotNull() && !info.isBlank()) {
+                        language = node.getInfoDelimitedByAny(htmlOptions.languageDelimiterSet).unescape().toLowerCase();
+                    }
+
+                    // Highlight code using Rouge
+                    String code = node.getContentChars().normalizeEOL();
+                    String highlightedHtml = highlightWithRouge(language, code);
+                    html.raw(highlightedHtml);
+                }
+                //html.tag("/code");
+                html.tag("/pre").closePre();
+                html.lineIf(htmlOptions.htmlBlockCloseTagEol);
+            }));
+
+            return set;
+        }
+    }
+
+    static class HighlightedFencedCodeBlockExtension implements HtmlRendererExtension {
+        @Override
+        public void rendererOptions(@NotNull MutableDataHolder options) {
+        }
+
+        @Override
+        public void extend(@NotNull Builder htmlRendererBuilder, @NotNull String rendererType) {
+            htmlRendererBuilder.nodeRendererFactory(new HighlightedFencedCodeBlockRenderer.Factory());
+        }
+
+        static HighlightedFencedCodeBlockExtension create() {
+            return new HighlightedFencedCodeBlockExtension();
         }
     }
 
