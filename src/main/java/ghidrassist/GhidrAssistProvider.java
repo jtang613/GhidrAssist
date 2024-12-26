@@ -171,9 +171,9 @@ public class GhidrAssistProvider extends ComponentProvider {
             public void hyperlinkUpdate(HyperlinkEvent e) {
                 if (e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
                     String desc = e.getDescription();
-                    if (desc.equals("thumbsup")) {
+                    if (desc.equals("#ghidrassist-thumbs-up")) {
                         storeRLHFFeedback(1);
-                    } else if (desc.equals("thumbsdown")) {
+                    } else if (desc.equals("#ghidrassist-thumbs-down")) {
                         storeRLHFFeedback(0);
                     }
                 }
@@ -218,9 +218,9 @@ public class GhidrAssistProvider extends ComponentProvider {
             public void hyperlinkUpdate(HyperlinkEvent e) {
                 if (e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
                     String desc = e.getDescription();
-                    if (desc.equals("thumbsup")) {
+                    if (desc.equals("#ghidrassist-thumbs-up")) {
                         storeRLHFFeedback(1);
-                    } else if (desc.equals("thumbsdown")) {
+                    } else if (desc.equals("#ghidrassist-thumbs-down")) {
                         storeRLHFFeedback(0);
                     }
                 }
@@ -1335,7 +1335,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         String html = htmlRenderer.render(document);
 
         // Add RLHF feedback thumbs-up / thumbs-down buttons
-        String feedbackLinks = "<br> <div style=\"text-align: center; color: grey; font-size: 18px;\"><a href='thumbsup'>&#128077;</a> | <a href='thumbsdown'>&#128078;</a></div>";
+        String feedbackLinks = "<br> <div style=\"text-align: center; color: grey; font-size: 18px;\"><a href='#ghidrassist-thumbs-up'>&#128077;</a> | <a href='#ghidrassist-thumbs-down'>&#128078;</a></div>";
 
         // Optionally, wrap the HTML in basic tags to improve rendering
         String wrappedHtml = "<html><head><style>code { background-color: #f0f1f2; } pre code { background-color: #f6f8fa; } pre { margin-top: 0; margin-bottom: 8px; padding: 8px; font-size: 85%; line-height: 1.45; color: #1f2328; background-color: #f6f8fa; }</style></head><body>" + html + feedbackLinks + "</body></html>";
