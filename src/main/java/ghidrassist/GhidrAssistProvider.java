@@ -175,6 +175,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                         storeRLHFFeedback(1);
                     } else if (desc.equals("#ghidrassist-thumbs-down")) {
                         storeRLHFFeedback(0);
+                    } else {
+                        Msg.showInfo(getClass(), panel, "Unsupported Link", "This link is not supported.");
                     }
                 }
             }
@@ -222,6 +224,8 @@ public class GhidrAssistProvider extends ComponentProvider {
                         storeRLHFFeedback(1);
                     } else if (desc.equals("#ghidrassist-thumbs-down")) {
                         storeRLHFFeedback(0);
+                    } else {
+                        Msg.showInfo(getClass(), panel, "Unsupported Link", "This link is not supported.");
                     }
                 }
             }
