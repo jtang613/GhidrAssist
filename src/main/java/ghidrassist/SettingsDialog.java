@@ -30,6 +30,10 @@ public class SettingsDialog extends DialogComponentProvider {
     // RAG Provider
     private JComboBox<String> ragProviderComboBox;
     private String selectedRagProviderName;
+    
+    // Analysis database
+    private JTextField analysisDbPathField;
+    private JButton analysisDbBrowseButton;
 
     public SettingsDialog(Component parent, String title) {
         super(title, true, false, true, false);
@@ -45,6 +49,19 @@ public class SettingsDialog extends DialogComponentProvider {
 
         // Load the RLHF database path
         String rlhfDbPath = Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db");
+        
+        // Create the Analysis database path components
+        String analysisDbPath = Preferences.getProperty("GhidrAssist.AnalysisDBPath", "ghidrassist_analysis.db");
+        JLabel analysisDbPathLabel = new JLabel("Analysis Database Path:");
+        analysisDbPathField = new JTextField(analysisDbPath, 20);
+        analysisDbBrowseButton = new JButton("Browse...");
+
+        analysisDbBrowseButton.addActionListener(e -> onBrowseAnalysisDbPath());
+
+        JPanel analysisDbPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        analysisDbPanel.add(analysisDbPathLabel);
+        analysisDbPanel.add(analysisDbPathField);
+        analysisDbPanel.add(analysisDbBrowseButton);
 
         // Load the Lucene index path
         String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene");
@@ -140,6 +157,7 @@ public class SettingsDialog extends DialogComponentProvider {
         topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
         topPanel.add(activeProviderPanel);
         topPanel.add(rlhfDbPanel);
+        topPanel.add(analysisDbPanel);
         topPanel.add(luceneIndexPanel);
         topPanel.add(ragProviderPanel);
 
@@ -193,6 +211,26 @@ public class SettingsDialog extends DialogComponentProvider {
         if (result == JFileChooser.APPROVE_OPTION) {
             File selectedFile = fileChooser.getSelectedFile();
             rlhfDbPathField.setText(selectedFile.getAbsolutePath());
+        }
+    }
+    
+    private void onBrowseAnalysisDbPath() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setDialogTitle("Select Analysis Database File");
+        fileChooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+
+        // Set current directory to the existing path if it exists
+        String currentPath = analysisDbPathField.getText();
+        if (!currentPath.isEmpty()) {
+            File currentFile = new File(currentPath);
+            fileChooser.setCurrentDirectory(currentFile.getParentFile());
+            fileChooser.setSelectedFile(currentFile);
+        }
+
+        int result = fileChooser.showOpenDialog(getComponent());
+        if (result == JFileChooser.APPROVE_OPTION) {
+            File selectedFile = fileChooser.getSelectedFile();
+            analysisDbPathField.setText(selectedFile.getAbsolutePath());
         }
     }
 
@@ -324,6 +362,10 @@ public class SettingsDialog extends DialogComponentProvider {
 
         // Get the RLHF database path from the text field
         String rlhfDbPath = rlhfDbPathField.getText().trim();
+        // Get the Analysis database path from the text field
+        String analysisDbPath = analysisDbPathField.getText().trim();
+        // Add to the preferences storage:
+        Preferences.setProperty("GhidrAssist.AnalysisDBPath", analysisDbPath);
         // Get the Lucene index path from the text field
         String luceneIndexPath = luceneIndexPathField.getText().trim();
 
