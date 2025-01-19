@@ -86,6 +86,9 @@ public class GhidrAssistProvider extends ComponentProvider {
     private RLHFDatabase rlhfDatabase;
     private String lastPrompt;
     private String lastResponse;
+    
+    // Analysis database
+    private AnalysisDB analysisDB;
 
     // Flexmark parser and renderer
     private Parser markdownParser;
@@ -103,6 +106,9 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         // Initialize RLHFDatabase
         rlhfDatabase = new RLHFDatabase();
+
+        // Initialize AnalysisDB
+        analysisDB = new AnalysisDB();
         
         // Initialize Markdown parser and renderer
         MutableDataSet options = new MutableDataSet();
@@ -437,10 +443,26 @@ public class GhidrAssistProvider extends ComponentProvider {
             Address address = loc.getAddress();
             if (address != null) {
                 offsetField.setText(address.toString());
+                
+                // Check for existing analysis
+                Function function = plugin.getCurrentFunction();
+                if (function != null) {
+                    AnalysisDB.Analysis analysis = analysisDB.getAnalysis(
+                        plugin.getCurrentProgram().getName(),
+                        function.getEntryPoint()
+                    );
+                    if (analysis != null) {
+                        String html = markdownToHtml(analysis.getResponse());
+                        explainTextPane.setText(html);
+                        explainTextPane.setCaretPosition(0);
+                    } else {
+                        explainTextPane.setText("");
+                    }
+                }
             }
         }
     }
-    
+
     private void onAnalyzeFunctionClicked() {
         if (isQueryRunning.get()) {
             // If the query is running, stop it
@@ -834,12 +856,23 @@ public class GhidrAssistProvider extends ComponentProvider {
                         @Override
                         public void onComplete(String fullResponse) {
                             SwingUtilities.invokeLater(() -> {
-                            	lastResponse = fullResponse;
+                                lastResponse = fullResponse;
                                 String html = markdownToHtml(fullResponse);
                                 explainTextPane.setText(html);
-                                explainTextPane.setCaretPosition(0); // Scroll to top
+                                explainTextPane.setCaretPosition(0);
                                 explainFunctionButton.setText("Explain Function");
                                 isQueryRunning.set(false);
+                                
+                                // Store the analysis result
+                                Function currentFunction = plugin.getCurrentFunction();
+                                if (currentFunction != null) {
+                                    analysisDB.upsertAnalysis(
+                                        plugin.getCurrentProgram().getName(),
+                                        currentFunction.getEntryPoint(),
+                                        prompt,
+                                        fullResponse
+                                    );
+                                }
                             });
                         }
 
