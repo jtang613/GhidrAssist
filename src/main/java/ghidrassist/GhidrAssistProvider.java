@@ -448,7 +448,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                 Function function = plugin.getCurrentFunction();
                 if (function != null) {
                     AnalysisDB.Analysis analysis = analysisDB.getAnalysis(
-                        plugin.getCurrentProgram().getName(),
+                        plugin.getCurrentProgram().getExecutableSHA256(),
                         function.getEntryPoint()
                     );
                     if (analysis != null) {
@@ -867,7 +867,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                                 Function currentFunction = plugin.getCurrentFunction();
                                 if (currentFunction != null) {
                                     analysisDB.upsertAnalysis(
-                                        plugin.getCurrentProgram().getName(),
+                                        plugin.getCurrentProgram().getExecutableSHA256(),
                                         currentFunction.getEntryPoint(),
                                         prompt,
                                         fullResponse
