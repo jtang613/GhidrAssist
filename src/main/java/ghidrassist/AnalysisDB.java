@@ -26,26 +26,26 @@ public class AnalysisDB {
 
     private void createAnalysisTable() throws SQLException {
         String createTableSQL = "CREATE TABLE IF NOT EXISTS GHAnalysis ("
-                + "program_name TEXT NOT NULL,"
+                + "program_hash TEXT NOT NULL,"
                 + "function_address TEXT NOT NULL,"
                 + "query TEXT NOT NULL,"
                 + "response TEXT NOT NULL,"
                 + "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,"
-                + "PRIMARY KEY (program_name, function_address)"
+                + "PRIMARY KEY (program_hash, function_address)"
                 + ")";
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createTableSQL);
         }
     }
 
-    public void upsertAnalysis(String programName, Address functionAddress, String query, String response) {
-        String upsertSQL = "INSERT INTO GHAnalysis (program_name, function_address, query, response) "
+    public void upsertAnalysis(String programHash, Address functionAddress, String query, String response) {
+        String upsertSQL = "INSERT INTO GHAnalysis (program_hash, function_address, query, response) "
                 + "VALUES (?, ?, ?, ?) "
-                + "ON CONFLICT(program_name, function_address) "
+                + "ON CONFLICT(program_hash, function_address) "
                 + "DO UPDATE SET query = ?, response = ?, timestamp = CURRENT_TIMESTAMP";
         
         try (PreparedStatement pstmt = connection.prepareStatement(upsertSQL)) {
-            pstmt.setString(1, programName);
+            pstmt.setString(1, programHash);
             pstmt.setString(2, functionAddress.toString());
             pstmt.setString(3, query);
             pstmt.setString(4, response);
@@ -57,12 +57,12 @@ public class AnalysisDB {
         }
     }
 
-    public Analysis getAnalysis(String programName, Address functionAddress) {
+    public Analysis getAnalysis(String programHash, Address functionAddress) {
         String selectSQL = "SELECT query, response, timestamp FROM GHAnalysis "
-                + "WHERE program_name = ? AND function_address = ?";
+                + "WHERE program_hash = ? AND function_address = ?";
         
         try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
-            pstmt.setString(1, programName);
+            pstmt.setString(1, programHash);
             pstmt.setString(2, functionAddress.toString());
             
             ResultSet rs = pstmt.executeQuery();
