@@ -11,19 +11,22 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.regex.Pattern;
 
 public class LlmApi {
 
     private OpenAiService service;
     private APIProvider provider;
-
+    
+    // Pattern for matching complete <think> blocks and opening/closing tags
+    private static final Pattern COMPLETE_THINK_PATTERN = Pattern.compile("<think>.*?</think>", Pattern.DOTALL);
     private final String SYSTEM_PROMPT =  
-			"    You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
-			+ "    familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
-			+ "    You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
-			+ "    such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.\n"
-			+ "    You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
-			+ "    You format code blocks using back-tick code-fencing.\\n";
+            "    You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
+            + "    familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
+            + "    You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
+            + "    such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.\n"
+            + "    You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
+            + "    You format code blocks using back-tick code-fencing.\\n";
     private final String FUNCTION_PROMPT = "USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.";
     private final String FORMAT_PROMPT = 
     "The output MUST strictly adhere to the following JSON format, do not include any other text.\n" +
@@ -38,13 +41,77 @@ public class LlmApi {
     "```\n" +
     "REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!";
     
+    /**
+     * Helper class to track streaming state and filter think blocks
+     */
+    private static class StreamingResponseFilter {
+        private StringBuilder buffer = new StringBuilder();
+        private StringBuilder visibleBuffer = new StringBuilder();
+        private boolean insideThinkBlock = false;
+        
+        public String processChunk(String chunk) {
+            if (chunk == null) {
+                return null;
+            }
+            
+            buffer.append(chunk);
+            
+            // Process the buffer until we can't anymore
+            String currentBuffer = buffer.toString();
+            int lastSafeIndex = 0;
+            
+            for (int i = 0; i < currentBuffer.length(); i++) {
+                // Look for start tag
+                if (!insideThinkBlock && currentBuffer.startsWith("<think>", i)) {
+                    // Append everything up to this point to visible buffer
+                    visibleBuffer.append(currentBuffer.substring(lastSafeIndex, i));
+                    insideThinkBlock = true;
+                    lastSafeIndex = i + 7; // Skip "<think>"
+                    i += 6; // Move past "<think>"
+                }
+                // Look for end tag
+                else if (insideThinkBlock && currentBuffer.startsWith("</think>", i)) {
+                    insideThinkBlock = false;
+                    lastSafeIndex = i + 8; // Skip "</think>"
+                    i += 7; // Move past "</think>"
+                }
+            }
+            
+            // If we're not in a think block, append any remaining safe content
+            if (!insideThinkBlock) {
+                visibleBuffer.append(currentBuffer.substring(lastSafeIndex));
+                // Clear processed content from buffer
+                buffer.setLength(0);
+            } else {
+                // Keep everything from lastSafeIndex in buffer
+                buffer = new StringBuilder(currentBuffer.substring(lastSafeIndex));
+            }
+            
+            return visibleBuffer.toString();
+        }
+        
+        public String getFilteredContent() {
+            return visibleBuffer.toString();
+        }
+    }
+    
     public LlmApi(APIProvider provider) {
-    	this.provider = provider;
+        this.provider = provider;
         this.service = new CustomOpenAiService(this.provider.getKey(), this.provider.getUrl(), this.provider.isDisableTlsVerification()).getOpenAiService();
     }
 
     public String getSystemPrompt() {
-    	return this.SYSTEM_PROMPT;
+        return this.SYSTEM_PROMPT;
+    }
+    
+    /**
+     * Filters out complete <think> blocks from non-streaming response text
+     */
+    private String filterThinkBlocks(String response) {
+        if (response == null) {
+            return null;
+        }
+        return COMPLETE_THINK_PATTERN.matcher(response).replaceAll("").trim();
     }
     
     public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
@@ -60,17 +127,14 @@ public class LlmApi {
         ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
         messages.add(userMessage);
 
-        // Build the ChatCompletionRequest with functions
         ChatCompletionRequest chatCompletionRequest = ChatCompletionRequest.builder()
                 .model(this.provider.getModel())
                 .messages(messages)
                 .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
-                //.temperature(0.7)
                 .functions(functions)
-                .functionCall(null) // Let the assistant decide
+                .functionCall(null)
                 .build();
 
-        // Execute the request asynchronously
         CompletableFuture.supplyAsync(() -> {
             try {
                 return service.createChatCompletion(chatCompletionRequest);
@@ -78,19 +142,18 @@ public class LlmApi {
                 throw new CompletionException(e);
             }
         }).thenAccept(chatCompletionResult -> {
-            if (!responseHandler.shouldContinue()) {  // Check if the process should continue after receiving the result
+            if (!responseHandler.shouldContinue()) {
                 return;
             }
             if (chatCompletionResult != null && !chatCompletionResult.getChoices().isEmpty()) {
                 ChatMessage message = chatCompletionResult.getChoices().get(0).getMessage();
                 if (message.getFunctionCall() != null) {
-                    // Handle function call
                     String functionName = message.getFunctionCall().getName();
                     JsonNode arguments = message.getFunctionCall().getArguments();
                     String fullResponse = "{ \"name\": \"" + functionName + "\", \"arguments\": " + arguments.toString() + " }";
-                    responseHandler.onComplete(fullResponse);
+                    responseHandler.onComplete(filterThinkBlocks(fullResponse));
                 } else {
-                    responseHandler.onComplete(message.getContent());
+                    responseHandler.onComplete(filterThinkBlocks(message.getContent()));
                 }
             } else {
                 responseHandler.onError(new Exception("Empty response from LLM."));
@@ -108,7 +171,7 @@ public class LlmApi {
         }
 
         List<ChatMessage> messages = new ArrayList<>();
-        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), this.SYSTEM_PROMPT  );
+        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), this.SYSTEM_PROMPT);
         messages.add(systemMessage);
 
         ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
@@ -119,32 +182,31 @@ public class LlmApi {
                 .model(this.provider.getModel())
                 .messages(messages)
                 .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
-                //.temperature(0.7)
-                .stream(true) // Enable streaming
+                .stream(true)
                 .build();
         
         if(!responseHandler.shouldContinue()) {
-        	return;
+            return;
         }
 
         Flowable<ChatCompletionChunk> flowable = service.streamChatCompletion(chatCompletionRequest);
 
         AtomicBoolean isFirst = new AtomicBoolean(true);
-        StringBuilder responseBuilder = new StringBuilder();
+        StreamingResponseFilter filter = new StreamingResponseFilter();
 
         flowable.subscribe(
                 chunk -> {
-                	if (responseHandler.shouldContinue()) {
-	                    ChatMessage delta = chunk.getChoices().get(0).getMessage();
-	                    if (delta.getContent() != null) {
-	                        if (isFirst.getAndSet(false)) {
-	                            responseHandler.onStart();
-	                        }
-	                        responseBuilder.append(delta.getContent());
-	                        responseHandler.onUpdate(responseBuilder.toString());
-	                    }
-                	} else {
-                        // Query was cancelled, stop further execution
+                    if (responseHandler.shouldContinue()) {
+                        ChatMessage delta = chunk.getChoices().get(0).getMessage();
+                        if (delta.getContent() != null) {
+                            if (isFirst.getAndSet(false)) {
+                                responseHandler.onStart();
+                            }
+                            // Process chunk and get filtered content
+                            String filteredContent = filter.processChunk(delta.getContent());
+                            responseHandler.onUpdate(filteredContent);
+                        }
+                    } else {
                         flowable.unsubscribeOn(Schedulers.io());
                     }
                 },
@@ -153,7 +215,7 @@ public class LlmApi {
                     responseHandler.onError(error);
                 },
                 () -> {
-                    responseHandler.onComplete(responseBuilder.toString());
+                    responseHandler.onComplete(filter.getFilteredContent());
                 }
         );
     }
@@ -163,9 +225,8 @@ public class LlmApi {
         void onUpdate(String partialResponse);
         void onComplete(String fullResponse);
         void onError(Throwable error);
-        // This method checks if the process should continue or stop
         default boolean shouldContinue() {
-            return true; // Override this method for cancellation logic
+            return true;
         }
     }
 }
