@@ -17,6 +17,10 @@ public class LlmApi {
 
     private OpenAiService service;
     private APIProvider provider;
+    private volatile Flowable<ChatCompletionChunk> currentStream;
+    private volatile io.reactivex.disposables.Disposable currentSubscription;
+    private final Object streamLock = new Object();
+
     
     // Pattern for matching complete <think> blocks and opening/closing tags
     private static final Pattern COMPLETE_THINK_PATTERN = Pattern.compile("<think>.*?</think>", Pattern.DOTALL);
@@ -126,61 +130,14 @@ public class LlmApi {
         return COMPLETE_THINK_PATTERN.matcher(response).replaceAll("").trim();
     }
     
-    public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
-        if (service == null) {
-            Msg.showError(this, null, "Service Error", "OpenAI service is not initialized.");
-            return;
-        }
-
-        List<ChatMessage> messages = new ArrayList<>();
-        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), this.SYSTEM_PROMPT + "\n" + this.FUNCTION_PROMPT + "\n" + this.FORMAT_PROMPT);
-        messages.add(systemMessage);
-
-        ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
-        messages.add(userMessage);
-
-        ChatCompletionRequest chatCompletionRequest = ChatCompletionRequest.builder()
-                .model(this.provider.getModel())
-                .messages(messages)
-                .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
-                .functions(functions)
-                .functionCall(null)
-                .build();
-
-        CompletableFuture.supplyAsync(() -> {
-            try {
-                return service.createChatCompletion(chatCompletionRequest);
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        }).thenAccept(chatCompletionResult -> {
-            if (!responseHandler.shouldContinue()) {
-                return;
-            }
-            if (chatCompletionResult != null && !chatCompletionResult.getChoices().isEmpty()) {
-                ChatMessage message = chatCompletionResult.getChoices().get(0).getMessage();
-                if (message.getFunctionCall() != null) {
-                    String functionName = message.getFunctionCall().getName();
-                    JsonNode arguments = message.getFunctionCall().getArguments();
-                    String fullResponse = "{ \"name\": \"" + functionName + "\", \"arguments\": " + arguments.toString() + " }";
-                    responseHandler.onComplete(filterThinkBlocks(fullResponse));
-                } else {
-                    responseHandler.onComplete(filterThinkBlocks(message.getContent()));
-                }
-            } else {
-                responseHandler.onError(new Exception("Empty response from LLM."));
-            }
-        }).exceptionally(throwable -> {
-            responseHandler.onError(throwable);
-            return null;
-        });
-    }
-
     public void sendRequestAsync(String prompt, LlmResponseHandler responseHandler) {
         if (service == null) {
             Msg.showError(this, null, "Service Error", "OpenAI service is not initialized.");
             return;
         }
+
+        // Cancel any existing stream
+        cancelCurrentRequest();
 
         List<ChatMessage> messages = new ArrayList<>();
         ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), this.SYSTEM_PROMPT);
@@ -196,40 +153,132 @@ public class LlmApi {
                 .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
                 .stream(true)
                 .build();
-        
-        if(!responseHandler.shouldContinue()) {
+
+        if (!responseHandler.shouldContinue()) {
             return;
         }
 
-        Flowable<ChatCompletionChunk> flowable = service.streamChatCompletion(chatCompletionRequest);
+        try {
+            synchronized (streamLock) {
+                currentStream = service.streamChatCompletion(chatCompletionRequest);
+                
+                AtomicBoolean isFirst = new AtomicBoolean(true);
+                StreamingResponseFilter filter = new StreamingResponseFilter();
 
-        AtomicBoolean isFirst = new AtomicBoolean(true);
-        StreamingResponseFilter filter = new StreamingResponseFilter();
-
-        flowable.subscribe(
-                chunk -> {
-                    if (responseHandler.shouldContinue()) {
-                        ChatMessage delta = chunk.getChoices().get(0).getMessage();
-                        if (delta.getContent() != null) {
-                            if (isFirst.getAndSet(false)) {
-                                responseHandler.onStart();
+                currentSubscription = currentStream
+                    .subscribeOn(Schedulers.io())
+                    .subscribe(
+                        chunk -> {
+                            if (responseHandler.shouldContinue()) {
+                                ChatMessage delta = chunk.getChoices().get(0).getMessage();
+                                if (delta.getContent() != null) {
+                                    if (isFirst.getAndSet(false)) {
+                                        responseHandler.onStart();
+                                    }
+                                    String filteredContent = filter.processChunk(delta.getContent());
+                                    responseHandler.onUpdate(filteredContent);
+                                }
+                            } else {
+                                // If handler says to stop, dispose of the subscription
+                                cancelCurrentRequest();
                             }
-                            // Process chunk and get filtered content
-                            String filteredContent = filter.processChunk(delta.getContent());
-                            responseHandler.onUpdate(filteredContent);
+                        },
+                        error -> {
+                            synchronized (streamLock) {
+                                currentStream = null;
+                                currentSubscription = null;
+                            }
+                            if (!isDisposedException(error)) {
+                                Msg.showError(this, null, "LLM Error", "An error occurred: " + error.getMessage());
+                                responseHandler.onError(error);
+                            }
+                        },
+                        () -> {
+                            synchronized (streamLock) {
+                                currentStream = null;
+                                currentSubscription = null;
+                            }
+                            responseHandler.onComplete(filter.getFilteredContent());
                         }
-                    } else {
-                        flowable.unsubscribeOn(Schedulers.io());
-                    }
-                },
-                error -> {
-                    Msg.showError(this, null, "LLM Error", "An error occurred: " + error.getMessage());
-                    responseHandler.onError(error);
-                },
-                () -> {
-                    responseHandler.onComplete(filter.getFilteredContent());
+                    );
+            }
+        } catch (Exception e) {
+            responseHandler.onError(e);
+        }
+    }
+
+    public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
+        if (service == null) {
+            Msg.showError(this, null, "Service Error", "OpenAI service is not initialized.");
+            return;
+        }
+
+        // Cancel any existing request
+        cancelCurrentRequest();
+
+        List<ChatMessage> messages = new ArrayList<>();
+        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), 
+            this.SYSTEM_PROMPT + "\n" + this.FUNCTION_PROMPT + "\n" + this.FORMAT_PROMPT);
+        messages.add(systemMessage);
+
+        ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
+        messages.add(userMessage);
+
+        ChatCompletionRequest chatCompletionRequest = ChatCompletionRequest.builder()
+                .model(this.provider.getModel())
+                .messages(messages)
+                .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
+                .functions(functions)
+                .functionCall(null)
+                .build();
+
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                if (!responseHandler.shouldContinue()) {
+                    return null;
                 }
-        );
+                return service.createChatCompletion(chatCompletionRequest);
+            } catch (Exception e) {
+                throw new CompletionException(e);
+            }
+        }).thenAccept(chatCompletionResult -> {
+            if (chatCompletionResult == null || !responseHandler.shouldContinue()) {
+                return;
+            }
+            if (!chatCompletionResult.getChoices().isEmpty()) {
+                ChatMessage message = chatCompletionResult.getChoices().get(0).getMessage();
+                if (message.getFunctionCall() != null) {
+                    String functionName = message.getFunctionCall().getName();
+                    JsonNode arguments = message.getFunctionCall().getArguments();
+                    String fullResponse = "{ \"name\": \"" + functionName + 
+                        "\", \"arguments\": " + arguments.toString() + " }";
+                    responseHandler.onComplete(filterThinkBlocks(fullResponse));
+                } else {
+                    responseHandler.onComplete(filterThinkBlocks(message.getContent()));
+                }
+            } else {
+                responseHandler.onError(new Exception("Empty response from LLM."));
+            }
+        }).exceptionally(throwable -> {
+            responseHandler.onError(throwable);
+            return null;
+        });
+    }
+
+    // Add method to cancel current request
+    public void cancelCurrentRequest() {
+        synchronized (streamLock) {
+            if (currentSubscription != null && !currentSubscription.isDisposed()) {
+                currentSubscription.dispose();
+                currentSubscription = null;
+            }
+            currentStream = null;
+        }
+    }
+
+    // Helper method to check if an error is from disposing the subscription
+    private boolean isDisposedException(Throwable error) {
+        return error.getMessage().contains("The consumer was disposed");
     }
 
     public interface LlmResponseHandler {
