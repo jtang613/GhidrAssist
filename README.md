@@ -9,7 +9,7 @@ _A plugin that provides LLM helpers to explain code and assist in RE._
 
 ## Description:
 
-This is a LLM plugin aimed at enabling the use of local LLM's (ollama, text-generation-webui, lm-studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others should work as well.
+This is a LLM plugin aimed at enabling the use of local LLM's (ollama, text-generation-webui, lm-studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others such as DeepSeek and ChatGPT work as well.
 
 Current features include:
 * Explain the current function - Works for disassembly and pseudo-C.
@@ -28,8 +28,9 @@ Future Roadmap:
 ## Quickstart
 
 * If necessary, copy the binary release ZIP archive to the Ghidra_Install/Extensions/Ghidra directory.
-* Launch Ghidra -> File -> Configure -> Miscellaneous -> Enable GhidrAssist.
+* Launch Ghidra -> File -> Install Extension -> Enable GhidrAssist.
 * Load a binary and launch the CodeBrowser.
+* CodeBrowser -> File -> Configure -> Miscellaneous -> Enable GhidrAssist.
 * Open Tool Settings -> GhidraAssist.
 * Ensure the RLHF and RAG database paths are appropriate for your environment.
 * Point the API host to your preferred API provider and set the API key. 

@@ -797,15 +797,16 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     private void onExplainFunctionClicked() {
         if (isQueryRunning.get()) {
-            // If the query is running, stop it
+            // If query is running, stop it
+            explainFunctionButton.setText("Explain Function");
             isQueryRunning.set(false);
+            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+            llmApi.cancelCurrentRequest();
             return;
         }
-        else {
-            // Set the button to "Stop" and set the query as running
-            explainFunctionButton.setText("Stop");
-            isQueryRunning.set(true);
-        }
+        
+        explainFunctionButton.setText("Stop");
+        isQueryRunning.set(true);
         
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
@@ -903,15 +904,16 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     private void onExplainLineClicked() {
         if (isQueryRunning.get()) {
-            // If the query is running, stop it
+            // If query is running, stop it
+            explainLineButton.setText("Explain Line");
             isQueryRunning.set(false);
+            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+            llmApi.cancelCurrentRequest();
             return;
         }
-        else {
-            // Set the button to "Stop" and set the query as running
-            explainLineButton.setText("Stop");
-            isQueryRunning.set(true);
-        }
+        
+        explainLineButton.setText("Stop");
+        isQueryRunning.set(true);
         
         Address currentAddress = plugin.getCurrentAddress();
         if (currentAddress == null) {
@@ -1007,15 +1009,16 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     private void onQuerySubmitClicked() {
         if (isQueryRunning.get()) {
-            // If the query is running, stop it
+            // If query is running, stop it
+            submitButton.setText("Submit");
             isQueryRunning.set(false);
+            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+            llmApi.cancelCurrentRequest();
             return;
         }
-        else {
-	        // Set the button to "Stop" and set the query as running
-	        submitButton.setText("Stop");
-	        isQueryRunning.set(true);
-        }
+        
+        submitButton.setText("Stop");
+        isQueryRunning.set(true);
         
         String query = queryTextArea.getText();
 
