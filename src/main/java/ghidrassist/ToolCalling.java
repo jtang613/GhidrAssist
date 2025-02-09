@@ -174,6 +174,7 @@ public class ToolCalling {
             }
         }
         if (success == false) {
+        	program.endTransaction(transaction, success);
 	        throw new InvalidInputException("Variable not found: " + varName);
         }
         program.endTransaction(transaction, success);
