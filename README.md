@@ -25,6 +25,10 @@ Future Roadmap:
 * Agentic assistant - Use Autogen or similar framework for self-guided binary RE.
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
+## Screenshot
+![Screenshot](/res/screenshot1.png)
+![Screenshots](/res/screenshots_anim.gif)
+
 ## Quickstart
 
 * If necessary, copy the binary release ZIP archive to the Ghidra_Install/Extensions/Ghidra directory.
@@ -36,9 +40,18 @@ Future Roadmap:
 * Point the API host to your preferred API provider and set the API key. 
 * Open GhidrAssist with the GhidrAssist option in the Windows menu and start exploring.
 
-## Screenshot
-![Screenshot](/res/screenshot1.png)
-![Screenshots](/res/screenshots_anim.gif)
+## LLMs
+
+General LLM setup is a bit outside the scope of this project since there's so many different options and there are plenty of sources that cover the topic much better than I could. It assumes one already has access to an OpenAI-compatible API provider.
+Here's a few resources that might get you started:
+
+https://lmstudio.ai/docs/basics
+https://github.com/ollama/ollama#running-local-builds
+https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key
+https://docs.anthropic.com/en/docs/initial-setup
+
+For local LLM's, I've found that the Llama3.3:70b, Llama3.1:8b and DeepSeek-r1 produce good results.
+From OpenAI, the gpt-4o-mini produces good results. I've not yet tested Claude, but I expect it would work fine as well.
 
 ## Homepage
 https://github.com/jtang613/GhidrAssist
