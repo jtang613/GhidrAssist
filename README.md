@@ -48,10 +48,10 @@ Here's a few resources that might get you started:
 - https://lmstudio.ai/docs/basics
 - https://github.com/ollama/ollama#running-local-builds
 - https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key
-- https://docs.anthropic.com/en/docs/initial-setup
+- ~https://docs.anthropic.com/en/docs/initial-setup~
 
 For local LLM's, I've found that the Llama3.3:70b, Llama3.1:8b and DeepSeek-r1 produce good results.
-From OpenAI, the gpt-4o-mini produces good results. I've not yet tested Claude, but I expect it would work fine as well.
+From OpenAI, the gpt-4o-mini produces good results. ~I've not yet tested Claude, but I expect it would work fine as well.~
 
 ## Homepage
 https://github.com/jtang613/GhidrAssist
