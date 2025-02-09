@@ -8,6 +8,7 @@ import okhttp3.*;
 import retrofit2.Retrofit;
 import retrofit2.adapter.rxjava2.RxJava2CallAdapterFactory;
 import retrofit2.converter.jackson.JacksonConverterFactory;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.io.IOException;
 import java.time.Duration;
 import javax.net.ssl.*;
@@ -72,11 +73,10 @@ public class CustomOpenAiService {
     private Retrofit buildRetrofit(OkHttpClient client, String apiHost) {
         ObjectMapper objectMapper = new ObjectMapper()
                 .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-        		.configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false)
+                .configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false)
                 .configure(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES, false)
-                .configure(DeserializationFeature.FAIL_ON_UNRESOLVED_OBJECT_IDS, false);
-
-
+                .configure(DeserializationFeature.FAIL_ON_UNRESOLVED_OBJECT_IDS, false)
+                .setSerializationInclusion(JsonInclude.Include.NON_NULL);  // Add this line
 
         return new Retrofit.Builder()
                 .baseUrl(apiHost)
