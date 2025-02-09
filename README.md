@@ -45,10 +45,10 @@ Future Roadmap:
 General LLM setup is a bit outside the scope of this project since there's so many different options and there are plenty of sources that cover the topic much better than I could. It assumes one already has access to an OpenAI-compatible API provider.
 Here's a few resources that might get you started:
 
-https://lmstudio.ai/docs/basics
-https://github.com/ollama/ollama#running-local-builds
-https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key
-https://docs.anthropic.com/en/docs/initial-setup
+- https://lmstudio.ai/docs/basics
+- https://github.com/ollama/ollama#running-local-builds
+- https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key
+- https://docs.anthropic.com/en/docs/initial-setup
 
 For local LLM's, I've found that the Llama3.3:70b, Llama3.1:8b and DeepSeek-r1 produce good results.
 From OpenAI, the gpt-4o-mini produces good results. I've not yet tested Claude, but I expect it would work fine as well.
