@@ -76,7 +76,7 @@ public class CustomOpenAiService {
                 .configure(DeserializationFeature.FAIL_ON_INVALID_SUBTYPE, false)
                 .configure(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES, false)
                 .configure(DeserializationFeature.FAIL_ON_UNRESOLVED_OBJECT_IDS, false)
-                .setSerializationInclusion(JsonInclude.Include.NON_NULL);  // Add this line
+                .setSerializationInclusion(JsonInclude.Include.NON_NULL);  
 
         return new Retrofit.Builder()
                 .baseUrl(apiHost)
