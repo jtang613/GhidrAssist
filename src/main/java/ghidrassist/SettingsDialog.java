@@ -143,7 +143,7 @@ public class SettingsDialog extends DialogComponentProvider {
         luceneIndexPanel.add(luceneIndexPathField);
         luceneIndexPanel.add(luceneIndexBrowseButton);
         
-        String[] ragProviders = { "OPENAI", "OLLAMA", "NONE" };
+        String[] ragProviders = { "OPENAI", "OLLAMA", "LMS", "NONE" };
         ragProviderComboBox = new JComboBox<>(ragProviders);
         selectedRagProviderName = Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE");
         ragProviderComboBox.setSelectedItem(selectedRagProviderName);

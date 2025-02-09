@@ -40,7 +40,7 @@ public class CustomEmbeddingService {
     }
 
     public enum EmbeddingProvider {
-        OPENAI, OLLAMA, NONE
+        OPENAI, OLLAMA, LMS, NONE
     }
 
     public double[] getEmbedding(String text) throws IOException {
@@ -51,6 +51,8 @@ public class CustomEmbeddingService {
                 return getOllamaEmbedding(text);
             case OPENAI:
                 return getOpenAIEmbedding(text);
+            case LMS:
+                return getLMSEmbedding(text);
             case NONE:
             default:
                 return new double[0]; // Return an empty result list
@@ -120,6 +122,51 @@ public class CustomEmbeddingService {
         String responseString = response.body().string();
         JsonObject responseObject = (JsonObject) gson.fromJson(responseString, JsonElement.class);
         JsonArray embeddingsArray = responseObject.getAsJsonArray("embedding");
+        if (embeddingsArray == null || embeddingsArray.size() == 0) {
+            throw new IOException("No embeddings found in the response");
+        }
+
+        JsonArray embeddings = embeddingsArray;
+        double[] embeddingArray = new double[embeddings.size()];
+        for (int i = 0; i < embeddings.size(); i++) {
+            embeddingArray[i] = embeddings.get(i).getAsDouble();
+        }
+        return embeddingArray;
+    }
+
+    private double[] getLMSEmbedding(String text) throws IOException {
+        String url = apiUrl + "embeddings";
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", "text-embedding-nomic-embed-text-v1.5"); // Default LMS text embedding model
+        payload.addProperty("encoding_format", "float");
+        payload.addProperty("input", text);
+        payload.add("options", new JsonObject());
+
+        RequestBody body = RequestBody.create(MediaType.get("application/json; charset=utf-8"), gson.toJson(payload));
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "application/json")
+                .post(body)
+                .build();
+
+        client = createHttpClient(disableTlsVerification);
+        Response response = client.newCall(request).execute();
+        if (!response.isSuccessful()) {
+            System.out.println("Failed to get embedding: " + response.code() + "\n" + response.message());
+            throw new IOException("Failed to get embedding: " + response.code() + "\n" + response.message());
+        }
+
+        String responseString = response.body().string();
+        JsonObject responseObject = (JsonObject) gson.fromJson(responseString, JsonElement.class);
+        // Get the "data" array
+        JsonArray dataArray = responseObject.getAsJsonArray("data");
+        // Get the first object in the data array
+        JsonObject embeddingObject = dataArray.get(0).getAsJsonObject();
+        // Get the "embedding" array
+        JsonArray embeddingsArray = embeddingObject.getAsJsonArray("embedding");
         if (embeddingsArray == null || embeddingsArray.size() == 0) {
             throw new IOException("No embeddings found in the response");
         }
