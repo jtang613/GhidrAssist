@@ -35,7 +35,7 @@ Future Roadmap:
 * Launch Ghidra -> File -> Install Extension -> Enable GhidrAssist.
 * Load a binary and launch the CodeBrowser.
 * CodeBrowser -> File -> Configure -> Miscellaneous -> Enable GhidrAssist.
-* Open Tool Settings -> GhidraAssist.
+* CodeBrowser -> Tools -> GhidraAssist Settings.
 * Ensure the RLHF and RAG database paths are appropriate for your environment.
 * Point the API host to your preferred API provider and set the API key. 
 * Open GhidrAssist with the GhidrAssist option in the Windows menu and start exploring.
