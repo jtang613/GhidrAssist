@@ -311,6 +311,46 @@ public class SettingsDialog extends DialogComponentProvider {
         }
     }
 
+    private boolean validateProviderFields(String name, String model, String maxTokens, String url, String key) {
+        StringBuilder errorMessage = new StringBuilder();
+        
+        // Check for empty fields
+        if (name.isEmpty()) errorMessage.append("Name is required.\n");
+        if (model.isEmpty()) errorMessage.append("Model is required.\n");
+        if (maxTokens.isEmpty()) errorMessage.append("Max tokens is required.\n");
+        if (url.isEmpty()) errorMessage.append("URL is required.\n");
+        if (key.isEmpty()) errorMessage.append("Key is required.\n");
+        
+        // Validate max tokens is a positive integer
+        if (!maxTokens.isEmpty()) {
+            try {
+                int tokens = Integer.parseInt(maxTokens);
+                if (tokens <= 0) {
+                    errorMessage.append("Max tokens must be a positive integer.\n");
+                }
+            } catch (NumberFormatException e) {
+                errorMessage.append("Max tokens must be a valid integer.\n");
+            }
+        }
+        
+        // Show error message if any validation failed
+        if (errorMessage.length() > 0) {
+            JOptionPane.showMessageDialog(
+                getComponent(),
+                errorMessage.toString(),
+                "Validation Error",
+                JOptionPane.ERROR_MESSAGE
+            );
+            return false;
+        }
+        
+        return true;
+    }
+
+    private String ensureTrailingSlash(String url) {
+        return url.endsWith("/") ? url : url + "/";
+    }
+
     private boolean openProviderDialog(APIProvider provider) {
         JTextField nameField = new JTextField(provider.getName(), 20);
         JTextField modelField = new JTextField(provider.getModel(), 20);
@@ -333,17 +373,34 @@ public class SettingsDialog extends DialogComponentProvider {
         panel.add(new JLabel("Insecure TLS:"));
         panel.add(disableTlsVerifyCheckbox);
 
-        int result = JOptionPane.showConfirmDialog(getComponent(), panel, "API Provider", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        while (true) {
+            int result = JOptionPane.showConfirmDialog(getComponent(), panel, "API Provider", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
 
-        if (result == JOptionPane.OK_OPTION) {
-            provider.setName(nameField.getText().trim());
-            provider.setModel(modelField.getText().trim());
-            provider.setMaxTokens(maxTokensField.getText().trim());
-            provider.setUrl(urlField.getText().trim());
-            provider.setKey(keyField.getText().trim());
-            provider.setDisableTlsVerification(disableTlsVerifyCheckbox.isSelected());
-            return true;
-        } else {
+            if (result == JOptionPane.OK_OPTION) {
+                String name = nameField.getText().trim();
+                String model = modelField.getText().trim();
+                String maxTokens = maxTokensField.getText().trim();
+                String url = urlField.getText().trim();
+                String key = keyField.getText().trim();
+                
+                // Validate all fields
+                if (validateProviderFields(name, model, maxTokens, url, key)) {
+                    // Ensure URL has trailing slash
+                    url = ensureTrailingSlash(url);
+                    
+                    // Set the values in the provider object
+                    provider.setName(name);
+                    provider.setModel(model);
+                    provider.setMaxTokens(maxTokens);
+                    provider.setUrl(url);
+                    provider.setKey(key);
+                    provider.setDisableTlsVerification(disableTlsVerifyCheckbox.isSelected());
+                    return true;
+                }
+                // If validation failed, continue the loop to show the dialog again
+                continue;
+            }
+            // User clicked Cancel
             return false;
         }
     }
