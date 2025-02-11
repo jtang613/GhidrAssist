@@ -40,15 +40,17 @@ public class CustomEmbeddingService {
     }
 
     public enum EmbeddingProvider {
-        OPENAI, OLLAMA, LMS, NONE
+        OPENWEBUI, OPENAI, OLLAMA, LMS, NONE
     }
 
     public double[] getEmbedding(String text) throws IOException {
     	this.init();
     	embeddingProvider = EmbeddingProvider.valueOf(Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE"));
         switch (embeddingProvider) {
-            case OLLAMA:
-                return getOllamaEmbedding(text);
+	        case OPENWEBUI:
+	            return getOpenWebUIEmbedding(text);
+	        case OLLAMA:
+	            return getOllamaEmbedding(text);
             case OPENAI:
                 return getOpenAIEmbedding(text);
             case LMS:
@@ -95,6 +97,44 @@ public class CustomEmbeddingService {
     }
 
     private double[] getOllamaEmbedding(String text) throws IOException {
+        String url = apiUrl + "api/embed";
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", this.apiModel);
+        payload.addProperty("input", text);
+
+        RequestBody body = RequestBody.create(MediaType.get("application/json; charset=utf-8"), gson.toJson(payload));
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer " + apiKey)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("Accept", "application/json")
+                .post(body)
+                .build();
+
+        client = createHttpClient(disableTlsVerification);
+        Response response = client.newCall(request).execute();
+        if (!response.isSuccessful()) {
+            System.out.println("Failed to get embedding: " + response.code() + "\n" + response.message());
+            throw new IOException("Failed to get embedding: " + response.code() + "\n" + response.message());
+        }
+
+        String responseString = response.body().string();
+        JsonObject responseObject = (JsonObject) gson.fromJson(responseString, JsonElement.class);
+        JsonArray embeddingsArray = responseObject.getAsJsonArray("embeddings");
+        if (embeddingsArray == null || embeddingsArray.size() == 0) {
+            throw new IOException("No embeddings found in the response");
+        }
+
+        JsonArray embeddings = (JsonArray) embeddingsArray.get(0);
+        double[] embeddingArray = new double[embeddings.size()];
+        for (int i = 0; i < embeddings.size(); i++) {
+            embeddingArray[i] = embeddings.get(i).getAsDouble();
+        }
+        return embeddingArray;
+    }
+
+    private double[] getOpenWebUIEmbedding(String text) throws IOException {
         String url = apiUrl.replace("v1/", "ollama/api/") + "embeddings";
 
         JsonObject payload = new JsonObject();
