@@ -6,6 +6,7 @@ _A plugin that provides LLM helpers to explain code and assist in RE._
 ## Support Continued Improvements
 
 [!["Buy Me A Beer"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/jtang613)
+[!["Patreon"](https://c14.patreon.com/thumbnail_Patreon_Wordmark_fb38c295a1.png)](https://patreon.com/jtang613)
 
 ## Description:
 
