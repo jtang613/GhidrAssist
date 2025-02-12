@@ -3,11 +3,6 @@ Author: **Jason Tang**
 
 _A plugin that provides LLM helpers to explain code and assist in RE._
 
-## Support Continued Improvements
-
-[!["Buy Me A Beer"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/jtang613)
-[!["Patreon"](https://c14.patreon.com/thumbnail_Patreon_Wordmark_fb38c295a1.png)](https://patreon.com/jtang613)
-
 ## Description:
 
 This is a LLM plugin aimed at enabling the use of local LLM's (ollama, text-generation-webui, lm-studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others such as DeepSeek and ChatGPT work as well.
