@@ -118,6 +118,7 @@ public class CustomOpenAiService {
         public Response intercept(Chain chain) throws IOException {
             Request request = chain.request();
             Response response = null;
+            String error = "";
             IOException exception = null;
 
             int tryCount = 0;
@@ -127,6 +128,7 @@ public class CustomOpenAiService {
                     if (response.isSuccessful()) {
                         return response;
                     } else {
+                    	error = response.body().string();
                         response.close();
                     }
                 } catch (IOException e) {
@@ -141,6 +143,9 @@ public class CustomOpenAiService {
 
             if (exception != null) {
                 throw exception;
+            }
+            if (!response.isSuccessful()) {
+                throw new IOException(error);
             }
             return response;
         }

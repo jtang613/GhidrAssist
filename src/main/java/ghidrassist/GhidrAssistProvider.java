@@ -1071,7 +1071,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                 try {
                     // Use LlmApi to send request
                     LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
-                    llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
+                    llmApi.sendRequestAsync(conversationHistory.toString(), new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
                             SwingUtilities.invokeLater(() -> {
@@ -1084,7 +1084,7 @@ public class GhidrAssistProvider extends ComponentProvider {
                         @Override
                         public void onUpdate(String partialResponse) {
                             // Append only the new portion of the response
-                            if (!partialResponse.equals(previousResponseChunk)) {
+                        	if (!partialResponse.equals(previousResponseChunk)) {
                                 String newChunk = partialResponse.substring(previousResponseChunk.length());
                                 currentResponse.append(newChunk);
                                 previousResponseChunk = partialResponse;

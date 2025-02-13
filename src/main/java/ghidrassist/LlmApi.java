@@ -52,8 +52,6 @@ public class LlmApi {
         private StringBuilder buffer = new StringBuilder();
         private StringBuilder visibleBuffer = new StringBuilder();
         private boolean insideThinkBlock = false;
-        private boolean hasPlaceholder = false;
-        private static final String PROCESSING_PLACEHOLDER = "Thinking...";
         
         public String processChunk(String chunk) {
             if (chunk == null) {
@@ -72,22 +70,12 @@ public class LlmApi {
                     // Append everything up to this point to visible buffer
                     visibleBuffer.append(currentBuffer.substring(lastSafeIndex, i));
                     insideThinkBlock = true;
-                    // Add processing placeholder
-                    if (!hasPlaceholder) {
-                        visibleBuffer.append(PROCESSING_PLACEHOLDER);
-                        hasPlaceholder = true;
-                    }
                     lastSafeIndex = i + 7; // Skip "<think>"
                     i += 6; // Move past "<think>"
                 }
                 // Look for end tag
                 else if (insideThinkBlock && currentBuffer.startsWith("</think>", i)) {
                     insideThinkBlock = false;
-                    // Remove placeholder when think block ends
-                    if (hasPlaceholder) {
-                        visibleBuffer.setLength(visibleBuffer.length() - PROCESSING_PLACEHOLDER.length());
-                        hasPlaceholder = false;
-                    }
                     lastSafeIndex = i + 8; // Skip "</think>"
                     i += 7; // Move past "</think>"
                 }
@@ -140,7 +128,7 @@ public class LlmApi {
         cancelCurrentRequest();
 
         List<ChatMessage> messages = new ArrayList<>();
-        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), this.SYSTEM_PROMPT);
+        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.USER.value(), this.SYSTEM_PROMPT);
         messages.add(systemMessage);
 
         ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
@@ -217,7 +205,7 @@ public class LlmApi {
         cancelCurrentRequest();
 
         List<ChatMessage> messages = new ArrayList<>();
-        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.SYSTEM.value(), 
+        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.USER.value(), 
             this.SYSTEM_PROMPT + "\n" + this.FUNCTION_PROMPT + "\n" + this.FORMAT_PROMPT);
         messages.add(systemMessage);
 
