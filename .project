@@ -27,4 +27,10 @@
 			<location>/home/jtang613/tools/ghidra_11.3_PUBLIC</location>
 		</link>
 	</linkedResources>
+	<variableList>
+		<variable>
+			<name>GHIDRA_INSTALL_DIR</name>
+			<value>file:/home/jtang613/tools/ghidra_11.3_PUBLIC</value>
+		</variable>
+	</variableList>
 </projectDescription>
