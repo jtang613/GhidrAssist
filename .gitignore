@@ -6,3 +6,4 @@ os/
 .settings/
 .classpath
 /ghidrassist_rlhf.db
+/ghidrassist_analysis.db
