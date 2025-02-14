@@ -76,7 +76,9 @@ public class SettingsDialog extends DialogComponentProvider {
         // Create the table
         String[] columnNames = {"Name", "Model", "Max Tokens", "URL", "Key", "Disable TLS Verify"};
         tableModel = new DefaultTableModel(columnNames, 0) {
-            @Override
+            private static final long serialVersionUID = 1L;
+
+			@Override
             public Class<?> getColumnClass(int column) {
                 // Return Boolean.class for the Disable TLS Verify column
                 return column == 5 ? Boolean.class : String.class;

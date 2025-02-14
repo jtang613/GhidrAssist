@@ -44,9 +44,7 @@ import com.google.gson.stream.JsonReader;
 import com.vladsch.flexmark.html.HtmlRenderer;
 import com.vladsch.flexmark.parser.Parser;
 import com.vladsch.flexmark.util.ast.Document;
-import com.vladsch.flexmark.util.data.MutableDataSet;
-
-import ghidrassist.SearchResult; 
+import com.vladsch.flexmark.util.data.MutableDataSet; 
 
 public class GhidrAssistProvider extends ComponentProvider {
 
