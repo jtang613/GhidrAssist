@@ -7,6 +7,7 @@ import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.event.FocusEvent;
 import java.awt.event.FocusListener;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.lang.reflect.Type;
 import java.util.List;
@@ -122,16 +123,23 @@ public class SettingsDialog extends DialogComponentProvider {
         buttonPanel.add(editButton);
         buttonPanel.add(deleteButton);
 
-        // Create the active provider combo box
+     // Create the active provider combo box
         activeProviderComboBox = new JComboBox<>();
         for (APIProvider provider : apiProviders) {
             activeProviderComboBox.addItem(provider.getName());
         }
         activeProviderComboBox.setSelectedItem(selectedProviderName);
 
-        JPanel activeProviderPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        // Create the active provider panel with test button
+        JPanel activeProviderPanel = new JPanel();
+        activeProviderPanel.setLayout(new BoxLayout(activeProviderPanel, BoxLayout.X_AXIS));
         activeProviderPanel.add(new JLabel("Active API Provider:"));
+        activeProviderPanel.add(Box.createHorizontalStrut(5)); // Add some spacing
+        activeProviderComboBox.setMaximumSize(new Dimension(200, activeProviderComboBox.getPreferredSize().height));
         activeProviderPanel.add(activeProviderComboBox);
+        activeProviderPanel.add(Box.createHorizontalStrut(5)); // Add some spacing
+        activeProviderPanel.add(new APITestPanel());
+        activeProviderPanel.add(Box.createHorizontalGlue()); // This will push everything to the left
 
         // Create the RLHF database path components
         JLabel rlhfDbPathLabel = new JLabel("RLHF Database Path:");
@@ -508,6 +516,138 @@ public class SettingsDialog extends DialogComponentProvider {
         @Override
         public String getText() {
             return showingPlaceholder ? "" : super.getText();
+        }
+    }
+    
+    private class APITestPanel extends JPanel {
+        private static final long serialVersionUID = 1L;
+        private JButton testButton;
+        private JLabel statusLabel;
+        private ImageIcon successIcon;
+        private ImageIcon failureIcon;
+        private boolean isTestInProgress = false;
+
+        public APITestPanel() {
+            setLayout(new FlowLayout(FlowLayout.LEFT));
+            
+            // Create icons
+            successIcon = createColoredIcon(Color.GREEN);
+            failureIcon = createColoredIcon(Color.RED);
+            
+            // Create components
+            testButton = new JButton("Test");
+            statusLabel = new JLabel();
+            statusLabel.setPreferredSize(new Dimension(20, 20));
+            
+            // Add action listener
+            testButton.addActionListener(e -> performTest());
+            
+            // Add components
+            add(testButton);
+            add(statusLabel);
+        }
+        
+        private ImageIcon createColoredIcon(Color color) {
+            int size = 16;
+            BufferedImage image = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+            Graphics2D g2d = image.createGraphics();
+            
+            if (color == Color.GREEN) {
+                // Draw checkmark
+                g2d.setColor(color);
+                g2d.setStroke(new BasicStroke(2));
+                g2d.drawLine(3, 8, 7, 12);
+                g2d.drawLine(7, 12, 13, 4);
+            } else {
+                // Draw X
+                g2d.setColor(color);
+                g2d.setStroke(new BasicStroke(2));
+                g2d.drawLine(4, 4, 12, 12);
+                g2d.drawLine(4, 12, 12, 4);
+            }
+            
+            g2d.dispose();
+            return new ImageIcon(image);
+        }
+        
+        public void performTest() {
+            if (isTestInProgress) {
+                return;
+            }
+            
+            String selectedProvider = (String) activeProviderComboBox.getSelectedItem();
+            if (selectedProvider == null || selectedProvider.isEmpty()) {
+                JOptionPane.showMessageDialog(this, 
+                    "Please select an API provider first.", 
+                    "No Provider Selected", 
+                    JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            
+            // Find the selected provider
+            APIProvider provider = null;
+            for (APIProvider p : apiProviders) {
+                if (p.getName().equals(selectedProvider)) {
+                    provider = p;
+                    break;
+                }
+            }
+            
+            if (provider == null) {
+                JOptionPane.showMessageDialog(this,
+                    "Selected provider not found.",
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            
+            isTestInProgress = true;
+            testButton.setEnabled(false);
+            statusLabel.setIcon(null);
+            statusLabel.setText("Testing...");
+            
+            // Create a new LlmApi instance for testing
+            LlmApi testApi = new LlmApi(provider);
+            
+            // Create a simple test prompt
+            String testPrompt = "Test connection. Please respond with 'OK'.";
+            
+            testApi.sendRequestAsync(testPrompt, new LlmApi.LlmResponseHandler() {
+                StringBuilder response = new StringBuilder();
+                
+                @Override
+                public void onStart() {}
+                
+                @Override
+                public void onUpdate(String partialResponse) {
+                    response.append(partialResponse);
+                }
+                
+                @Override
+                public void onComplete(String fullResponse) {
+                    SwingUtilities.invokeLater(() -> {
+                        statusLabel.setIcon(successIcon);
+                        statusLabel.setText("");
+                        testButton.setEnabled(true);
+                        isTestInProgress = false;
+                    });
+                }
+                
+                @Override
+                public void onError(Throwable error) {
+                    SwingUtilities.invokeLater(() -> {
+                        statusLabel.setIcon(failureIcon);
+                        statusLabel.setText("");
+                        testButton.setEnabled(true);
+                        isTestInProgress = false;
+                        
+                        JOptionPane.showMessageDialog(SettingsDialog.this.getComponent(),
+                            "API test failed: " + error.getMessage(),
+                            "Test Failed",
+                            JOptionPane.ERROR_MESSAGE);
+                    });
+                }
+            });
         }
     }
 }
