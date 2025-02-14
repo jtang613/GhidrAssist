@@ -5,6 +5,8 @@ import ghidra.framework.preferences.Preferences;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.awt.event.FocusEvent;
+import java.awt.event.FocusListener;
 import java.io.File;
 import java.lang.reflect.Type;
 import java.util.List;
@@ -72,9 +74,21 @@ public class SettingsDialog extends DialogComponentProvider {
 
         // Create the table
         String[] columnNames = {"Name", "Model", "Max Tokens", "URL", "Key", "Disable TLS Verify"};
-        tableModel = new DefaultTableModel(columnNames, 0);
+        tableModel = new DefaultTableModel(columnNames, 0) {
+            @Override
+            public Class<?> getColumnClass(int column) {
+                // Return Boolean.class for the Disable TLS Verify column
+                return column == 5 ? Boolean.class : String.class;
+            }
+            
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false; // Make all cells non-editable
+            }
+        };
         table = new JTable(tableModel);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
 
         // Populate the table model with the data
         for (APIProvider provider : apiProviders) {
@@ -352,11 +366,28 @@ public class SettingsDialog extends DialogComponentProvider {
     }
 
     private boolean openProviderDialog(APIProvider provider) {
-        JTextField nameField = new JTextField(provider.getName(), 20);
-        JTextField modelField = new JTextField(provider.getModel(), 20);
-        JTextField maxTokensField = new JTextField(provider.getMaxTokens(), 20);
-        JTextField urlField = new JTextField(provider.getUrl(), 20);
-        JTextField keyField = new JTextField(provider.getKey(), 20);
+        // Create text fields with placeholders for new providers
+        JTextField nameField;
+        JTextField modelField;
+        JTextField maxTokensField;
+        JTextField urlField;
+        JTextField keyField;
+        if (provider.getName().isEmpty()) {
+            // This is a new provider, use placeholder text
+            nameField = new PlaceholderTextField("gpt-4o-mini", 20);
+            modelField = new PlaceholderTextField("gpt-4o-mini", 20);
+            maxTokensField = new PlaceholderTextField("8192", 20);
+            urlField = new PlaceholderTextField("https://api.openai.com/v1/", 20);
+            keyField = new PlaceholderTextField("Enter your API key", 20);
+        } else {
+            // This is an existing provider, use current values
+            nameField = new JTextField(provider.getName(), 20);
+            modelField = new JTextField(provider.getModel(), 20);
+            maxTokensField = new JTextField(provider.getMaxTokens(), 20);
+            urlField = new JTextField(provider.getUrl(), 20);
+            keyField = new JTextField(provider.getKey(), 20);
+        }
+
         JCheckBox disableTlsVerifyCheckbox = new JCheckBox("Disable TLS Certificate Verification", provider.isDisableTlsVerification());
 
         JPanel panel = new JPanel(new GridLayout(0, 2));
@@ -435,5 +466,48 @@ public class SettingsDialog extends DialogComponentProvider {
         Preferences.store(); // Save preferences to disk
 
         close();
+    }
+    
+    public class PlaceholderTextField extends JTextField {
+        private static final long serialVersionUID = 1L;
+    	private boolean showingPlaceholder;
+        private Color placeholderColor;
+        private Color textColor;
+
+        public PlaceholderTextField(String placeholder, int columns) {
+            super(columns);
+            this.showingPlaceholder = true;
+            this.placeholderColor = Color.GRAY;
+            this.textColor = getForeground();
+            
+            // Show placeholder initially
+            super.setText(placeholder);
+            setForeground(placeholderColor);
+
+            addFocusListener(new FocusListener() {
+                @Override
+                public void focusGained(FocusEvent e) {
+                    if (showingPlaceholder) {
+                        showingPlaceholder = false;
+                        setText("");
+                        setForeground(textColor);
+                    }
+                }
+
+                @Override
+                public void focusLost(FocusEvent e) {
+                    if (getText().isEmpty()) {
+                        showingPlaceholder = true;
+                        setText(placeholder);
+                        setForeground(placeholderColor);
+                    }
+                }
+            });
+        }
+
+        @Override
+        public String getText() {
+            return showingPlaceholder ? "" : super.getText();
+        }
     }
 }
