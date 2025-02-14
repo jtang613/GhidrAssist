@@ -640,11 +640,6 @@ public class SettingsDialog extends DialogComponentProvider {
                         statusLabel.setText("");
                         testButton.setEnabled(true);
                         isTestInProgress = false;
-                        
-                        JOptionPane.showMessageDialog(SettingsDialog.this.getComponent(),
-                            "API test failed: " + error.getMessage(),
-                            "Test Failed",
-                            JOptionPane.ERROR_MESSAGE);
                     });
                 }
             });
