@@ -1,53 +1,49 @@
 package ghidrassist;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.launchableinc.openai.completion.chat.*;
-import com.launchableinc.openai.service.OpenAiService;
-import ghidra.util.Msg;
-import io.reactivex.Flowable;
-import io.reactivex.schedulers.Schedulers;
-
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
+import ghidra.util.Msg;
+import ghidrassist.APIProvider.APIProvider;
+import ghidrassist.APIProvider.APIProviderConfig;
+import ghidrassist.APIProvider.ChatMessage;
 
 public class LlmApi {
-
-    private OpenAiService service;
     private APIProvider provider;
-    private volatile Flowable<ChatCompletionChunk> currentStream;
-    private volatile io.reactivex.disposables.Disposable currentSubscription;
     private final Object streamLock = new Object();
-
+    private volatile boolean isStreaming = false;
     
     // Pattern for matching complete <think> blocks and opening/closing tags
     private static final Pattern COMPLETE_THINK_PATTERN = Pattern.compile("<think>.*?</think>", Pattern.DOTALL);
-    private final String SYSTEM_PROMPT =  
-            "    You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
-            + "    familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
-            + "    You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
-            + "    such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.\n"
-            + "    You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
-            + "    You format code blocks using back-tick code-fencing.\\n";
+    
+    private final String SYSTEM_PROMPT = 
+            "You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
+            + "familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
+            + "You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
+            + "such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.\n"
+            + "You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
+            + "You format code blocks using back-tick code-fencing.\n";
+            
     private final String FUNCTION_PROMPT = "USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.";
     private final String FORMAT_PROMPT = 
-    "The output MUST strictly adhere to the following JSON format, do not include any other text.\n" +
-    "The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.\n" +
-    "```\n" +
-    "{\n" +
-    "    \"tool_calls\": [\n" +
-    "    {\"name\": \"rename_function\", \"arguments\": {\"new_name\": \"new_name\"}},\n" +
-    "    ... (more tool calls as required)\n" +
-    "    ]\n" +
-    "}\n" +
-    "```\n" +
-    "REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!";
+        "The output MUST strictly adhere to the following JSON format, do not include any other text.\n" +
+        "The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.\n" +
+        "```\n" +
+        "{\n" +
+        "    \"tool_calls\": [\n" +
+        "    {\"name\": \"rename_function\", \"arguments\": {\"new_name\": \"new_name\"}},\n" +
+        "    ... (more tool calls as required)\n" +
+        "    ]\n" +
+        "}\n" +
+        "```\n" +
+        "REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!";
     
-    /**
-     * Helper class to track streaming state and filter think blocks
-     */
+    public String getSystemPrompt() {
+        return this.SYSTEM_PROMPT;
+    }
+
     private static class StreamingResponseFilter {
         private StringBuilder buffer = new StringBuilder();
         private StringBuilder visibleBuffer = new StringBuilder();
@@ -99,18 +95,10 @@ public class LlmApi {
         }
     }
     
-    public LlmApi(APIProvider provider) {
-        this.provider = provider;
-        this.service = new CustomOpenAiService(this.provider.getKey(), this.provider.getUrl(), this.provider.isDisableTlsVerification()).getOpenAiService();
+    public LlmApi(APIProviderConfig config) {
+        this.provider = config.createProvider();
     }
 
-    public String getSystemPrompt() {
-        return this.SYSTEM_PROMPT;
-    }
-    
-    /**
-     * Filters out complete <think> blocks from non-streaming response text
-     */
     private String filterThinkBlocks(String response) {
         if (response == null) {
             return null;
@@ -119,8 +107,8 @@ public class LlmApi {
     }
     
     public void sendRequestAsync(String prompt, LlmResponseHandler responseHandler) {
-        if (service == null) {
-            Msg.showError(this, null, "Service Error", "OpenAI service is not initialized.");
+        if (provider == null) {
+            Msg.showError(this, null, "Service Error", "LLM provider is not initialized.");
             return;
         }
 
@@ -128,19 +116,8 @@ public class LlmApi {
         cancelCurrentRequest();
 
         List<ChatMessage> messages = new ArrayList<>();
-        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.USER.value(), this.SYSTEM_PROMPT);
-        messages.add(systemMessage);
-
-        ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
-        messages.add(userMessage);
-
-        ChatCompletionRequest chatCompletionRequest = ChatCompletionRequest
-                .builder()
-                .model(this.provider.getModel())
-                .messages(messages)
-                .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
-                .stream(true)
-                .build();
+        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, this.SYSTEM_PROMPT));
+        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
 
         if (!responseHandler.shouldContinue()) {
             return;
@@ -148,47 +125,52 @@ public class LlmApi {
 
         try {
             synchronized (streamLock) {
-                currentStream = service.streamChatCompletion(chatCompletionRequest);
-                
-                AtomicBoolean isFirst = new AtomicBoolean(true);
+                isStreaming = true;
                 StreamingResponseFilter filter = new StreamingResponseFilter();
+                
+                provider.streamChatCompletion(messages, new LlmResponseHandler() {
+                    private boolean isFirst = true;
 
-                currentSubscription = currentStream
-                    .subscribeOn(Schedulers.io())
-                    .subscribe(
-                        chunk -> {
-                            if (responseHandler.shouldContinue()) {
-                                ChatMessage delta = chunk.getChoices().get(0).getMessage();
-                                if (delta.getContent() != null) {
-                                    if (isFirst.getAndSet(false)) {
-                                        responseHandler.onStart();
-                                    }
-                                    String filteredContent = filter.processChunk(delta.getContent());
-                                    responseHandler.onUpdate(filteredContent);
-                                }
-                            } else {
-                                // If handler says to stop, dispose of the subscription
-                                cancelCurrentRequest();
-                            }
-                        },
-                        error -> {
-                            synchronized (streamLock) {
-                                currentStream = null;
-                                currentSubscription = null;
-                            }
-                            if (!isDisposedException(error)) {
-                                Msg.showError(this, null, "LLM Error", "An error occurred: " + error.getMessage());
-                                responseHandler.onError(error);
-                            }
-                        },
-                        () -> {
-                            synchronized (streamLock) {
-                                currentStream = null;
-                                currentSubscription = null;
-                            }
-                            responseHandler.onComplete(filter.getFilteredContent());
+                    @Override
+                    public void onStart() {
+                        if (isFirst) {
+                            responseHandler.onStart();
+                            isFirst = false;
                         }
-                    );
+                    }
+
+                    @Override
+                    public void onUpdate(String partialResponse) {
+                        String filteredContent = filter.processChunk(partialResponse);
+                        if (filteredContent != null && !filteredContent.isEmpty()) {
+                            responseHandler.onUpdate(filteredContent);
+                        }
+                    }
+
+                    @Override
+                    public void onComplete(String fullResponse) {
+                        synchronized (streamLock) {
+                            isStreaming = false;
+                        }
+                        responseHandler.onComplete(filter.getFilteredContent());
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        synchronized (streamLock) {
+                            isStreaming = false;
+                        }
+                        if (!error.getMessage().contains("cancelled")) {
+                            Msg.showError(LlmApi.this, null, "LLM Error", "An error occurred: " + error.getMessage());
+                        }
+                        responseHandler.onError(error);
+                    }
+
+                    @Override
+                    public boolean shouldContinue() {
+                        return responseHandler.shouldContinue();
+                    }
+                });
             }
         } catch (Exception e) {
             responseHandler.onError(e);
@@ -196,77 +178,28 @@ public class LlmApi {
     }
 
     public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
-        if (service == null) {
-            Msg.showError(this, null, "Service Error", "OpenAI service is not initialized.");
+        if (provider == null) {
+            Msg.showError(this, null, "Service Error", "LLM provider is not initialized.");
             return;
         }
 
-        // Cancel any existing request
-        cancelCurrentRequest();
-
         List<ChatMessage> messages = new ArrayList<>();
-        ChatMessage systemMessage = new ChatMessage(ChatMessageRole.USER.value(), 
-            this.SYSTEM_PROMPT + "\n" + this.FUNCTION_PROMPT + "\n" + this.FORMAT_PROMPT);
-        messages.add(systemMessage);
+        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, 
+            this.SYSTEM_PROMPT + "\n" + this.FUNCTION_PROMPT + "\n" + this.FORMAT_PROMPT));
+        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
 
-        ChatMessage userMessage = new ChatMessage(ChatMessageRole.USER.value(), prompt);
-        messages.add(userMessage);
-
-        ChatCompletionRequest chatCompletionRequest = ChatCompletionRequest.builder()
-                .model(this.provider.getModel())
-                .messages(messages)
-                .maxTokens(Integer.parseInt(this.provider.getMaxTokens()))
-                .functions(functions)
-                .functionCall(null)
-                .build();
-
-        CompletableFuture.supplyAsync(() -> {
-            try {
-                if (!responseHandler.shouldContinue()) {
-                    return null;
-                }
-                return service.createChatCompletion(chatCompletionRequest);
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        }).thenAccept(chatCompletionResult -> {
-            if (chatCompletionResult == null || !responseHandler.shouldContinue()) {
-                return;
-            }
-            if (!chatCompletionResult.getChoices().isEmpty()) {
-                ChatMessage message = chatCompletionResult.getChoices().get(0).getMessage();
-                if (message.getFunctionCall() != null) {
-                    String functionName = message.getFunctionCall().getName();
-                    JsonNode arguments = message.getFunctionCall().getArguments();
-                    String fullResponse = "{ \"name\": \"" + functionName + 
-                        "\", \"arguments\": " + arguments.toString() + " }";
-                    responseHandler.onComplete(filterThinkBlocks(fullResponse));
-                } else {
-                    responseHandler.onComplete(filterThinkBlocks(message.getContent()));
-                }
-            } else {
-                responseHandler.onError(new Exception("Empty response from LLM."));
-            }
-        }).exceptionally(throwable -> {
-            responseHandler.onError(throwable);
-            return null;
-        });
-    }
-
-    // Add method to cancel current request
-    public void cancelCurrentRequest() {
-        synchronized (streamLock) {
-            if (currentSubscription != null && !currentSubscription.isDisposed()) {
-                currentSubscription.dispose();
-                currentSubscription = null;
-            }
-            currentStream = null;
+        try {
+            String response = provider.createChatCompletionWithFunctions(messages, functions);
+            responseHandler.onComplete(filterThinkBlocks(response));
+        } catch (IOException e) {
+            responseHandler.onError(e);
         }
     }
 
-    // Helper method to check if an error is from disposing the subscription
-    private boolean isDisposedException(Throwable error) {
-        return error.getMessage().contains("The consumer was disposed");
+    public void cancelCurrentRequest() {
+        synchronized (streamLock) {
+            isStreaming = false;
+        }
     }
 
     public interface LlmResponseHandler {
