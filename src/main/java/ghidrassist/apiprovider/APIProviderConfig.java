@@ -1,4 +1,4 @@
-package ghidrassist.APIProvider;
+package ghidrassist.apiprovider;
 
 public class APIProviderConfig {
     private String name;

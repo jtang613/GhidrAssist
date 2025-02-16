@@ -20,7 +20,7 @@ public class GAUtils {
 	    }
 	}
 	
-	static String getDefaultLucenePath(OperatingSystem os) {
+	public static String getDefaultLucenePath(OperatingSystem os) {
 	    String basePath;
 	    switch (os) {
 	        case WINDOWS:
