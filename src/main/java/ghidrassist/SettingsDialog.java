@@ -2,8 +2,8 @@ package ghidrassist;
 
 import docking.DialogComponentProvider;
 import ghidra.framework.preferences.Preferences;
-import ghidrassist.APIProvider.APIProvider;
-import ghidrassist.APIProvider.APIProviderConfig;
+import ghidrassist.apiprovider.APIProvider;
+import ghidrassist.apiprovider.APIProviderConfig;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;

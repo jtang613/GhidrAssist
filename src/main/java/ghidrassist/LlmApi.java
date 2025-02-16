@@ -6,9 +6,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 import ghidra.util.Msg;
-import ghidrassist.APIProvider.APIProvider;
-import ghidrassist.APIProvider.APIProviderConfig;
-import ghidrassist.APIProvider.ChatMessage;
+import ghidrassist.apiprovider.APIProvider;
+import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.ChatMessage;
 
 public class LlmApi {
     private APIProvider provider;
