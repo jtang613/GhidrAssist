@@ -1,16 +1,13 @@
-package ghidrassist.APIProvider;
+package ghidrassist.apiprovider;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-
-import ghidrassist.LlmApi;
-import ghidrassist.APIProvider.APIProvider.EmbeddingCallback;
-import ghidrassist.APIProvider.APIProvider.ProviderType;
 import ghidrassist.LlmApi.LlmResponseHandler;
 import okhttp3.*;
 import okio.BufferedSource;
+
 import javax.net.ssl.*;
 import java.io.IOException;
 import java.time.Duration;
@@ -18,28 +15,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class OpenAIProvider extends APIProvider {
+public class LMStudioProvider extends APIProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-    private static final String OPENAI_CHAT_ENDPOINT = "chat/completions";
-    private static final String OPENAI_MODELS_ENDPOINT = "models";
-    private static final String OPENAI_EMBEDDINGS_ENDPOINT = "embeddings";
-    private static final String OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002";
+    private static final String LMSTUDIO_CHAT_ENDPOINT = "v1/chat/completions";
+    private static final String LMSTUDIO_MODELS_ENDPOINT = "v1/models";
+    private static final String LMSTUDIO_EMBEDDINGS_ENDPOINT = "v1/embeddings";
     private volatile boolean isCancelled = false;
 
-    public OpenAIProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.OPENAI, model, maxTokens, url, key, disableTlsVerification);
-    }
-
-    public static OpenAIProvider fromConfig(APIProviderConfig config) {
-        return new OpenAIProvider(
-            config.getName(),
-            config.getModel(),
-            config.getMaxTokens(),
-            config.getUrl(),
-            config.getKey(),
-            config.isDisableTlsVerification()
-        );
+    public LMStudioProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
+        super(name, ProviderType.LMSTUDIO, model, maxTokens, url, key, disableTlsVerification);
     }
 
     @Override
@@ -49,19 +34,7 @@ public class OpenAIProvider extends APIProvider {
                 .connectTimeout(Duration.ofSeconds(30))
                 .readTimeout(Duration.ofSeconds(60))
                 .writeTimeout(Duration.ofSeconds(30))
-                .retryOnConnectionFailure(true)
-                .addInterceptor(chain -> {
-                    Request originalRequest = chain.request();
-                    Request.Builder requestBuilder = originalRequest.newBuilder()
-                        .header("Authorization", "Bearer " + key)
-                        .header("Content-Type", "application/json");
-                    
-                    if (!originalRequest.method().equals("GET")) {
-                        requestBuilder.header("Accept", "application/json");
-                    }
-                    
-                    return chain.proceed(requestBuilder.build());
-                });
+                .retryOnConnectionFailure(true);
 
             if (disableTlsVerification) {
                 TrustManager[] trustAllCerts = new TrustManager[]{
@@ -94,7 +67,7 @@ public class OpenAIProvider extends APIProvider {
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
         Request request = new Request.Builder()
-            .url(url + OPENAI_CHAT_ENDPOINT)
+            .url(url + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -111,16 +84,17 @@ public class OpenAIProvider extends APIProvider {
     }
 
     @Override
-    public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler) throws IOException {
+    public void streamChatCompletion(List<ChatMessage> messages, LlmResponseHandler handler) throws IOException {
         JsonObject payload = buildChatCompletionPayload(messages, true);
 
         Request request = new Request.Builder()
-            .url(url + OPENAI_CHAT_ENDPOINT)
+            .url(url + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
             private boolean isFirst = true;
+            private StringBuilder contentBuilder = new StringBuilder();
 
             @Override
             public void onFailure(Call call, IOException e) {
@@ -138,8 +112,6 @@ public class OpenAIProvider extends APIProvider {
                     }
 
                     BufferedSource source = responseBody.source();
-                    StringBuilder contentBuilder = new StringBuilder();
-
                     while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
                         String line = source.readUtf8Line();
                         if (line == null || line.isEmpty()) continue;
@@ -179,13 +151,13 @@ public class OpenAIProvider extends APIProvider {
         payload.add("functions", gson.toJsonTree(functions));
         
         Request request = new Request.Builder()
-            .url(super.getUrl() + OPENAI_CHAT_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code() + " The model either does not support tool calling our you do not have access to this model.");
+                throw new IOException("Failed to get completion: " + response.code() + " Function calling may not be supported by this model or server version.");
             }
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
@@ -207,7 +179,7 @@ public class OpenAIProvider extends APIProvider {
     @Override
     public List<String> getAvailableModels() throws IOException {
         Request request = new Request.Builder()
-            .url(super.getUrl() + OPENAI_MODELS_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_MODELS_ENDPOINT)
             .build();
 
         try (Response response = client.newCall(request).execute()) {
@@ -230,11 +202,11 @@ public class OpenAIProvider extends APIProvider {
     @Override
     public void getEmbeddingsAsync(String text, EmbeddingCallback callback) {
         JsonObject payload = new JsonObject();
-        payload.addProperty("model", OPENAI_EMBEDDING_MODEL);
+        payload.addProperty("model", "text-embedding-nomic-embed-text-v1.5");
         payload.addProperty("input", text);
 
         Request request = new Request.Builder()
-            .url(super.getUrl() + OPENAI_EMBEDDINGS_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_EMBEDDINGS_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -274,14 +246,7 @@ public class OpenAIProvider extends APIProvider {
     private JsonObject buildChatCompletionPayload(List<ChatMessage> messages, boolean stream) {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
-
-        // Handle different token field names based on model
-        String modelName = super.getModel();
-        if (modelName != null && (modelName.startsWith("o1-") || modelName.startsWith("o3-"))) {
-            payload.addProperty("max_completion_tokens", super.getMaxTokens());
-        } else {
-            payload.addProperty("max_tokens", super.getMaxTokens());
-        }
+        payload.addProperty("max_tokens", super.getMaxTokens());
         
         if (stream) {
             payload.addProperty("stream", true);
@@ -324,5 +289,4 @@ public class OpenAIProvider extends APIProvider {
     public void cancelRequest() {
         isCancelled = true;
     }
-
 }

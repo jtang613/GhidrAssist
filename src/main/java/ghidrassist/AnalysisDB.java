@@ -18,13 +18,13 @@ public class AnalysisDB {
     private void initializeDatabase(String dbPath) {
         try {
             connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
-            createAnalysisTable();
+            createAnalysisTables();
         } catch (SQLException e) {
             Msg.showError(this, null, "Database Error", "Failed to initialize Analysis database: " + e.getMessage());
         }
     }
 
-    private void createAnalysisTable() throws SQLException {
+    private void createAnalysisTables() throws SQLException {
         String createTableSQL = "CREATE TABLE IF NOT EXISTS GHAnalysis ("
                 + "program_hash TEXT NOT NULL,"
                 + "function_address TEXT NOT NULL,"
@@ -35,6 +35,15 @@ public class AnalysisDB {
                 + ")";
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createTableSQL);
+        }
+        
+        String createContextTableSQL = "CREATE TABLE IF NOT EXISTS GHContext ("
+                + "program_hash TEXT PRIMARY KEY,"
+                + "system_context TEXT NOT NULL,"
+                + "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createContextTableSQL);
         }
     }
 
@@ -79,6 +88,38 @@ public class AnalysisDB {
         return null;
     }
 
+    public void upsertContext(String programHash, String context) {
+        String upsertSQL = "INSERT INTO GHContext (program_hash, system_context) "
+                + "VALUES (?, ?) "
+                + "ON CONFLICT(program_hash) "
+                + "DO UPDATE SET system_context = ?, timestamp = CURRENT_TIMESTAMP";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(upsertSQL)) {
+            pstmt.setString(1, programHash);
+            pstmt.setString(2, context);
+            pstmt.setString(3, context);
+            pstmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to store context: " + e.getMessage());
+        }
+    }
+
+    public String getContext(String programHash) {
+        String selectSQL = "SELECT system_context FROM GHContext WHERE program_hash = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setString(1, programHash);
+            
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                return rs.getString("system_context");
+            }
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to retrieve context: " + e.getMessage());
+        }
+        return null;
+    }
+    
     public void close() {
         try {
             if (connection != null && !connection.isClosed()) {

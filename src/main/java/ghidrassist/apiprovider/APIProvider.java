@@ -1,4 +1,4 @@
-package ghidrassist.APIProvider;
+package ghidrassist.apiprovider;
 
 import java.io.IOException;
 import java.util.List;
@@ -9,8 +9,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import ghidrassist.LlmApi;
-import ghidrassist.APIProvider.APIProvider.EmbeddingCallback;
-import ghidrassist.LlmApi.LlmResponseHandler;
 import okhttp3.OkHttpClient;
 
 public abstract class APIProvider {

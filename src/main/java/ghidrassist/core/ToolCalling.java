@@ -1,4 +1,4 @@
-package ghidrassist;
+package ghidrassist.core;
 
 import java.util.*;
 import ghidra.program.model.listing.*;

@@ -1,4 +1,4 @@
-package ghidrassist.APIProvider;
+package ghidrassist.apiprovider;
 
 import com.fasterxml.jackson.databind.JsonNode;
 

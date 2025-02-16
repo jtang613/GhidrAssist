@@ -1,13 +1,13 @@
-package ghidrassist.APIProvider;
+package ghidrassist.apiprovider;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import ghidrassist.LlmApi.LlmResponseHandler;
+
+import ghidrassist.LlmApi;
 import okhttp3.*;
 import okio.BufferedSource;
-
 import javax.net.ssl.*;
 import java.io.IOException;
 import java.time.Duration;
@@ -15,16 +15,28 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class AnthropicProvider extends APIProvider {
+public class OpenAIProvider extends APIProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-    private static final String ANTHROPIC_MESSAGES_ENDPOINT = "v1/messages";
-    private static final String ANTHROPIC_MODELS_ENDPOINT = "v1/models";
-    private static final int MAX_RETRY_ATTEMPTS = 3;
+    private static final String OPENAI_CHAT_ENDPOINT = "chat/completions";
+    private static final String OPENAI_MODELS_ENDPOINT = "models";
+    private static final String OPENAI_EMBEDDINGS_ENDPOINT = "embeddings";
+    private static final String OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002";
     private volatile boolean isCancelled = false;
 
-    public AnthropicProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.ANTHROPIC, model, maxTokens, url, key, disableTlsVerification);
+    public OpenAIProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
+        super(name, ProviderType.OPENAI, model, maxTokens, url, key, disableTlsVerification);
+    }
+
+    public static OpenAIProvider fromConfig(APIProviderConfig config) {
+        return new OpenAIProvider(
+            config.getName(),
+            config.getModel(),
+            config.getMaxTokens(),
+            config.getUrl(),
+            config.getKey(),
+            config.isDisableTlsVerification()
+        );
     }
 
     @Override
@@ -38,9 +50,12 @@ public class AnthropicProvider extends APIProvider {
                 .addInterceptor(chain -> {
                     Request originalRequest = chain.request();
                     Request.Builder requestBuilder = originalRequest.newBuilder()
-                        .header("x-api-key", key)
-                        .header("anthropic-version", "2023-06-01")
+                        .header("Authorization", "Bearer " + key)
                         .header("Content-Type", "application/json");
+                    
+                    if (!originalRequest.method().equals("GET")) {
+                        requestBuilder.header("Accept", "application/json");
+                    }
                     
                     return chain.proceed(requestBuilder.build());
                 });
@@ -73,10 +88,10 @@ public class AnthropicProvider extends APIProvider {
 
     @Override
     public String createChatCompletion(List<ChatMessage> messages) throws IOException {
-        JsonObject payload = buildMessagesPayload(messages, false);
+        JsonObject payload = buildChatCompletionPayload(messages, false);
         
         Request request = new Request.Builder()
-            .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
+            .url(url + OPENAI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -88,22 +103,21 @@ public class AnthropicProvider extends APIProvider {
             }
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return responseObj.getAsJsonObject("content").get("text").getAsString();
+            return extractContentFromResponse(responseObj);
         }
     }
 
     @Override
-    public void streamChatCompletion(List<ChatMessage> messages, LlmResponseHandler handler) throws IOException {
-        JsonObject payload = buildMessagesPayload(messages, true);
+    public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler) throws IOException {
+        JsonObject payload = buildChatCompletionPayload(messages, true);
 
         Request request = new Request.Builder()
-            .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
+            .url(url + OPENAI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
             private boolean isFirst = true;
-            private StringBuilder contentBuilder = new StringBuilder();
 
             @Override
             public void onFailure(Call call, IOException e) {
@@ -121,16 +135,11 @@ public class AnthropicProvider extends APIProvider {
                     }
 
                     BufferedSource source = responseBody.source();
+                    StringBuilder contentBuilder = new StringBuilder();
+
                     while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
                         String line = source.readUtf8Line();
                         if (line == null || line.isEmpty()) continue;
-                        
-                        // Skip ping events
-                        if (line.equals("event: ping")) {
-                            source.readUtf8Line(); // Skip data line
-                            continue;
-                        }
-                        
                         if (line.startsWith("data: ")) {
                             String data = line.substring(6).trim();
                             if (data.equals("[DONE]")) {
@@ -138,33 +147,22 @@ public class AnthropicProvider extends APIProvider {
                                 return;
                             }
 
-                            JsonObject event = gson.fromJson(data, JsonObject.class);
+                            JsonObject chunk = gson.fromJson(data, JsonObject.class);
+                            String content = extractDeltaContent(chunk);
                             
-                            // Check for error events
-                            if (event.has("type") && event.get("type").getAsString().equals("error")) {
-                                handler.onError(new IOException(event.get("error").getAsString()));
-                                return;
-                            }
-                            
-                            // Extract content from delta
-                            if (event.has("type") && event.get("type").getAsString().equals("content_block_delta")) {
-                                JsonObject delta = event.getAsJsonObject("delta");
-                                String text = delta.get("text").getAsString();
-                                
+                            if (content != null) {
                                 if (isFirst) {
                                     handler.onStart();
                                     isFirst = false;
                                 }
-                                contentBuilder.append(text);
-                                handler.onUpdate(text);
+                                contentBuilder.append(content);
+                                handler.onUpdate(content);
                             }
                         }
                     }
 
                     if (isCancelled) {
                         handler.onError(new IOException("Request cancelled"));
-                    } else {
-                        handler.onComplete(contentBuilder.toString());
                     }
                 }
             }
@@ -173,58 +171,40 @@ public class AnthropicProvider extends APIProvider {
 
     @Override
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
-        // Create a system message that instructs Claude about the available functions
-        StringBuilder systemMessage = new StringBuilder("You can call these functions:\n");
-        for (Map<String, Object> function : functions) {
-            systemMessage.append("- ").append(function.get("name")).append(": ")
-                        .append(function.get("description")).append("\n");
-            
-            @SuppressWarnings("unchecked")
-            Map<String, Object> parameters = (Map<String, Object>) function.get("parameters");
-            if (parameters != null && parameters.containsKey("properties")) {
-                systemMessage.append("  Parameters:\n");
-                @SuppressWarnings("unchecked")
-                Map<String, Object> properties = (Map<String, Object>) parameters.get("properties");
-                for (Map.Entry<String, Object> property : properties.entrySet()) {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> propertyDetails = (Map<String, Object>) property.getValue();
-                    systemMessage.append("  - ").append(property.getKey())
-                                .append(" (").append(propertyDetails.get("type")).append("): ")
-                                .append(propertyDetails.get("description")).append("\n");
-                }
-            }
-        }
-        systemMessage.append("\nTo call a function, respond with JSON in this format:\n")
-                    .append("{\n  \"name\": \"function_name\",\n  \"arguments\": {\n    \"param1\": \"value1\"\n  }\n}\n");
-
-        // Add system message to start of messages list
-        List<ChatMessage> augmentedMessages = new ArrayList<>();
-        augmentedMessages.add(new ChatMessage(ChatMessage.ChatMessageRole.SYSTEM, systemMessage.toString()));
-        augmentedMessages.addAll(messages);
-
-        // Request JSON response format
-        JsonObject payload = buildMessagesPayload(augmentedMessages, false);
-        payload.addProperty("format", "json");
-
+        JsonObject payload = buildChatCompletionPayload(messages, false);
+        
+        payload.add("functions", gson.toJsonTree(functions));
+        
         Request request = new Request.Builder()
-            .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
+            .url(super.getUrl() + OPENAI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code());
+                throw new IOException("Failed to get completion: " + response.code() + " The model either does not support tool calling our you do not have access to this model.");
             }
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return responseObj.getAsJsonObject("content").get("text").getAsString();
+            JsonObject message = responseObj.getAsJsonArray("choices")
+                .get(0).getAsJsonObject()
+                .getAsJsonObject("message");
+
+            if (message.has("function_call")) {
+                JsonObject functionCall = message.getAsJsonObject("function_call");
+                return String.format("{\"name\": \"%s\", \"arguments\": %s}", 
+                    functionCall.get("name").getAsString(),
+                    functionCall.get("arguments").toString());
+            }
+
+            return message.get("content").getAsString();
         }
     }
 
     @Override
     public List<String> getAvailableModels() throws IOException {
         Request request = new Request.Builder()
-            .url(super.getUrl() + ANTHROPIC_MODELS_ENDPOINT)
+            .url(super.getUrl() + OPENAI_MODELS_ENDPOINT)
             .build();
 
         try (Response response = client.newCall(request).execute()) {
@@ -234,7 +214,7 @@ public class AnthropicProvider extends APIProvider {
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
             List<String> modelIds = new ArrayList<>();
-            JsonArray models = responseObj.getAsJsonArray("models");
+            JsonArray models = responseObj.getAsJsonArray("data");
             
             for (JsonElement model : models) {
                 modelIds.add(model.getAsJsonObject().get("id").getAsString());
@@ -246,50 +226,100 @@ public class AnthropicProvider extends APIProvider {
 
     @Override
     public void getEmbeddingsAsync(String text, EmbeddingCallback callback) {
-        // Anthropic does not currently provide a public embeddings endpoint
-        callback.onError(new UnsupportedOperationException("Embeddings are not supported by the Anthropic API"));
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", OPENAI_EMBEDDING_MODEL);
+        payload.addProperty("input", text);
+
+        Request request = new Request.Builder()
+            .url(super.getUrl() + OPENAI_EMBEDDINGS_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                callback.onError(e);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try (ResponseBody responseBody = response.body()) {
+                    if (!response.isSuccessful()) {
+                        callback.onError(new IOException("Failed to get embeddings: " + 
+                            response.code() + " " + response.message()));
+                        return;
+                    }
+
+                    JsonObject responseObj = gson.fromJson(responseBody.string(), JsonObject.class);
+                    JsonArray embedding = responseObj.getAsJsonArray("data")
+                        .get(0).getAsJsonObject()
+                        .getAsJsonArray("embedding");
+
+                    double[] embeddingArray = new double[embedding.size()];
+                    for (int i = 0; i < embedding.size(); i++) {
+                        embeddingArray[i] = embedding.get(i).getAsDouble();
+                    }
+                    
+                    callback.onSuccess(embeddingArray);
+                } catch (Exception e) {
+                    callback.onError(e);
+                }
+            }
+        });
     }
 
-    private JsonObject buildMessagesPayload(List<ChatMessage> messages, boolean stream) {
+    private JsonObject buildChatCompletionPayload(List<ChatMessage> messages, boolean stream) {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
-        payload.addProperty("max_tokens", super.getMaxTokens());
+
+        // Handle different token field names based on model
+        String modelName = super.getModel();
+        if (modelName != null && (modelName.startsWith("o1-") || modelName.startsWith("o3-"))) {
+            payload.addProperty("max_completion_tokens", super.getMaxTokens());
+        } else {
+            payload.addProperty("max_tokens", super.getMaxTokens());
+        }
         
         if (stream) {
             payload.addProperty("stream", true);
         }
 
-        // Convert the messages to Anthropic's format
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {
-            if (message.getRole().equals(ChatMessage.ChatMessageRole.SYSTEM)) {
-                payload.addProperty("system", message.getContent());
-            } else {
-                JsonObject messageObj = new JsonObject();
-                messageObj.addProperty("role", convertRole(message.getRole()));
-                messageObj.addProperty("content", message.getContent());
-                messagesArray.add(messageObj);
-            }
+            JsonObject messageObj = new JsonObject();
+            messageObj.addProperty("role", message.getRole());
+            messageObj.addProperty("content", message.getContent());
+            messagesArray.add(messageObj);
         }
         payload.add("messages", messagesArray);
 
         return payload;
     }
 
-    private String convertRole(String role) {
-        switch (role) {
-            case ChatMessage.ChatMessageRole.USER:
-                return "user";
-            case ChatMessage.ChatMessageRole.ASSISTANT:
-                return "assistant";
-            case ChatMessage.ChatMessageRole.FUNCTION:
-                return "assistant"; // Anthropic doesn't have function messages, treat as assistant
-            default:
-                return role;
+    private String extractContentFromResponse(JsonObject responseObj) {
+        return responseObj.getAsJsonArray("choices")
+            .get(0).getAsJsonObject()
+            .getAsJsonObject("message")
+            .get("content").getAsString();
+    }
+
+    private String extractDeltaContent(JsonObject chunk) {
+        try {
+            JsonObject delta = chunk.getAsJsonArray("choices")
+                .get(0).getAsJsonObject()
+                .getAsJsonObject("delta");
+            
+            if (delta.has("content")) {
+                return delta.get("content").getAsString();
+            }
+        } catch (Exception e) {
+            // Handle any JSON parsing errors silently and return null
         }
+        return null;
     }
 
     public void cancelRequest() {
         isCancelled = true;
     }
+
 }
