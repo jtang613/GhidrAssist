@@ -8,26 +8,36 @@ import org.apache.lucene.queryparser.classic.QueryParser;
 import org.apache.lucene.search.*;
 import org.apache.lucene.search.similarities.BM25Similarity;
 import org.apache.lucene.store.*;
+
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+
 import ghidra.framework.preferences.Preferences;
+import ghidrassist.APIProvider.APIProvider;
+import ghidrassist.APIProvider.APIProviderConfig;
+import ghidrassist.APIProvider.APIProvider.EmbeddingCallback;
+
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-
 public class RAGEngine {
-
     private static Directory indexDirectory;
     private static Analyzer analyzer;
     private static IndexWriter indexWriter;
     private static ReentrantLock indexLock = new ReentrantLock();
-
     private static final int MAX_SNIPPET_LENGTH = 500;
-    private static EmbeddingService embeddingService;
-
-    // Updated embedding store to include embeddings for each provider separately
-    private static Map<String, Map<String, double[]>> embeddingStore = new HashMap<>();
+    private static Map<String, double[]> embeddingStore = new HashMap<>();
+    private static final int MAX_CACHE_SIZE = 1000; // Adjust based on your needs
+    private static Cache<String, double[]> embeddingCache = CacheBuilder.newBuilder()
+        .maximumSize(MAX_CACHE_SIZE)
+        .expireAfterWrite(24, TimeUnit.HOURS)
+        .build();
 
     static {
         try {
@@ -44,27 +54,33 @@ public class RAGEngine {
         if (indexPath == null || indexPath.isEmpty()) {
             indexPath = GAUtils.getDefaultLucenePath(os);
             System.out.println("No index path specified. Using default: " + indexPath);
-
-            // Create the directory if it doesn't exist
             Files.createDirectories(Paths.get(indexPath));
         }
+        
         initializeIndex(indexPath);
-
-        // Load the selected API provider and RAG provider
-        embeddingService = new EmbeddingService();
     }
 
     private static void initializeIndex(String indexPath) throws IOException {
         Path path = Paths.get(indexPath);
         indexDirectory = FSDirectory.open(path);
-
         analyzer = new StandardAnalyzer();
         IndexWriterConfig config = new IndexWriterConfig(analyzer);
-
         indexWriter = new IndexWriter(indexDirectory, config);
     }
 
+    private static APIProvider getProvider() {
+        APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+        if (config == null) {
+            throw new RuntimeException("No API provider configured");
+        }
+        return config.createProvider();
+    }
+
     public static void ingestDocuments(List<File> files) throws IOException {
+        APIProvider provider = getProvider();
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<IOException> error = new AtomicReference<>();
+        
         indexLock.lock();
         try {
             for (File file : files) {
@@ -80,21 +96,40 @@ public class RAGEngine {
                         doc.add(new TextField("content", chunk, Field.Store.YES));
                         indexWriter.addDocument(doc);
 
-                        // Generate embedding for the chunk and store it along with the provider
-                        double[] embedding = embeddingService.getEmbedding(chunk);
-                        String provider = Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE");
-                        String chunkKey = file.getName() + "_" + i;
-
-
-                        // Ensure the inner map for this chunk exists
-                        embeddingStore.putIfAbsent(chunkKey, new HashMap<>());
-                        
-                        // Store the embedding for the specific provider
-                        embeddingStore.get(chunkKey).put(provider, embedding);
+                        final int chunkIndex = i;
+                        provider.getEmbeddingsAsync(chunk, new EmbeddingCallback() {
+                            @Override
+                            public void onSuccess(double[] embedding) {
+                                String chunkKey = file.getName() + "_" + chunkIndex;
+                                embeddingCache.put(chunkKey, embedding);
+                                if (chunkIndex == chunks.size() - 1) {
+                                    latch.countDown();
+                                }
+                            }
+                            
+                            @Override
+                            public void onError(Throwable e) {
+                                error.set(new IOException("Failed to generate embeddings", e));
+                                latch.countDown();
+                            }
+                        });
                     }
                 }
             }
+            
+            // Wait for embeddings with timeout
+            if (!latch.await(2, TimeUnit.MINUTES)) {
+                throw new IOException("Timeout waiting for embeddings generation");
+            }
+            
+            if (error.get() != null) {
+                throw error.get();
+            }
+            
             indexWriter.commit();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while generating embeddings", e);
         } finally {
             indexLock.unlock();
         }
@@ -102,53 +137,52 @@ public class RAGEngine {
 
     public static List<SearchResult> hybridSearch(String queryStr, int maxResults) throws Exception {
         List<SearchResult> results = new ArrayList<>();
-
-        // Get the current provider
-        String currentProvider = Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE");
+        APIProvider provider = getProvider();
 
         // Step 1: Generate embedding for the query
-        double[] queryEmbedding = embeddingService.getEmbedding(queryStr);
+        double[] queryEmbedding = provider.getEmbeddings(queryStr);
 
-        // Step 2: Retrieve the closest vector matches, if they were generated by the current provider
-        boolean canUseEmbedding = embeddingStore.values().stream()
-            .anyMatch(providerMap -> providerMap.containsKey(currentProvider));
-        List<VectorSearchResult> vectorResults = canUseEmbedding ? searchSimilar(queryEmbedding, maxResults, currentProvider) : Collections.emptyList();
+        // Step 2: Retrieve the closest vector matches
+        List<VectorSearchResult> vectorResults = searchSimilar(queryEmbedding, maxResults);
 
         // Step 3: Run BM25-based keyword search using Lucene
         List<SearchResult> keywordResults = search(queryStr, maxResults);
 
-        // Step 4: If embeddings match, combine results; otherwise, use keyword results only
-        if (canUseEmbedding) {
-            results.addAll(vectorResults.stream().map(vr -> new SearchResult(vr.getFilename(), vr.getSnippet(), vr.getScore(), vr.getChunkId())).collect(Collectors.toList()));
-        }
+        // Step 4: Combine both result sets
+        results.addAll(vectorResults.stream()
+            .map(vr -> new SearchResult(vr.getFilename(), vr.getSnippet(), vr.getScore(), vr.getChunkId()))
+            .collect(Collectors.toList()));
         results.addAll(keywordResults);
 
-        return results.stream().sorted((a, b) -> Double.compare(b.getScore(), a.getScore())).limit(maxResults).collect(Collectors.toList());
+        // Sort by score and limit results
+        return results.stream()
+            .sorted((a, b) -> Double.compare(b.getScore(), a.getScore()))
+            .limit(maxResults)
+            .collect(Collectors.toList());
     }
 
-    private static List<VectorSearchResult> searchSimilar(double[] queryEmbedding, int maxResults, String currentProvider) throws IOException {
-        List<VectorSearchResult> results = new ArrayList<>();
-        for (Map.Entry<String, Map<String, double[]>> entry : embeddingStore.entrySet()) {
-            String key = entry.getKey();
-            Map<String, double[]> providerMap = entry.getValue();
-
-            // Skip if there is no embedding for the current provider
-            if (!providerMap.containsKey(currentProvider)) {
-                continue;
-            }
-
-            double[] embedding = providerMap.get(currentProvider);
-            double similarity = cosineSimilarity(queryEmbedding, embedding);
-            if (similarity > 0.5) { // Set a threshold to filter out low similarities
+    private static List<VectorSearchResult> searchSimilar(double[] queryEmbedding, int maxResults) {
+        return embeddingCache.asMap().entrySet().stream()
+            .map(entry -> {
+                String key = entry.getKey();
+                double[] embedding = entry.getValue();
+                double similarity = cosineSimilarity(queryEmbedding, embedding);
+                
                 String[] keyParts = key.split("_");
                 String filename = keyParts[0];
                 int chunkId = Integer.parseInt(keyParts[1]);
-                String snippet = getSnippetFromIndex(filename, chunkId);
-                results.add(new VectorSearchResult(filename, snippet, similarity, chunkId));
-            }
-        }
-        results.sort((a, b) -> Double.compare(b.getScore(), a.getScore()));
-        return results.subList(0, Math.min(results.size(), maxResults));
+                
+                try {
+                    String snippet = getSnippetFromIndex(filename, chunkId);
+                    return new VectorSearchResult(filename, snippet, similarity, chunkId);
+                } catch (IOException e) {
+                    return null;
+                }
+            })
+            .filter(result -> result != null && result.getScore() > 0.5)
+            .sorted((a, b) -> Double.compare(b.getScore(), a.getScore()))
+            .limit(maxResults)
+            .collect(Collectors.toList());
     }
 
     private static double cosineSimilarity(double[] vecA, double[] vecB) {
@@ -299,22 +333,6 @@ public class RAGEngine {
         if (end < content.length()) snippet = snippet + "...";
 
         return snippet;
-    }
-}
-
-class EmbeddingService {
-    private final CustomEmbeddingService requestor;
-
-    public EmbeddingService() {
-        this.requestor = new CustomEmbeddingService();
-    }
-
-    public double[] getEmbedding(String text) {
-        try {
-            return requestor.getEmbedding(text);
-        } catch (IOException e) {
-            throw new RuntimeException("Error getting embedding", e);
-        }
     }
 }
 

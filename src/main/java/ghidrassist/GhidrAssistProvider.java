@@ -9,6 +9,7 @@ import ghidra.program.util.ProgramLocation;
 import ghidra.util.Msg;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskMonitor;
+import ghidrassist.APIProvider.APIProviderConfig;
 import ghidrassist.GhidrAssistPlugin.CodeViewType;
 import ghidra.util.task.TaskLauncher;
 
@@ -44,9 +45,7 @@ import com.google.gson.stream.JsonReader;
 import com.vladsch.flexmark.html.HtmlRenderer;
 import com.vladsch.flexmark.parser.Parser;
 import com.vladsch.flexmark.util.ast.Document;
-import com.vladsch.flexmark.util.data.MutableDataSet;
-
-import ghidrassist.SearchResult; 
+import com.vladsch.flexmark.util.data.MutableDataSet; 
 
 public class GhidrAssistProvider extends ComponentProvider {
 
@@ -498,7 +497,7 @@ public class GhidrAssistProvider extends ComponentProvider {
         boolean hasSelectedActions = false;
 
         // Use LlmApi to send request
-        LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+        LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentProviderConfig());
 
         // For each selected action, send an individual request
         for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
@@ -800,8 +799,13 @@ public class GhidrAssistProvider extends ComponentProvider {
             // If query is running, stop it
             explainFunctionButton.setText("Explain Function");
             isQueryRunning.set(false);
-            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
-            llmApi.cancelCurrentRequest();
+
+            // Create LlmApi with current provider config
+            APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+            if (config != null) {
+                LlmApi llmApi = new LlmApi(config);
+                llmApi.cancelCurrentRequest();
+            }
             return;
         }
         
@@ -835,8 +839,14 @@ public class GhidrAssistProvider extends ComponentProvider {
                     String prompt = "Explain the following " + codeType + " code:\n```\n" + functionCode + "\n```";
                     lastPrompt = prompt;
 
+                    // Use LlmApi with current provider config
+                    APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+                    if (config == null) {
+                        throw new Exception("No API provider configured.");
+                    }
+                    
                     // Use LlmApi to send request
-                    LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+                    LlmApi llmApi = new LlmApi(config);
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -907,8 +917,13 @@ public class GhidrAssistProvider extends ComponentProvider {
             // If query is running, stop it
             explainLineButton.setText("Explain Line");
             isQueryRunning.set(false);
-            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
-            llmApi.cancelCurrentRequest();
+
+            // Create LlmApi with current provider config
+            APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+            if (config != null) {
+                LlmApi llmApi = new LlmApi(config);
+                llmApi.cancelCurrentRequest();
+            }
             return;
         }
         
@@ -951,8 +966,14 @@ public class GhidrAssistProvider extends ComponentProvider {
                     prompt = "Explain the following " + codeType + " line:\n```\n" + codeLine + "\n```";
                     lastPrompt = prompt;
 
+                    // Use LlmApi with current provider config
+                    APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+                    if (config == null) {
+                        throw new Exception("No API provider configured.");
+                    }
+                    
                     // Use LlmApi to send request
-                    LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+                    LlmApi llmApi = new LlmApi(config);
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -1012,8 +1033,13 @@ public class GhidrAssistProvider extends ComponentProvider {
             // If query is running, stop it
             submitButton.setText("Submit");
             isQueryRunning.set(false);
-            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
-            llmApi.cancelCurrentRequest();
+
+            // Create LlmApi with current provider config
+            APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+            if (config != null) {
+                LlmApi llmApi = new LlmApi(config);
+                llmApi.cancelCurrentRequest();
+            }
             return;
         }
         
@@ -1069,8 +1095,14 @@ public class GhidrAssistProvider extends ComponentProvider {
             @Override
             public void run(TaskMonitor monitor) {
                 try {
+                    // Use LlmApi with current provider config
+                    APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+                    if (config == null) {
+                        throw new Exception("No API provider configured.");
+                    }
+                    
                     // Use LlmApi to send request
-                    LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
+                    LlmApi llmApi = new LlmApi(config);
                     llmApi.sendRequestAsync(conversationHistory.toString(), new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -1371,8 +1403,14 @@ public class GhidrAssistProvider extends ComponentProvider {
 
     private void storeRLHFFeedback(int feedback) {
         if (lastPrompt != null && lastResponse != null) {
-            LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentAPIProvider());
-            String modelName = GhidrAssistPlugin.getCurrentAPIProvider().getModel();
+            APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+            if (config == null) {
+                Msg.showError(this, panel, "Error", "No API provider configured.");
+                return;
+            }
+            
+            LlmApi llmApi = new LlmApi(config);
+            String modelName = config.getModel();
             String systemContext = llmApi.getSystemPrompt();
             rlhfDatabase.storeFeedback(modelName, lastPrompt, systemContext, lastResponse, feedback);
             Msg.showInfo(getClass(), panel, "Feedback", "Thank you for your feedback!");
