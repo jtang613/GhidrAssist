@@ -18,6 +18,7 @@ import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
 public class SettingsDialog extends DialogComponentProvider {
+    private final GhidrAssistPlugin plugin;
 
     private DefaultTableModel tableModel;
     private JTable table;
@@ -37,8 +38,9 @@ public class SettingsDialog extends DialogComponentProvider {
     private JTextField analysisDbPathField;
     private JButton analysisDbBrowseButton;
 
-    public SettingsDialog(Component parent, String title) {
+    public SettingsDialog(Component parent, String title, GhidrAssistPlugin plugin) {
         super(title, true, false, true, false);
+        this.plugin = plugin;
 
         // Load the list of API providers from preferences
         String providersJson = Preferences.getProperty("GhidrAssist.APIProviders", "[]");
@@ -139,7 +141,7 @@ public class SettingsDialog extends DialogComponentProvider {
         activeProviderComboBox.setMaximumSize(new Dimension(200, activeProviderComboBox.getPreferredSize().height));
         activeProviderPanel.add(activeProviderComboBox);
         activeProviderPanel.add(Box.createHorizontalStrut(5)); // Add some spacing
-        activeProviderPanel.add(new APITestPanel());
+        activeProviderPanel.add(new APITestPanel(plugin));
         activeProviderPanel.add(Box.createHorizontalGlue()); // This will push everything to the left
 
         // Create the RLHF database path components
@@ -518,13 +520,15 @@ public class SettingsDialog extends DialogComponentProvider {
     
     private class APITestPanel extends JPanel {
         private static final long serialVersionUID = 1L;
+        private final GhidrAssistPlugin plugin;
         private JButton testButton;
         private JLabel statusLabel;
         private ImageIcon successIcon;
         private ImageIcon failureIcon;
         private boolean isTestInProgress = false;
 
-        public APITestPanel() {
+        public APITestPanel(GhidrAssistPlugin plugin) {
+            this.plugin = plugin;
             setLayout(new FlowLayout(FlowLayout.LEFT));
             
             // Create icons
@@ -604,7 +608,7 @@ public class SettingsDialog extends DialogComponentProvider {
             statusLabel.setText("Testing...");
             
             // Create a new LlmApi instance for testing
-            LlmApi testApi = new LlmApi(provider);
+            LlmApi testApi = new LlmApi(provider, plugin);
             
             // Create a simple test prompt
             String testPrompt = "Testing connection. Please respond with 'OK' and nothing else.";

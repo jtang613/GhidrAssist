@@ -5,6 +5,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
+
+import javax.swing.SwingWorker;
+
 import ghidra.util.Msg;
 import ghidrassist.apiprovider.APIProvider;
 import ghidrassist.apiprovider.APIProviderConfig;
@@ -12,13 +15,15 @@ import ghidrassist.apiprovider.ChatMessage;
 
 public class LlmApi {
     private APIProvider provider;
+    private final AnalysisDB analysisDB;
+    private final GhidrAssistPlugin plugin;
     private final Object streamLock = new Object();
     private volatile boolean isStreaming = false;
     
     // Pattern for matching complete <think> blocks and opening/closing tags
     private static final Pattern COMPLETE_THINK_PATTERN = Pattern.compile("<think>.*?</think>", Pattern.DOTALL);
     
-    private final String SYSTEM_PROMPT = 
+    private final String DEFAULT_SYSTEM_PROMPT = 
             "You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
             + "familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
             + "You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
@@ -39,11 +44,28 @@ public class LlmApi {
         "}\n" +
         "```\n" +
         "REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!";
-    
-    public String getSystemPrompt() {
-        return this.SYSTEM_PROMPT;
+
+    public LlmApi(APIProviderConfig config, GhidrAssistPlugin plugin) {
+        this.provider = config.createProvider();
+        this.analysisDB = new AnalysisDB();
+        this.plugin = plugin;
     }
 
+    public String getSystemPrompt() {
+        return this.DEFAULT_SYSTEM_PROMPT;
+    }
+
+    private String getCurrentContext() {
+        if (plugin.getCurrentProgram() != null) {
+            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+            String context = analysisDB.getContext(programHash);
+            if (context != null) {
+                return context;
+            }
+        }
+        return DEFAULT_SYSTEM_PROMPT;
+    }
+    
     private static class StreamingResponseFilter {
         private StringBuilder buffer = new StringBuilder();
         private StringBuilder visibleBuffer = new StringBuilder();
@@ -95,10 +117,6 @@ public class LlmApi {
         }
     }
     
-    public LlmApi(APIProviderConfig config) {
-        this.provider = config.createProvider();
-    }
-
     private String filterThinkBlocks(String response) {
         if (response == null) {
             return null;
@@ -116,7 +134,7 @@ public class LlmApi {
         cancelCurrentRequest();
 
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, this.SYSTEM_PROMPT));
+        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, getCurrentContext()));
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
 
         if (!responseHandler.shouldContinue()) {
@@ -185,15 +203,50 @@ public class LlmApi {
 
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, 
-            this.SYSTEM_PROMPT + "\n" + this.FUNCTION_PROMPT + "\n" + this.FORMAT_PROMPT));
+            getCurrentContext() + "\n" + FUNCTION_PROMPT + "\n" + FORMAT_PROMPT));
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
 
-        try {
-            String response = provider.createChatCompletionWithFunctions(messages, functions);
-            responseHandler.onComplete(filterThinkBlocks(response));
-        } catch (IOException e) {
-            responseHandler.onError(e);
-        }
+        // Create a background task
+        SwingWorker<Void, String> worker = new SwingWorker<>() {
+            @Override
+            protected Void doInBackground() {
+                try {
+                    synchronized (streamLock) {
+                        isStreaming = true;
+                    }
+                    
+                    responseHandler.onStart();
+                    String response = provider.createChatCompletionWithFunctions(messages, functions);
+                    
+                    if (responseHandler.shouldContinue()) {
+                        String filteredResponse = filterThinkBlocks(response);
+                        responseHandler.onComplete(filteredResponse);
+                    }
+                } catch (IOException e) {
+                    if (responseHandler.shouldContinue()) {
+                        responseHandler.onError(e);
+                    }
+                } finally {
+                    synchronized (streamLock) {
+                        isStreaming = false;
+                    }
+                }
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                try {
+                    get(); // Check for exceptions
+                } catch (Exception e) {
+                    if (responseHandler.shouldContinue()) {
+                        responseHandler.onError(e);
+                    }
+                }
+            }
+        };
+
+        worker.execute();
     }
 
     public void cancelCurrentRequest() {

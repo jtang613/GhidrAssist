@@ -19,6 +19,7 @@ public class GhidrAssistUI extends JPanel {
     private final QueryTab queryTab;
     private final ActionsTab actionsTab;
     private final RAGManagementTab ragManagementTab;
+    private final AnalysisOptionsTab analysisOptionsTab;
 
     public GhidrAssistUI(GhidrAssistPlugin plugin) {
         super(new BorderLayout());
@@ -33,12 +34,14 @@ public class GhidrAssistUI extends JPanel {
         this.queryTab = new QueryTab(controller);
         this.actionsTab = new ActionsTab(controller);
         this.ragManagementTab = new RAGManagementTab(controller);
+        this.analysisOptionsTab = new AnalysisOptionsTab(controller);
         
         // Set tab references in controller
         controller.setExplainTab(explainTab);
         controller.setQueryTab(queryTab);
         controller.setActionsTab(actionsTab);
         controller.setRAGManagementTab(ragManagementTab);
+        controller.setAnalysisOptionsTab(analysisOptionsTab);
         
         initializeUI();
     }
@@ -51,8 +54,25 @@ public class GhidrAssistUI extends JPanel {
         tabbedPane.addTab("Custom Query", queryTab);
         tabbedPane.addTab("Actions", actionsTab);
         tabbedPane.addTab("RAG Management", ragManagementTab);
+        tabbedPane.addTab("Analysis Options", analysisOptionsTab);
         
         add(tabbedPane, BorderLayout.CENTER);
+        
+        // Initialize tabs that need startup data
+        SwingUtilities.invokeLater(() -> {
+            // Load initial context
+            controller.handleContextRevert();
+            
+            // Load RAG file list
+            controller.loadIndexedFiles(ragManagementTab.getDocumentList());
+        });
+        
+        tabbedPane.addChangeListener(e -> {
+            if (tabbedPane.getSelectedComponent() == analysisOptionsTab) {
+                // Refresh context when Analysis Options tab is selected
+                controller.handleContextRevert();
+            }
+        });
     }
 
     public void updateLocation(ProgramLocation loc) {
@@ -65,4 +85,8 @@ public class GhidrAssistUI extends JPanel {
     public JComponent getComponent() {
         return this;
     }
+
+	public GhidrAssistPlugin getPlugin() {
+		return plugin;
+	}
 }
