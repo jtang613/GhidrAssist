@@ -2,6 +2,9 @@ package ghidrassist;
 
 import docking.DialogComponentProvider;
 import ghidra.framework.preferences.Preferences;
+import ghidrassist.APIProvider.APIProvider;
+import ghidrassist.APIProvider.APIProviderConfig;
+
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
@@ -19,7 +22,7 @@ public class SettingsDialog extends DialogComponentProvider {
     private DefaultTableModel tableModel;
     private JTable table;
     private JComboBox<String> activeProviderComboBox;
-    private List<APIProvider> apiProviders;
+    private List<APIProviderConfig> apiProviders;
     private String selectedProviderName;
 
     // Components for RLHF Database Path
@@ -30,10 +33,6 @@ public class SettingsDialog extends DialogComponentProvider {
     private JTextField luceneIndexPathField;
     private JButton luceneIndexBrowseButton;
 
-    // RAG Provider
-    private JComboBox<String> ragProviderComboBox;
-    private String selectedRagProviderName;
-    
     // Analysis database
     private JTextField analysisDbPathField;
     private JButton analysisDbBrowseButton;
@@ -44,7 +43,7 @@ public class SettingsDialog extends DialogComponentProvider {
         // Load the list of API providers from preferences
         String providersJson = Preferences.getProperty("GhidrAssist.APIProviders", "[]");
         Gson gson = new Gson();
-        Type listType = new TypeToken<List<APIProvider>>() {}.getType();
+        Type listType = new TypeToken<List<APIProviderConfig>>() {}.getType();
         apiProviders = gson.fromJson(providersJson, listType);
 
         // Load the selected provider name
@@ -94,7 +93,7 @@ public class SettingsDialog extends DialogComponentProvider {
 
 
         // Populate the table model with the data
-        for (APIProvider provider : apiProviders) {
+        for (APIProviderConfig provider : apiProviders) {
             tableModel.addRow(new Object[] {
                 provider.getName(),
                 provider.getModel(),
@@ -127,7 +126,7 @@ public class SettingsDialog extends DialogComponentProvider {
 
      // Create the active provider combo box
         activeProviderComboBox = new JComboBox<>();
-        for (APIProvider provider : apiProviders) {
+        for (APIProviderConfig provider : apiProviders) {
             activeProviderComboBox.addItem(provider.getName());
         }
         activeProviderComboBox.setSelectedItem(selectedProviderName);
@@ -167,15 +166,6 @@ public class SettingsDialog extends DialogComponentProvider {
         luceneIndexPanel.add(luceneIndexPathField);
         luceneIndexPanel.add(luceneIndexBrowseButton);
         
-        String[] ragProviders = { "OPENWEBUI", "OPENAI", "OLLAMA", "LMS", "NONE" };
-        ragProviderComboBox = new JComboBox<>(ragProviders);
-        selectedRagProviderName = Preferences.getProperty("GhidrAssist.SelectedRAGProvider", "NONE");
-        ragProviderComboBox.setSelectedItem(selectedRagProviderName);
-
-        JPanel ragProviderPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        ragProviderPanel.add(new JLabel("RAG Provider:"));
-        ragProviderPanel.add(ragProviderComboBox);
-
         // Create a panel to hold the active provider panel and RLHF database panel
         JPanel topPanel = new JPanel();
         topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
@@ -183,7 +173,6 @@ public class SettingsDialog extends DialogComponentProvider {
         topPanel.add(rlhfDbPanel);
         topPanel.add(analysisDbPanel);
         topPanel.add(luceneIndexPanel);
-        topPanel.add(ragProviderPanel);
 
         // Add components to the panel
         panel.add(topPanel, BorderLayout.NORTH);
@@ -259,7 +248,15 @@ public class SettingsDialog extends DialogComponentProvider {
     }
 
     private void onAddProvider() {
-        APIProvider newProvider = new APIProvider("", "", "", "", "", false);
+        APIProviderConfig newProvider = new APIProviderConfig(
+            "",  // name
+            APIProvider.ProviderType.OPENAI,  // default type
+            "",  // model
+            16384,  // maxTokens
+            "",  // url
+            "",  // key
+            false  // disableTlsVerification
+        );
         boolean isSaved = openProviderDialog(newProvider);
         if (isSaved) {
             apiProviders.add(newProvider);
@@ -278,9 +275,10 @@ public class SettingsDialog extends DialogComponentProvider {
     private void onEditProvider() {
         int selectedRow = table.getSelectedRow();
         if (selectedRow >= 0) {
-            APIProvider provider = apiProviders.get(selectedRow);
-            APIProvider editedProvider = new APIProvider(
+            APIProviderConfig provider = apiProviders.get(selectedRow);
+            APIProviderConfig editedProvider = new APIProviderConfig(
                 provider.getName(),
+                provider.getType(),
                 provider.getModel(),
                 provider.getMaxTokens(),
                 provider.getUrl(),
@@ -291,11 +289,13 @@ public class SettingsDialog extends DialogComponentProvider {
             if (isSaved) {
                 // Update the provider
                 provider.setName(editedProvider.getName());
+                provider.setType(editedProvider.getType());
                 provider.setModel(editedProvider.getModel());
                 provider.setMaxTokens(editedProvider.getMaxTokens());
                 provider.setUrl(editedProvider.getUrl());
                 provider.setKey(editedProvider.getKey());
                 provider.setDisableTlsVerification(editedProvider.isDisableTlsVerification());
+                
                 // Update the table model
                 tableModel.setValueAt(provider.getName(), selectedRow, 0);
                 tableModel.setValueAt(provider.getModel(), selectedRow, 1);
@@ -303,6 +303,7 @@ public class SettingsDialog extends DialogComponentProvider {
                 tableModel.setValueAt(provider.getUrl(), selectedRow, 3);
                 tableModel.setValueAt(provider.getKey(), selectedRow, 4);
                 tableModel.setValueAt(provider.isDisableTlsVerification(), selectedRow, 5);
+                
                 // Update the combo box
                 activeProviderComboBox.removeItemAt(selectedRow);
                 activeProviderComboBox.insertItemAt(provider.getName(), selectedRow);
@@ -320,7 +321,7 @@ public class SettingsDialog extends DialogComponentProvider {
         if (selectedRow >= 0) {
             int result = JOptionPane.showConfirmDialog(getComponent(), "Are you sure you want to delete the selected provider?", "Confirm Delete", JOptionPane.YES_NO_OPTION);
             if (result == JOptionPane.YES_OPTION) {
-                APIProvider provider = apiProviders.get(selectedRow);
+                APIProviderConfig provider = apiProviders.get(selectedRow);
                 apiProviders.remove(selectedRow);
                 tableModel.removeRow(selectedRow);
                 activeProviderComboBox.removeItemAt(selectedRow);
@@ -335,27 +336,15 @@ public class SettingsDialog extends DialogComponentProvider {
         }
     }
 
-    private boolean validateProviderFields(String name, String model, String maxTokens, String url, String key) {
+    private boolean validateProviderFields(String name, String model, Integer maxTokens, String url, String key) {
         StringBuilder errorMessage = new StringBuilder();
         
         // Check for empty fields
         if (name.isEmpty()) errorMessage.append("Name is required.\n");
         if (model.isEmpty()) errorMessage.append("Model is required.\n");
-        if (maxTokens.isEmpty()) errorMessage.append("Max tokens is required.\n");
+        if (maxTokens <= 0) errorMessage.append("Max tokens must be a positive integer.\n");
         if (url.isEmpty()) errorMessage.append("URL is required.\n");
         if (key.isEmpty()) errorMessage.append("Key is required.\n");
-        
-        // Validate max tokens is a positive integer
-        if (!maxTokens.isEmpty()) {
-            try {
-                int tokens = Integer.parseInt(maxTokens);
-                if (tokens <= 0) {
-                    errorMessage.append("Max tokens must be a positive integer.\n");
-                }
-            } catch (NumberFormatException e) {
-                errorMessage.append("Max tokens must be a valid integer.\n");
-            }
-        }
         
         // Show error message if any validation failed
         if (errorMessage.length() > 0) {
@@ -375,34 +364,41 @@ public class SettingsDialog extends DialogComponentProvider {
         return url.endsWith("/") ? url : url + "/";
     }
 
-    private boolean openProviderDialog(APIProvider provider) {
+    private boolean openProviderDialog(APIProviderConfig newProvider) {  // Changed type
         // Create text fields with placeholders for new providers
         JTextField nameField;
         JTextField modelField;
         JTextField maxTokensField;
         JTextField urlField;
         JTextField keyField;
-        if (provider.getName().isEmpty()) {
+        JComboBox<APIProvider.ProviderType> typeComboBox = new JComboBox<>(APIProvider.ProviderType.values());
+        
+        if (newProvider.getName().isEmpty()) {
             // This is a new provider, use placeholder text
             nameField = new PlaceholderTextField("gpt-4o-mini", 20);
             modelField = new PlaceholderTextField("gpt-4o-mini", 20);
             maxTokensField = new PlaceholderTextField("8192", 20);
             urlField = new PlaceholderTextField("https://api.openai.com/v1/", 20);
             keyField = new PlaceholderTextField("Enter your API key", 20);
+            typeComboBox.setSelectedItem(APIProvider.ProviderType.OPENAI);
         } else {
             // This is an existing provider, use current values
-            nameField = new JTextField(provider.getName(), 20);
-            modelField = new JTextField(provider.getModel(), 20);
-            maxTokensField = new JTextField(provider.getMaxTokens(), 20);
-            urlField = new JTextField(provider.getUrl(), 20);
-            keyField = new JTextField(provider.getKey(), 20);
+            nameField = new JTextField(newProvider.getName(), 20);
+            modelField = new JTextField(newProvider.getModel(), 20);
+            maxTokensField = new JTextField(newProvider.getMaxTokens().toString(), 20);
+            urlField = new JTextField(newProvider.getUrl(), 20);
+            keyField = new JTextField(newProvider.getKey(), 20);
+            typeComboBox.setSelectedItem(newProvider.getType());
         }
 
-        JCheckBox disableTlsVerifyCheckbox = new JCheckBox("Disable TLS Certificate Verification", provider.isDisableTlsVerification());
+        JCheckBox disableTlsVerifyCheckbox = new JCheckBox("Disable TLS Certificate Verification", 
+            newProvider.isDisableTlsVerification());
 
         JPanel panel = new JPanel(new GridLayout(0, 2));
         panel.add(new JLabel("Name:"));
         panel.add(nameField);
+        panel.add(new JLabel("Type:"));
+        panel.add(typeComboBox);
         panel.add(new JLabel("Model:"));
         panel.add(modelField);
         panel.add(new JLabel("Max Tokens:"));
@@ -415,14 +411,16 @@ public class SettingsDialog extends DialogComponentProvider {
         panel.add(disableTlsVerifyCheckbox);
 
         while (true) {
-            int result = JOptionPane.showConfirmDialog(getComponent(), panel, "API Provider", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+            int result = JOptionPane.showConfirmDialog(getComponent(), panel, 
+                "API Provider", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
 
             if (result == JOptionPane.OK_OPTION) {
                 String name = nameField.getText().trim();
                 String model = modelField.getText().trim();
-                String maxTokens = maxTokensField.getText().trim();
+                Integer maxTokens = Integer.decode(maxTokensField.getText().trim());
                 String url = urlField.getText().trim();
                 String key = keyField.getText().trim();
+                APIProvider.ProviderType type = (APIProvider.ProviderType) typeComboBox.getSelectedItem();
                 
                 // Validate all fields
                 if (validateProviderFields(name, model, maxTokens, url, key)) {
@@ -430,18 +428,17 @@ public class SettingsDialog extends DialogComponentProvider {
                     url = ensureTrailingSlash(url);
                     
                     // Set the values in the provider object
-                    provider.setName(name);
-                    provider.setModel(model);
-                    provider.setMaxTokens(maxTokens);
-                    provider.setUrl(url);
-                    provider.setKey(key);
-                    provider.setDisableTlsVerification(disableTlsVerifyCheckbox.isSelected());
+                    newProvider.setName(name);
+                    newProvider.setType(type);
+                    newProvider.setModel(model);
+                    newProvider.setMaxTokens(maxTokens);
+                    newProvider.setUrl(url);
+                    newProvider.setKey(key);
+                    newProvider.setDisableTlsVerification(disableTlsVerifyCheckbox.isSelected());
                     return true;
                 }
-                // If validation failed, continue the loop to show the dialog again
                 continue;
             }
-            // User clicked Cancel
             return false;
         }
     }
@@ -451,7 +448,6 @@ public class SettingsDialog extends DialogComponentProvider {
         // Save settings
         // Get the selected provider name
         selectedProviderName = (String) activeProviderComboBox.getSelectedItem();
-        selectedRagProviderName = (String) ragProviderComboBox.getSelectedItem();
 
 
         // Serialize the list of providers to JSON
@@ -470,7 +466,6 @@ public class SettingsDialog extends DialogComponentProvider {
         // Store settings
         Preferences.setProperty("GhidrAssist.APIProviders", providersJson);
         Preferences.setProperty("GhidrAssist.SelectedAPIProvider", selectedProviderName);
-        Preferences.setProperty("GhidrAssist.SelectedRAGProvider", selectedRagProviderName);
         Preferences.setProperty("GhidrAssist.RLHFDatabasePath", rlhfDbPath);
         Preferences.setProperty("GhidrAssist.LuceneIndexPath", luceneIndexPath);
         Preferences.store(); // Save preferences to disk
@@ -587,8 +582,8 @@ public class SettingsDialog extends DialogComponentProvider {
             }
             
             // Find the selected provider
-            APIProvider provider = null;
-            for (APIProvider p : apiProviders) {
+            APIProviderConfig provider = null;
+            for (APIProviderConfig p : apiProviders) {
                 if (p.getName().equals(selectedProvider)) {
                     provider = p;
                     break;
@@ -612,7 +607,7 @@ public class SettingsDialog extends DialogComponentProvider {
             LlmApi testApi = new LlmApi(provider);
             
             // Create a simple test prompt
-            String testPrompt = "Test connection. Please respond with 'OK'.";
+            String testPrompt = "Testing connection. Please respond with 'OK' and nothing else.";
             
             testApi.sendRequestAsync(testPrompt, new LlmApi.LlmResponseHandler() {
                 StringBuilder response = new StringBuilder();
