@@ -6,9 +6,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 import ghidrassist.LlmApi;
-import ghidrassist.LlmApi.LlmResponseHandler;
-import ghidrassist.apiprovider.APIProvider.EmbeddingCallback;
-import ghidrassist.apiprovider.APIProvider.ProviderType;
 import okhttp3.*;
 import okio.BufferedSource;
 import javax.net.ssl.*;

@@ -21,7 +21,6 @@ import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
 import ghidrassist.apiprovider.APIProviderConfig;
-import ghidrassist.ui.GhidrAssistUI;
 
 @PluginInfo(
     status = PluginStatus.STABLE,
@@ -36,7 +35,6 @@ public class GhidrAssistPlugin extends ProgramPlugin {
         IS_DISASSEMBLER,
         UNKNOWN
     }
-    private GhidrAssistUI ui;
     private GhidrAssistProvider provider;
     private String lastActiveProvider;
 
@@ -71,14 +69,14 @@ public class GhidrAssistPlugin extends ProgramPlugin {
     }
 
     private void showSettingsDialog() {
-        SettingsDialog dialog = new SettingsDialog(tool.getToolFrame(), "GhidrAssist Settings");
+        SettingsDialog dialog = new SettingsDialog(tool.getToolFrame(), "GhidrAssist Settings", this);
         tool.showDialog(dialog);
     }
 
     @Override
     public void locationChanged(ProgramLocation loc) {
-        if (ui != null) {
-            ui.updateLocation(loc);
+        if (provider != null) {
+            provider.getUI().updateLocation(loc);
         }
     }
 
@@ -136,4 +134,8 @@ public class GhidrAssistPlugin extends ProgramPlugin {
 
         return null;
     }
+
+	public GhidrAssistPlugin getInstance() {
+		return this;
+	}
 }

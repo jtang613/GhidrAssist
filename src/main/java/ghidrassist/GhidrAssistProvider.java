@@ -55,6 +55,10 @@ public class GhidrAssistProvider extends ComponentProvider {
         }
     }
 
+    public GhidrAssistUI getUI() {
+        return ui;
+    }
+    
     @Override
     public JComponent getComponent() {
         return mainPanel;

@@ -44,6 +44,7 @@ public class TabController {
     private QueryTab queryTab;
     private ActionsTab actionsTab;
     private RAGManagementTab ragManagementTab;
+    private AnalysisOptionsTab analysisOptionsTab;
 
     public TabController(GhidrAssistPlugin plugin) {
         this.plugin = plugin;
@@ -88,7 +89,7 @@ public class TabController {
             
             APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
             if (config != null) {
-                LlmApi llmApi = new LlmApi(config);
+                LlmApi llmApi = new LlmApi(config, plugin);
                 llmApi.cancelCurrentRequest();
             }
             return;
@@ -129,7 +130,7 @@ public class TabController {
                         throw new Exception("No API provider configured.");
                     }
                     
-                    LlmApi llmApi = new LlmApi(config);
+                    LlmApi llmApi = new LlmApi(config, plugin);
                     llmApi.sendRequestAsync(prompt, new LlmApi.LlmResponseHandler() {
                         @Override
                         public void onStart() {
@@ -197,7 +198,7 @@ public class TabController {
             
             APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
             if (config != null) {
-                LlmApi llmApi = new LlmApi(config);
+                LlmApi llmApi = new LlmApi(config, plugin);
                 llmApi.cancelCurrentRequest();
             }
             return;
@@ -238,7 +239,7 @@ public class TabController {
                         throw new Exception("No API provider configured.");
                     }
                     
-                    LlmApi llmApi = new LlmApi(config);
+                    LlmApi llmApi = new LlmApi(config, plugin);
                     llmApi.sendRequestAsync(prompt, createResponseHandler(explainTab));
 
                 } catch (Exception e) {
@@ -258,7 +259,7 @@ public class TabController {
             
             APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
             if (config != null) {
-                LlmApi llmApi = new LlmApi(config);
+                LlmApi llmApi = new LlmApi(config, plugin);
                 llmApi.cancelCurrentRequest();
             }
             return;
@@ -292,7 +293,7 @@ public class TabController {
                         throw new Exception("No API provider configured.");
                     }
                     
-                    LlmApi llmApi = new LlmApi(config);
+                    LlmApi llmApi = new LlmApi(config, plugin);
                     llmApi.sendRequestAsync(conversationHistory.toString(), 
                         createConversationHandler(queryTab));
 
@@ -310,14 +311,28 @@ public class TabController {
         if (isQueryRunning) {
             actionsTab.setAnalyzeFunctionButtonText("Analyze Function");
             isQueryRunning = false;
+            
+            // Cancel any running API requests
+            APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+            if (config != null) {
+                LlmApi llmApi = new LlmApi(config, plugin);
+                llmApi.cancelCurrentRequest();
+            }
             return;
         }
 
         // Count number of request types
+        numRunners.set(0); // Reset counter
         for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
             if (entry.getValue().isSelected()) {
                 numRunners.incrementAndGet();
             }
+        }
+        
+        if (numRunners.get() == 0) {
+            Msg.showInfo(getClass(), actionsTab, "No Actions Selected", 
+                "Please select at least one analysis type.");
+            return;
         }
         
         actionsTab.setAnalyzeFunctionButtonText("Stop");
@@ -327,6 +342,8 @@ public class TabController {
         if (currentFunction == null) {
             Msg.showInfo(getClass(), actionsTab, "No Function", 
                 "No function at current location.");
+            actionsTab.setAnalyzeFunctionButtonText("Analyze Function");
+            isQueryRunning = false;
             return;
         }
 
@@ -334,6 +351,8 @@ public class TabController {
         if (code == null) {
             Msg.showError(this, actionsTab, "Error", 
                 "Failed to get code from the current address.");
+            actionsTab.setAnalyzeFunctionButtonText("Analyze Function");
+            isQueryRunning = false;
             return;
         }
 
@@ -341,7 +360,15 @@ public class TabController {
     }
 
     private void handleActionRequests(String code, Map<String, JCheckBox> filterCheckBoxes) {
-        LlmApi llmApi = new LlmApi(GhidrAssistPlugin.getCurrentProviderConfig());
+        APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+        if (config == null) {
+            Msg.showError(this, actionsTab, "Error", "No API provider configured.");
+            actionsTab.setAnalyzeFunctionButtonText("Analyze Function");
+            isQueryRunning = false;
+            return;
+        }
+
+        LlmApi llmApi = new LlmApi(config, plugin);
 
         for (Map.Entry<String, JCheckBox> entry : filterCheckBoxes.entrySet()) {
             if (!isQueryRunning) {
@@ -462,6 +489,41 @@ public class TabController {
         }
     }
 
+    public void setAnalysisOptionsTab(AnalysisOptionsTab tab) {
+        this.analysisOptionsTab = tab;
+    }
+
+    public void handleContextSave(String context) {
+        if (plugin.getCurrentProgram() != null) {
+            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+            analysisDB.upsertContext(programHash, context);
+            Msg.showInfo(this, analysisOptionsTab, "Success", "Context saved successfully.");
+        }
+    }
+
+    public void handleContextRevert() {
+        if (plugin.getCurrentProgram() != null) {
+            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+            String context = analysisDB.getContext(programHash);
+            if (context == null) {
+                // Use default context from LlmApi
+                context = new LlmApi(GhidrAssistPlugin.getCurrentProviderConfig(), plugin).getSystemPrompt();
+            }
+            analysisOptionsTab.setContextText(context);
+        }
+    }
+
+    private String getCurrentContext() {
+        if (plugin.getCurrentProgram() != null) {
+            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+            String context = analysisDB.getContext(programHash);
+            if (context != null) {
+                return context;
+            }
+        }
+        return new LlmApi(GhidrAssistPlugin.getCurrentProviderConfig(), plugin).getSystemPrompt();
+    }
+    
     public void handleHyperlinkEvent(HyperlinkEvent e) {
         if (e.getEventType() == HyperlinkEvent.EventType.ACTIVATED) {
             String desc = e.getDescription();
@@ -481,7 +543,7 @@ public class TabController {
                 return;
             }
             
-            LlmApi llmApi = new LlmApi(config);
+            LlmApi llmApi = new LlmApi(config, plugin);
             String modelName = config.getModel();
             String systemContext = llmApi.getSystemPrompt();
             rlhfDB.storeFeedback(modelName, lastPrompt, systemContext, lastResponse, feedback);
@@ -534,10 +596,16 @@ public class TabController {
     private LlmApi.LlmResponseHandler createActionResponseHandler(String action) {
         return new LlmApi.LlmResponseHandler() {
             @Override
-            public void onStart() {}
+            public void onStart() {
+                SwingUtilities.invokeLater(() -> {
+                    actionsTab.setAnalyzeFunctionButtonText("Stop");
+                });
+            }
 
             @Override
-            public void onUpdate(String partialResponse) {}
+            public void onUpdate(String partialResponse) {
+                // Function calls don't have partial updates
+            }
 
             @Override
             public void onComplete(String fullResponse) {
@@ -564,7 +632,6 @@ public class TabController {
                         isQueryRunning = false;
                     }
 
-                    error.printStackTrace();
                     Msg.showError(this, actionsTab, "Error", 
                         "An error occurred: " + error.getMessage());
                 });
@@ -579,23 +646,36 @@ public class TabController {
 
     private LlmApi.LlmResponseHandler createConversationHandler(QueryTab tab) {
         return new LlmApi.LlmResponseHandler() {
-            private String previousResponseChunk = "";
+            private final StringBuilder streamBuffer = new StringBuilder();
+            private int lastProcessedLength = 0;
 
             @Override
             public void onStart() {
-                SwingUtilities.invokeLater(() -> 
-                    tab.setResponseText("Processing..."));
+                SwingUtilities.invokeLater(() -> {
+                    streamBuffer.setLength(0);
+                    lastProcessedLength = 0;
+                    tab.setResponseText("Processing...");
+                });
             }
 
             @Override
             public void onUpdate(String partialResponse) {
-                if (!partialResponse.equals(previousResponseChunk)) {
-                    String newChunk = partialResponse.substring(
-                        previousResponseChunk.length());
-                    currentResponse.append(newChunk);
-                    previousResponseChunk = partialResponse;
-                    updateConversationDisplay();
-                }
+                SwingUtilities.invokeLater(() -> {
+                    if (partialResponse.length() > lastProcessedLength) {
+                        // Only process the new content
+                        String newContent = partialResponse.substring(lastProcessedLength);
+                        streamBuffer.append(newContent);
+                        lastProcessedLength = partialResponse.length();
+                        
+                        // Format the entire conversation with the current stream
+                        String fullConversation = conversationHistory.toString() + 
+                            "**Assistant**:\n" + streamBuffer.toString();
+                        
+                        // Convert to HTML and update UI
+                        String html = markdownHelper.markdownToHtml(fullConversation);
+                        tab.appendToResponse(html);
+                    }
+                });
             }
 
             @Override
@@ -604,8 +684,9 @@ public class TabController {
                     lastResponse = fullResponse;
                     conversationHistory.append("**Assistant**:\n")
                         .append(fullResponse).append("\n\n");
-                    currentResponse.setLength(0);
-                    updateConversationDisplay();
+                    
+                    String html = markdownHelper.markdownToHtml(conversationHistory.toString());
+                    tab.setResponseText(html);
                     tab.setSubmitButtonText("Submit");
                     isQueryRunning = false;
                 });
@@ -616,7 +697,8 @@ public class TabController {
                 SwingUtilities.invokeLater(() -> {
                     conversationHistory.append("**Error**:\n")
                         .append(error.getMessage()).append("\n\n");
-                    updateConversationDisplay();
+                    String html = markdownHelper.markdownToHtml(conversationHistory.toString());
+                    tab.setResponseText(html);
                     tab.setSubmitButtonText("Submit");
                     isQueryRunning = false;
                 });
@@ -627,12 +709,6 @@ public class TabController {
                 return isQueryRunning;
             }
         };
-    }
-
-    private void updateConversationDisplay() {
-        String fullConversation = conversationHistory.toString() + 
-            "**Assistant**:\n" + currentResponse.toString();
-        queryTab.setResponseText(markdownHelper.markdownToHtml(fullConversation));
     }
 
     private void parseAndDisplayActions(String response) {
@@ -655,6 +731,31 @@ public class TabController {
 
     public void setQueryRunning(boolean running) {
         isQueryRunning = running;
+    }
+    
+    public void handleLocationUpdate(ProgramLocation loc) {
+        if (loc != null && loc.getAddress() != null) {
+            // Update explain tab with current offset
+            explainTab.updateOffset(loc.getAddress().toString());
+            
+            // Check for existing analysis
+            Function function = plugin.getCurrentFunction();
+            if (function != null) {
+                AnalysisDB.Analysis analysis = analysisDB.getAnalysis(
+                    plugin.getCurrentProgram().getExecutableSHA256(),
+                    function.getEntryPoint()
+                );
+                if (analysis != null) {
+                    explainTab.setExplanationText(
+                        markdownHelper.markdownToHtml(analysis.getResponse()));
+                } else {
+                    explainTab.setExplanationText("");
+                }
+            } else {
+                // Clear explanation if not in a function
+                explainTab.setExplanationText("");
+            }
+        }
     }
 
     public void updateAnalysis(ProgramLocation loc) {

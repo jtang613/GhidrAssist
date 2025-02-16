@@ -49,4 +49,8 @@ public class RAGManagementTab extends JPanel {
     public void updateDocumentList(String[] files) {
         documentList.setListData(files);
     }
+    
+    public JList<String> getDocumentList() {
+        return documentList;
+    }
 }

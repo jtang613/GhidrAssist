@@ -21,6 +21,18 @@ public class QueryTab extends JPanel {
     public QueryTab(TabController controller) {
         super(new BorderLayout());
         this.controller = controller;
+        
+        // Initialize components with optimized settings
+        responseTextPane = new JEditorPane();
+        responseTextPane.setEditable(false);
+        responseTextPane.setContentType("text/html");
+        responseTextPane.addHyperlinkListener(controller::handleHyperlinkEvent);
+        responseTextPane.putClientProperty("JEditorPane.w3cLengthUnits", Boolean.TRUE);
+        responseTextPane.putClientProperty("JEditorPane.honorDisplayProperties", Boolean.TRUE);
+        
+        // Enable double buffering for smoother updates
+        responseTextPane.setDoubleBuffered(true);
+        
         initializeComponents();
         layoutComponents();
         setupListeners();
@@ -103,6 +115,22 @@ public class QueryTab extends JPanel {
         responseTextPane.setCaretPosition(responseTextPane.getDocument().getLength());
     }
 
+    public void appendToResponse(String html) {
+        // Only scroll if we're already at the bottom
+        JScrollPane scrollPane = (JScrollPane) responseTextPane.getParent().getParent();
+        JScrollBar vertical = scrollPane.getVerticalScrollBar();
+        boolean shouldScroll = (vertical.getValue() + vertical.getVisibleAmount() == vertical.getMaximum());
+        
+        responseTextPane.setText(html);
+        
+        // Maintain scroll position if we were at the bottom
+        if (shouldScroll) {
+            SwingUtilities.invokeLater(() -> {
+                vertical.setValue(vertical.getMaximum());
+            });
+        }
+    }
+    
     public void setSubmitButtonText(String text) {
         submitButton.setText(text);
     }

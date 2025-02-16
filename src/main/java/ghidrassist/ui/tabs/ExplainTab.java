@@ -2,12 +2,12 @@ package ghidrassist.ui.tabs;
 
 import javax.swing.*;
 import java.awt.*;
-import ghidrassist.ui.common.UIConstants;
-import ghidrassist.ui.common.PlaceholderTextField;
 import ghidrassist.core.TabController;
 
 public class ExplainTab extends JPanel {
-    private final TabController controller;
+    private static final long serialVersionUID = 1L;
+	private final TabController controller;
+	private JLabel offsetLabel;
     private JTextField offsetField;
     private JEditorPane explainTextPane;
     private JButton explainFunctionButton;
@@ -24,7 +24,7 @@ public class ExplainTab extends JPanel {
 
     private void initializeComponents() {
         // Initialize offset field
-        JLabel offsetLabel = new JLabel("Offset: ");
+        offsetLabel = new JLabel("Offset: ");
         offsetField = new JTextField(16);
         offsetField.setEditable(false);
 
@@ -43,7 +43,7 @@ public class ExplainTab extends JPanel {
     private void layoutComponents() {
         // Offset panel
         JPanel offsetPanel = new JPanel();
-        offsetPanel.add(new JLabel("Offset: "));
+        offsetPanel.add(offsetLabel);
         offsetPanel.add(offsetField);
         add(offsetPanel, BorderLayout.NORTH);
 
