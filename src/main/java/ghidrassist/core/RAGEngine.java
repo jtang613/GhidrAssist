@@ -1,4 +1,4 @@
-package ghidrassist;
+package ghidrassist.core;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
@@ -13,9 +13,11 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 
 import ghidra.framework.preferences.Preferences;
-import ghidrassist.APIProvider.APIProvider;
-import ghidrassist.APIProvider.APIProviderConfig;
-import ghidrassist.APIProvider.APIProvider.EmbeddingCallback;
+import ghidrassist.GAUtils;
+import ghidrassist.GhidrAssistPlugin;
+import ghidrassist.apiprovider.APIProvider;
+import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.APIProvider.EmbeddingCallback;
 
 import java.io.*;
 import java.nio.file.*;
@@ -32,7 +34,6 @@ public class RAGEngine {
     private static IndexWriter indexWriter;
     private static ReentrantLock indexLock = new ReentrantLock();
     private static final int MAX_SNIPPET_LENGTH = 500;
-    private static Map<String, double[]> embeddingStore = new HashMap<>();
     private static final int MAX_CACHE_SIZE = 1000; // Adjust based on your needs
     private static Cache<String, double[]> embeddingCache = CacheBuilder.newBuilder()
         .maximumSize(MAX_CACHE_SIZE)

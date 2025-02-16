@@ -1,5 +1,14 @@
 package ghidrassist;
 
+import java.lang.reflect.Type;
+import java.util.List;
+
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+
+import docking.ActionContext;
+import docking.action.DockingAction;
+import docking.action.MenuData;
 import ghidra.app.decompiler.DecompilerLocation;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.plugin.ProgramPlugin;
@@ -11,21 +20,9 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
-import ghidrassist.APIProvider.APIProviderConfig;
+import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.ui.GhidrAssistUI;
 
-import java.lang.reflect.Type;
-import java.util.List;
-
-import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
-
-import docking.ActionContext;
-import docking.action.DockingAction;
-import docking.action.MenuData;
-
-/**
- * GhidrAssistPlugin is a Ghidra plugin that provides code assistance using a language model.
- */
 @PluginInfo(
     status = PluginStatus.STABLE,
     packageName = "GhidrAssist",
@@ -34,15 +31,14 @@ import docking.action.MenuData;
     description = "A plugin that provides code assistance using a language model."
 )
 public class GhidrAssistPlugin extends ProgramPlugin {
-
-    private GhidrAssistProvider provider;
-    private String lastActiveProvider;
-    
     public enum CodeViewType {
         IS_DECOMPILER,
         IS_DISASSEMBLER,
         UNKNOWN
     }
+    private GhidrAssistUI ui;
+    private GhidrAssistProvider provider;
+    private String lastActiveProvider;
 
     public GhidrAssistPlugin(PluginTool tool) {
         super(tool);
@@ -65,6 +61,15 @@ public class GhidrAssistPlugin extends ProgramPlugin {
         tool.addAction(settingsAction);
     }
 
+    @Override
+    protected void dispose() {
+        if (provider != null) {
+            tool.removeComponentProvider(provider);
+            provider = null;
+        }
+        super.dispose();
+    }
+
     private void showSettingsDialog() {
         SettingsDialog dialog = new SettingsDialog(tool.getToolFrame(), "GhidrAssist Settings");
         tool.showDialog(dialog);
@@ -72,8 +77,8 @@ public class GhidrAssistPlugin extends ProgramPlugin {
 
     @Override
     public void locationChanged(ProgramLocation loc) {
-        if (provider != null) {
-            provider.updateLocation(loc);
+        if (ui != null) {
+            ui.updateLocation(loc);
         }
     }
 
