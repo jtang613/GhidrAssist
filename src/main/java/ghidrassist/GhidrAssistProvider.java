@@ -12,8 +12,9 @@ import docking.DefaultActionContext;
 import docking.action.DockingAction;
 import docking.action.ToolBarData;
 import ghidra.util.Msg;
-import resources.Icons;
+import ghidrassist.resources.GhidrAssistIcons;
 import ghidrassist.ui.GhidrAssistUI;
+import resources.Icons;
 
 public class GhidrAssistProvider extends ComponentProvider {
     private GhidrAssistPlugin plugin;
@@ -28,7 +29,7 @@ public class GhidrAssistProvider extends ComponentProvider {
 
         buildPanel();
         createActions();
-        setIcon(Icons.ADD_ICON);
+        setIcon(GhidrAssistIcons.ROBOT_ICON);
     }
 
     private void buildPanel() {
