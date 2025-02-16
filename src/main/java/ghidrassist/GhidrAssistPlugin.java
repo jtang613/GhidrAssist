@@ -11,7 +11,7 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
-import scala.Console;
+import ghidrassist.APIProvider.APIProviderConfig;
 
 import java.lang.reflect.Type;
 import java.util.List;
@@ -35,7 +35,7 @@ import docking.action.MenuData;
 )
 public class GhidrAssistPlugin extends ProgramPlugin {
 
-	private GhidrAssistProvider provider;
+    private GhidrAssistProvider provider;
     private String lastActiveProvider;
     
     public enum CodeViewType {
@@ -48,7 +48,6 @@ public class GhidrAssistPlugin extends ProgramPlugin {
         super(tool);
         String pluginName = getName();
         provider = new GhidrAssistProvider(this, pluginName);
-        
     }
 
     @Override
@@ -95,44 +94,41 @@ public class GhidrAssistPlugin extends ProgramPlugin {
 
         if (program != null && address != null) {
             FunctionManager functionManager = program.getFunctionManager();
-            Function function = functionManager.getFunctionContaining(address);
-            return function;
+            return functionManager.getFunctionContaining(address);
         }
         return null;
     }
 
-	public String getLastActiveProvider() {
-		return lastActiveProvider;
-	}
-	
-	public CodeViewType checkLastActiveCodeView() {
-	    if (currentLocation instanceof DecompilerLocation) {
-	        return CodeViewType.IS_DECOMPILER;
-	    } else if (currentLocation != null) {
-	        // Assume disassembler view if not decompiler
-	        return CodeViewType.IS_DISASSEMBLER;
-	    } else {
-	        return CodeViewType.UNKNOWN;
-	    }
-	}
+    public String getLastActiveProvider() {
+        return lastActiveProvider;
+    }
+    
+    public CodeViewType checkLastActiveCodeView() {
+        if (currentLocation instanceof DecompilerLocation) {
+            return CodeViewType.IS_DECOMPILER;
+        } else if (currentLocation != null) {
+            return CodeViewType.IS_DISASSEMBLER;
+        } else {
+            return CodeViewType.UNKNOWN;
+        }
+    }
 
-    public static APIProvider getCurrentAPIProvider() {
+    public static APIProviderConfig getCurrentProviderConfig() {
         // Load the list of API providers from preferences
         String providersJson = Preferences.getProperty("GhidrAssist.APIProviders", "[]");
         Gson gson = new Gson();
-        Type listType = new TypeToken<List<APIProvider>>() {}.getType();
-        List<APIProvider> apiProviders = gson.fromJson(providersJson, listType);
+        Type listType = new TypeToken<List<APIProviderConfig>>() {}.getType();
+        List<APIProviderConfig> apiProviders = gson.fromJson(providersJson, listType);
 
         // Load the selected provider name
         String selectedProviderName = Preferences.getProperty("GhidrAssist.SelectedAPIProvider", "");
 
-        for (APIProvider provider : apiProviders) {
+        for (APIProviderConfig provider : apiProviders) {
             if (provider.getName().equals(selectedProviderName)) {
                 return provider;
             }
         }
 
-        // If not found, return null or handle as needed
         return null;
     }
 }
