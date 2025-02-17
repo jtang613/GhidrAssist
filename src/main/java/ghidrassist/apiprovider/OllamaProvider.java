@@ -34,7 +34,19 @@ public class OllamaProvider extends APIProvider {
                 .connectTimeout(Duration.ofSeconds(30))
                 .readTimeout(Duration.ofSeconds(60))
                 .writeTimeout(Duration.ofSeconds(30))
-                .retryOnConnectionFailure(true);
+                .retryOnConnectionFailure(true)
+                .addInterceptor(chain -> {
+                    Request originalRequest = chain.request();
+                    Request.Builder requestBuilder = originalRequest.newBuilder()
+                        .header("Authorization", "Bearer " + key)
+                        .header("Content-Type", "application/json");
+                    
+                    if (!originalRequest.method().equals("GET")) {
+                        requestBuilder.header("Accept", "application/json");
+                    }
+                    
+                    return chain.proceed(requestBuilder.build());
+                });
 
             if (disableTlsVerification) {
                 TrustManager[] trustAllCerts = new TrustManager[]{
