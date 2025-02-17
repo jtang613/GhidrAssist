@@ -133,8 +133,12 @@ public class LlmApi {
         // Cancel any existing stream
         cancelCurrentRequest();
 
+        String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
+        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-")) {
+        	systemUser = ChatMessage.ChatMessageRole.USER;
+        }
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, getCurrentContext()));
+        messages.add(new ChatMessage(systemUser, getCurrentContext()));
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
 
         if (!responseHandler.shouldContinue()) {
@@ -201,8 +205,13 @@ public class LlmApi {
             return;
         }
 
+        String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
+        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-")) {
+        	systemUser = ChatMessage.ChatMessageRole.USER;
+        }
+
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, 
+        messages.add(new ChatMessage(systemUser, 
             getCurrentContext() + "\n" + FUNCTION_PROMPT + "\n" + FORMAT_PROMPT));
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
 
