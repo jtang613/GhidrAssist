@@ -14,24 +14,17 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
-import java.util.Base64;
-import java.security.SecureRandom;
 
 public class OpenWebUiProvider extends APIProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
-    private static final String OPENWEBUI_CHAT_NEW_ENDPOINT = "api/v1/chats/new";
-    private static final String OPENWEBUI_CHAT_ENDPOINT = "api/v1/chats/";
-    private static final String OPENWEBUI_OLLAMA_CHAT_ENDPOINT = "ollama/api/chat";
-    private static final String OPENWEBUI_COMPLETED_ENDPOINT = "api/chat/completed";
-    private static final String OPENWEBUI_KNOWLEDGE_ENDPOINT = "api/v1/knowledge/";
-    private static final String OLLAMA_MODELS_ENDPOINT = "ollama/api/tags";
-    private static final String OLLAMA_EMBEDDINGS_ENDPOINT = "ollama/api/embeddings";
+    private static final String OPENWEBUI_CHAT_ENDPOINT = "ollama/api/chat";
+    private static final String OPENWEBUI_EMBEDDINGS_ENDPOINT = "ollama/api/embed";
+    private static final String OPENWEBUI_MODELS_ENDPOINT = "ollama/api/tags";
     private volatile boolean isCancelled = false;
 
     public OpenWebUiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.OPENWEBUI, model, maxTokens, url, key, disableTlsVerification);
+        super(name, ProviderType.OLLAMA, model, maxTokens, url, key, disableTlsVerification);
     }
 
     @Override
@@ -81,200 +74,34 @@ public class OpenWebUiProvider extends APIProvider {
         }
     }
 
-    private JsonObject createChatPayload(List<ChatMessage> messages, String chatId) {
-        JsonObject payload = new JsonObject();
-        JsonObject chat = new JsonObject();
-        chat.addProperty("id", chatId.isEmpty() ? "" : chatId);
-        chat.addProperty("title", "GhidrAssist Chat");
-        
-        JsonArray modelsArray = new JsonArray();
-        modelsArray.add(super.getModel());
-        chat.add("models", modelsArray);
-        
-        chat.add("params", new JsonObject());
-        
-        // Build messages for history
-        JsonObject messagesDict = new JsonObject();
-        JsonArray messagesList = new JsonArray();
-        String currentId = "";
-        
-        for (int i = 0; i < messages.size(); i++) {
-            ChatMessage msg = messages.get(i);
-            String msgId = UUID.randomUUID().toString();
-            if (i == messages.size() - 1) {
-                currentId = msgId;
-            }
-            
-            JsonObject msgObj = new JsonObject();
-            msgObj.addProperty("id", msgId);
-            msgObj.addProperty("parentId", i > 0 ? messagesList.get(i-1).getAsJsonObject().get("id").getAsString() : null);
-            msgObj.add("childrenIds", new JsonArray());
-            msgObj.addProperty("role", msg.getRole());
-            msgObj.addProperty("content", msg.getContent());
-            msgObj.add("files", new JsonArray());
-            msgObj.addProperty("timestamp", System.currentTimeMillis() / 1000);
-            JsonArray msgModels = new JsonArray();
-            msgModels.add(super.getModel());
-            msgObj.add("models", msgModels);
-            
-            messagesList.add(msgObj);
-            messagesDict.add(msgId, msgObj);
-        }
-        
-        JsonObject history = new JsonObject();
-        history.add("messages", messagesDict);
-        history.addProperty("currentId", currentId);
-        
-        chat.add("history", history);
-        chat.add("messages", messagesList);
-        chat.add("tags", new JsonArray());
-        chat.addProperty("timestamp", System.currentTimeMillis());
-        
-        payload.add("chat", chat);
-        return payload;
-    }
-
-    private String createOrUpdateChat(List<ChatMessage> messages, String chatId) throws IOException {
-        JsonObject payload = createChatPayload(messages, chatId);
-        String endpoint = chatId.isEmpty() ? OPENWEBUI_CHAT_NEW_ENDPOINT : OPENWEBUI_CHAT_ENDPOINT + chatId;
+    @Override
+    public String createChatCompletion(List<ChatMessage> messages) throws IOException {
+        JsonObject payload = buildChatCompletionPayload(messages, false);
         
         Request request = new Request.Builder()
-            .url(url + endpoint)
+            .url(url + OPENWEBUI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException("Failed to create/update chat: " + response.code());
+                String errorBody = response.body() != null ? response.body().string() : "No error body";
+                throw new IOException("Failed to get completion: " + response.code() + 
+                    " " + response.message() + "\nError: " + errorBody);
             }
-            return gson.fromJson(response.body().string(), JsonObject.class)
-                      .get("id").getAsString();
-        }
-    }
 
-    private String generateSessionId() {
-        byte[] randomBytes = new byte[8];
-        new SecureRandom().nextBytes(randomBytes);
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes);
-    }
-
-    @Override
-    public String createChatCompletion(List<ChatMessage> messages) throws IOException {
-        String chatId = createOrUpdateChat(messages, "");
-        String sessionId = generateSessionId();
-        
-        JsonObject ollamaPayload = new JsonObject();
-        ollamaPayload.addProperty("chat_id", chatId);
-        ollamaPayload.addProperty("id", UUID.randomUUID().toString());
-        ollamaPayload.addProperty("session_id", sessionId);
-        ollamaPayload.addProperty("model", super.getModel());
-        ollamaPayload.add("options", new JsonObject());
-        ollamaPayload.addProperty("stream", false);
-        ollamaPayload.add("files", new JsonArray());
-        
-        JsonArray messagesArray = new JsonArray();
-        for (ChatMessage message : messages) {
-            JsonObject messageObj = new JsonObject();
-            messageObj.addProperty("role", message.getRole());
-            messageObj.addProperty("content", message.getContent());
-            messagesArray.add(messageObj);
-        }
-        ollamaPayload.add("messages", messagesArray);
-
-        Request request = new Request.Builder()
-            .url(url + OPENWEBUI_OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(ollamaPayload)))
-            .build();
-
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code());
-            }
-            
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            String content = responseObj.getAsJsonObject("message").get("content").getAsString();
-            
-            // Create assistant response message
-            String assistantMsgId = UUID.randomUUID().toString();
-            
-            // Update the chat with the assistant's response
-            JsonObject updatedPayload = createChatPayload(messages, chatId);
-            JsonObject updatedChat = updatedPayload.getAsJsonObject("chat");
-            JsonObject messagesDict = updatedChat.getAsJsonObject("history").getAsJsonObject("messages");
-            JsonArray messagesList = updatedChat.getAsJsonArray("messages");
-            
-            // Add assistant's message
-            JsonObject assistantMsg = new JsonObject();
-            assistantMsg.addProperty("id", assistantMsgId);
-            assistantMsg.addProperty("parentId", messagesList.get(messagesList.size() - 1).getAsJsonObject().get("id").getAsString());
-            assistantMsg.add("childrenIds", new JsonArray());
-            assistantMsg.addProperty("role", "assistant");
-            assistantMsg.addProperty("content", content);
-            assistantMsg.add("files", new JsonArray());
-            assistantMsg.addProperty("timestamp", System.currentTimeMillis() / 1000);
-            JsonArray msgModels = new JsonArray();
-            msgModels.add(super.getModel());
-            assistantMsg.add("models", msgModels);
-            
-            messagesList.add(assistantMsg);
-            messagesDict.add(assistantMsgId, assistantMsg);
-            updatedChat.getAsJsonObject("history").addProperty("currentId", assistantMsgId);
-            
-            // Update the chat
-            Request updateRequest = new Request.Builder()
-                .url(url + OPENWEBUI_CHAT_ENDPOINT + chatId)
-                .post(RequestBody.create(JSON, gson.toJson(updatedPayload)))
-                .build();
-                
-            Response updateResponse = client.newCall(updateRequest).execute();
-            updateResponse.close();
-
-            // Mark chat as completed
-            JsonObject completedPayload = new JsonObject();
-            completedPayload.addProperty("chat_id", chatId);
-            completedPayload.addProperty("id", ollamaPayload.get("id").getAsString());
-            completedPayload.addProperty("session_id", sessionId);
-            completedPayload.addProperty("model", super.getModel());
-            completedPayload.add("messages", messagesList);
-            
-            Request completedRequest = new Request.Builder()
-                .url(url + OPENWEBUI_COMPLETED_ENDPOINT)
-                .post(RequestBody.create(JSON, gson.toJson(completedPayload)))
-                .build();
-                
-            Response completedResponse = client.newCall(completedRequest).execute();
-            completedResponse.close();
-            
-            return content;
+            return extractContentFromResponse(responseObj);
         }
     }
 
     @Override
     public void streamChatCompletion(List<ChatMessage> messages, LlmResponseHandler handler) throws IOException {
-        String chatId = createOrUpdateChat(messages, "");
-        String sessionId = generateSessionId();
-        
-        JsonObject ollamaPayload = new JsonObject();
-        ollamaPayload.addProperty("chat_id", chatId);
-        ollamaPayload.addProperty("id", UUID.randomUUID().toString());
-        ollamaPayload.addProperty("session_id", sessionId);
-        ollamaPayload.addProperty("model", super.getModel());
-        ollamaPayload.add("options", new JsonObject());
-        ollamaPayload.addProperty("stream", true);
-        ollamaPayload.add("files", new JsonArray());
-        
-        JsonArray messagesArray = new JsonArray();
-        for (ChatMessage message : messages) {
-            JsonObject messageObj = new JsonObject();
-            messageObj.addProperty("role", message.getRole());
-            messageObj.addProperty("content", message.getContent());
-            messagesArray.add(messageObj);
-        }
-        ollamaPayload.add("messages", messagesArray);
+        JsonObject payload = buildChatCompletionPayload(messages, true);
 
         Request request = new Request.Builder()
-            .url(url + OPENWEBUI_OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(ollamaPayload)))
+            .url(url + OPENWEBUI_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -290,7 +117,9 @@ public class OpenWebUiProvider extends APIProvider {
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        handler.onError(new IOException("Failed to get completion: " + response.code()));
+                        String errorBody = responseBody != null ? responseBody.string() : "No error body";
+                        handler.onError(new IOException("Failed to get completion: " + response.code() + 
+                            "\nError: " + errorBody));
                         return;
                     }
 
@@ -300,69 +129,18 @@ public class OpenWebUiProvider extends APIProvider {
                         if (line == null || line.isEmpty()) continue;
 
                         JsonObject chunk = gson.fromJson(line, JsonObject.class);
-                        if (chunk.has("message")) {
-                            JsonObject message = chunk.getAsJsonObject("message");
-                            if (message.has("content")) {
-                                String content = message.get("content").getAsString();
-                                if (isFirst) {
-                                    handler.onStart();
-                                    isFirst = false;
-                                }
-                                contentBuilder.append(content);
-                                handler.onUpdate(content);
+                        String content = extractStreamContent(chunk);
+                        
+                        if (content != null) {
+                            if (isFirst) {
+                                handler.onStart();
+                                isFirst = false;
                             }
+                            contentBuilder.append(content);
+                            handler.onUpdate(content);
                         }
 
                         if (chunk.has("done") && chunk.get("done").getAsBoolean()) {
-                            // Update the chat with the assistant's response
-                            String assistantMsgId = UUID.randomUUID().toString();
-                            JsonObject updatedPayload = createChatPayload(messages, chatId);
-                            JsonObject updatedChat = updatedPayload.getAsJsonObject("chat");
-                            JsonObject messagesDict = updatedChat.getAsJsonObject("history").getAsJsonObject("messages");
-                            JsonArray messagesList = updatedChat.getAsJsonArray("messages");
-                            
-                            // Add assistant's message
-                            JsonObject assistantMsg = new JsonObject();
-                            assistantMsg.addProperty("id", assistantMsgId);
-                            assistantMsg.addProperty("parentId", messagesList.get(messagesList.size() - 1).getAsJsonObject().get("id").getAsString());
-                            assistantMsg.add("childrenIds", new JsonArray());
-                            assistantMsg.addProperty("role", "assistant");
-                            assistantMsg.addProperty("content", contentBuilder.toString());
-                            assistantMsg.add("files", new JsonArray());
-                            assistantMsg.addProperty("timestamp", System.currentTimeMillis() / 1000);
-                            JsonArray msgModels = new JsonArray();
-                            msgModels.add(getModel());
-                            assistantMsg.add("models", msgModels);
-                            
-                            messagesList.add(assistantMsg);
-                            messagesDict.add(assistantMsgId, assistantMsg);
-                            updatedChat.getAsJsonObject("history").addProperty("currentId", assistantMsgId);
-                            
-                            // Update the chat
-                            Request updateRequest = new Request.Builder()
-                                .url(url + OPENWEBUI_CHAT_ENDPOINT + chatId)
-                                .post(RequestBody.create(JSON, gson.toJson(updatedPayload)))
-                                .build();
-                                
-                            Response updateResponse = client.newCall(updateRequest).execute();
-                            updateResponse.close();
-
-                            // Mark chat as completed
-                            JsonObject completedPayload = new JsonObject();
-                            completedPayload.addProperty("chat_id", chatId);
-                            completedPayload.addProperty("id", ollamaPayload.get("id").getAsString());
-                            completedPayload.addProperty("session_id", sessionId);
-                            completedPayload.addProperty("model", getModel());
-                            completedPayload.add("messages", messagesList);
-                            
-                            Request completedRequest = new Request.Builder()
-                                .url(url + OPENWEBUI_COMPLETED_ENDPOINT)
-                                .post(RequestBody.create(JSON, gson.toJson(completedPayload)))
-                                .build();
-                                
-                            Response completedResponse = client.newCall(completedRequest).execute();
-                            completedResponse.close();
-                            
                             handler.onComplete(contentBuilder.toString());
                             return;
                         }
@@ -378,39 +156,22 @@ public class OpenWebUiProvider extends APIProvider {
 
     @Override
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
-        // Function calling should be handled by the underlying Ollama model
-        JsonObject ollamaPayload = new JsonObject();
-        ollamaPayload.add("tools", gson.toJsonTree(functions));
-        ollamaPayload.addProperty("format", "json");
+        JsonObject payload = buildChatCompletionPayload(messages, false);
         
-        String chatId = createOrUpdateChat(messages, "");
-        String sessionId = generateSessionId();
-        
-        ollamaPayload.addProperty("chat_id", chatId);
-        ollamaPayload.addProperty("id", UUID.randomUUID().toString());
-        ollamaPayload.addProperty("session_id", sessionId);
-        ollamaPayload.addProperty("model", super.getModel());
-        ollamaPayload.add("options", new JsonObject());
-        ollamaPayload.addProperty("stream", false);
-        ollamaPayload.add("files", new JsonArray());
-        
-        JsonArray messagesArray = new JsonArray();
-        for (ChatMessage message : messages) {
-            JsonObject messageObj = new JsonObject();
-            messageObj.addProperty("role", message.getRole());
-            messageObj.addProperty("content", message.getContent());
-            messagesArray.add(messageObj);
-        }
-        ollamaPayload.add("messages", messagesArray);
+        // Add tools (functions) to the payload
+        payload.add("tools", gson.toJsonTree(functions));
 
+        // Specify json output
+        payload.add("format", gson.toJsonTree("json"));
+        
         Request request = new Request.Builder()
-            .url(url + OPENWEBUI_OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(ollamaPayload)))
+            .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code());
+                throw new IOException("Failed to get completion: " + response.code() + " " + response.message());
             }
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
@@ -430,9 +191,8 @@ public class OpenWebUiProvider extends APIProvider {
 
     @Override
     public List<String> getAvailableModels() throws IOException {
-        // Use Ollama's tags endpoint through OpenWebUI
         Request request = new Request.Builder()
-            .url(url + OLLAMA_MODELS_ENDPOINT)
+            .url(super.getUrl() + OPENWEBUI_MODELS_ENDPOINT)
             .build();
 
         try (Response response = client.newCall(request).execute()) {
@@ -464,10 +224,10 @@ public class OpenWebUiProvider extends APIProvider {
     public void getEmbeddingsAsync(String text, EmbeddingCallback callback) {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
-        payload.addProperty("prompt", text);
+        payload.addProperty("input", text);
 
         Request request = new Request.Builder()
-            .url(url + OLLAMA_EMBEDDINGS_ENDPOINT)
+            .url(super.getUrl() + OPENWEBUI_EMBEDDINGS_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -487,11 +247,13 @@ public class OpenWebUiProvider extends APIProvider {
                     }
 
                     JsonObject responseObj = gson.fromJson(responseBody.string(), JsonObject.class);
-                    JsonArray embeddingsArray = responseObj.getAsJsonArray("embedding");
+                    JsonArray embeddingsArray = responseObj.getAsJsonArray("embeddings");
 
-                    double[] embeddingArray = new double[embeddingsArray.size()];
-                    for (int i = 0; i < embeddingsArray.size(); i++) {
-                        embeddingArray[i] = embeddingsArray.get(i).getAsDouble();
+
+                    JsonArray embeddings = (JsonArray) embeddingsArray.get(0);
+                    double[] embeddingArray = new double[embeddings.size()];
+                    for (int i = 0; i < embeddings.size(); i++) {
+                        embeddingArray[i] = embeddings.get(i).getAsDouble();
                     }
                     
                     callback.onSuccess(embeddingArray);
@@ -500,6 +262,49 @@ public class OpenWebUiProvider extends APIProvider {
                 }
             }
         });
+    }
+
+    private JsonObject buildChatCompletionPayload(List<ChatMessage> messages, boolean stream) {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", super.getModel());
+        
+        if (stream) {
+            payload.addProperty("stream", true);
+        }
+
+        JsonArray messagesArray = new JsonArray();
+        for (ChatMessage message : messages) {
+            JsonObject messageObj = new JsonObject();
+            messageObj.addProperty("role", message.getRole());
+            messageObj.addProperty("content", message.getContent());
+            messagesArray.add(messageObj);
+        }
+        payload.add("messages", messagesArray);
+
+        return payload;
+    }
+
+
+
+    private String extractContentFromResponse(JsonObject responseObj) {
+        return responseObj.get("message")
+            .getAsJsonObject()
+            .get("content")
+            .getAsString();
+    }
+
+    private String extractStreamContent(JsonObject chunk) {
+        try {
+            if (chunk.has("message")) {
+                JsonObject message = chunk.getAsJsonObject("message");
+                if (message.has("content")) {
+                    return message.get("content").getAsString();
+                }
+            }
+        } catch (Exception e) {
+            // Handle any JSON parsing errors silently and return null
+        }
+        return null;
     }
 
     public void cancelRequest() {

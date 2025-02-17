@@ -182,7 +182,7 @@ public class OpenAIProvider extends APIProvider {
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code() + " The model either does not support tool calling our you do not have access to this model.");
+                throw new IOException("Failed to get completion: " + response.code() + " The model either does not support tool calling or you do not have access to this model.");
             }
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
