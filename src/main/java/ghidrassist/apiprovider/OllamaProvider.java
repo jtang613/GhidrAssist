@@ -37,7 +37,7 @@ public class OllamaProvider extends APIProvider {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder()
                 .connectTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(60))
+                .readTimeout(Duration.ofSeconds(240))
                 .writeTimeout(Duration.ofSeconds(30))
                 .retryOnConnectionFailure(true)
                 .addInterceptor(chain -> {
@@ -256,77 +256,7 @@ public class OllamaProvider extends APIProvider {
             return "{\"tool_calls\":[]}";
         }
     }
-    /*
-    @Override
-    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
-        JsonObject payload = buildChatCompletionPayload(messages, false);
-        
-        // Add tools (functions) to the payload
-        payload.add("tools", gson.toJsonTree(functions));
 
-        // Specify json output
-        payload.add("format", gson.toJsonTree("json"));
-        
-        Request request = new Request.Builder()
-            .url(url + OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
-            .build();
-
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code() + " " + response.message());
-            }
-
-            // Create a lenient JsonReader
-            JsonReader jsonReader = new JsonReader(new StringReader(response.body().string()));
-            jsonReader.setLenient(true);
-
-            // Parse with lenient reader
-            JsonObject responseObj = JsonParser.parseReader(jsonReader).getAsJsonObject();
-            JsonObject message = responseObj.getAsJsonObject("message");
-
-            if (message.has("tool_calls")) {
-            	String tmp = "{\"tool_calls\":" + message.get("tool_calls").toString() + "}"; 
-                return tmp;
-            }
-
-            return message.get("content").toString();
-        }
-    }
-    /*
-    @Override
-    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
-        JsonObject payload = buildChatCompletionPayload(messages, false);
-        
-        // Add tools (functions) to the payload
-        payload.add("tools", gson.toJsonTree(functions));
-
-        // Specify json output
-        payload.add("format", gson.toJsonTree("json"));
-        
-        Request request = new Request.Builder()
-            .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
-            .build();
-
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code() + " " + response.message());
-            }
-
-            JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            JsonObject message = responseObj.getAsJsonObject("message");
-
-            if (message.has("tool_calls")) {
-                JsonArray toolCalls = message.getAsJsonArray("tool_calls");
-                JsonObject firstToolCall = toolCalls.get(0).getAsJsonObject();
-                return String.format("\"tool_calls\":%s", toolCalls.toString()); 
-            }
-
-            return message.get("content").getAsString();
-        }
-    }
-	*/
     @Override
     public List<String> getAvailableModels() throws IOException {
         Request request = new Request.Builder()
