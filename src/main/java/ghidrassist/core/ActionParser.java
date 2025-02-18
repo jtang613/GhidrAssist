@@ -58,7 +58,7 @@ public class ActionParser {
                 json = json.substring(1, json.length() - 1).trim();
             }
         }
-
+        json = json.replace("\\n", "").replace("\\", "");
         return json;
     }
     
@@ -95,7 +95,12 @@ public class ActionParser {
                 continue;
             }
             
-            JsonObject toolCallObject = toolCallElement.getAsJsonObject();
+            JsonObject toolCallObject;
+            if (toolCallElement.getAsJsonObject().has("function")) {
+            	toolCallObject = toolCallElement.getAsJsonObject().get("function").getAsJsonObject();
+            } else {
+            	toolCallObject = toolCallElement.getAsJsonObject();
+            }
             
             // Validate tool call has required fields
             if (!toolCallObject.has("name") || !toolCallObject.has("arguments")) {
