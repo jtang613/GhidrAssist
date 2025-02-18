@@ -37,7 +37,7 @@ public class OpenWebUiProvider extends APIProvider {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder()
                 .connectTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(60))
+                .readTimeout(Duration.ofSeconds(240))
                 .writeTimeout(Duration.ofSeconds(30))
                 .retryOnConnectionFailure(true)
                 .addInterceptor(chain -> {
