@@ -151,7 +151,7 @@ public class LMStudioProvider extends APIProvider {
         payload.add("functions", gson.toJsonTree(functions));
         
         Request request = new Request.Builder()
-            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
+            .url(url + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -179,7 +179,7 @@ public class LMStudioProvider extends APIProvider {
     @Override
     public List<String> getAvailableModels() throws IOException {
         Request request = new Request.Builder()
-            .url(super.getUrl() + LMSTUDIO_MODELS_ENDPOINT)
+            .url(url + LMSTUDIO_MODELS_ENDPOINT)
             .build();
 
         try (Response response = client.newCall(request).execute()) {
@@ -206,7 +206,7 @@ public class LMStudioProvider extends APIProvider {
         payload.addProperty("input", text);
 
         Request request = new Request.Builder()
-            .url(super.getUrl() + LMSTUDIO_EMBEDDINGS_ENDPOINT)
+            .url(url + LMSTUDIO_EMBEDDINGS_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 

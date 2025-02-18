@@ -175,7 +175,9 @@ public class AnthropicProvider extends APIProvider {
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
         // Create a system message that instructs Claude about the available functions
         StringBuilder systemMessage = new StringBuilder("You can call these functions:\n");
-        for (Map<String, Object> function : functions) {
+        for (Map<String, Object> tool : functions) {
+        	@SuppressWarnings("unchecked")
+			Map<String, Object> function = (Map<String, Object>) tool.get("function");
             systemMessage.append("- ").append(function.get("name")).append(": ")
                         .append(function.get("description")).append("\n");
             
@@ -204,7 +206,7 @@ public class AnthropicProvider extends APIProvider {
 
         // Request JSON response format
         JsonObject payload = buildMessagesPayload(augmentedMessages, false);
-        payload.addProperty("format", "json");
+        //payload.addProperty("format", "json");
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
@@ -217,14 +219,14 @@ public class AnthropicProvider extends APIProvider {
             }
 
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return responseObj.getAsJsonObject("content").get("text").getAsString();
+            return responseObj.getAsJsonArray("content").get(0).getAsJsonObject().get("text").toString();
         }
     }
 
     @Override
     public List<String> getAvailableModels() throws IOException {
         Request request = new Request.Builder()
-            .url(super.getUrl() + ANTHROPIC_MODELS_ENDPOINT)
+            .url(url + ANTHROPIC_MODELS_ENDPOINT)
             .build();
 
         try (Response response = client.newCall(request).execute()) {

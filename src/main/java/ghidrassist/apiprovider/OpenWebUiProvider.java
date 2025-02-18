@@ -4,12 +4,17 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
+import com.google.gson.stream.JsonReader;
+
 import ghidrassist.LlmApi.LlmResponseHandler;
 import okhttp3.*;
 import okio.BufferedSource;
 
 import javax.net.ssl.*;
 import java.io.IOException;
+import java.io.StringReader;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -162,10 +167,10 @@ public class OpenWebUiProvider extends APIProvider {
         payload.add("tools", gson.toJsonTree(functions));
 
         // Specify json output
-        payload.add("format", gson.toJsonTree("json"));
+        // payload.add("format", gson.toJsonTree("json"));  // TODO: Enable once OpenWebUI fixes their API
         
         Request request = new Request.Builder()
-            .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
+            .url(url + OPENWEBUI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -174,25 +179,89 @@ public class OpenWebUiProvider extends APIProvider {
                 throw new IOException("Failed to get completion: " + response.code() + " " + response.message());
             }
 
-            JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
+            // Create a lenient JsonReader
+            JsonReader jsonReader = new JsonReader(new StringReader(response.body().string()));
+            jsonReader.setLenient(true);
+
+            // Parse with lenient reader
+            JsonObject responseObj = JsonParser.parseReader(jsonReader).getAsJsonObject();
             JsonObject message = responseObj.getAsJsonObject("message");
 
+            // Check if tool_calls exists directly
             if (message.has("tool_calls")) {
-                JsonArray toolCalls = message.getAsJsonArray("tool_calls");
-                JsonObject firstToolCall = toolCalls.get(0).getAsJsonObject();
-                return String.format("{\"name\": \"%s\", \"arguments\": %s}", 
-                    firstToolCall.get("function").getAsJsonObject().get("name").getAsString(),
-                    firstToolCall.get("function").getAsJsonObject().get("arguments").toString());
+                return "{\"tool_calls\":" + message.get("tool_calls").toString() + "}";
             }
 
-            return message.get("content").getAsString();
+            // If no tool_calls, check if content contains a JSON object
+            if (message.has("content")) {
+                String content = message.get("content").getAsString().trim();
+                
+                // Try to parse content as JSON if it looks like JSON
+                if (content.startsWith("{") || content.startsWith("[")) {
+                    try {
+                        JsonElement contentJson = JsonParser.parseString(content);
+                        
+                        // Case 1: Content is a single function call
+                        if (contentJson.isJsonObject()) {
+                            JsonObject funcObj = contentJson.getAsJsonObject();
+                            if (funcObj.has("name") && funcObj.has("arguments")) {
+                                // Convert to tool_calls format
+                                JsonArray toolCalls = new JsonArray();
+                                JsonObject toolCall = new JsonObject();
+                                JsonObject function = new JsonObject();
+                                function.add("name", funcObj.get("name"));
+                                function.add("arguments", funcObj.get("arguments"));
+                                toolCall.add("function", function);
+                                toolCalls.add(toolCall);
+                                return "{\"tool_calls\":" + toolCalls.toString() + "}";
+                            }
+                        }
+                        
+                        // Case 2: Content is already a tool_calls array
+                        if (contentJson.isJsonObject() && contentJson.getAsJsonObject().has("tool_calls")) {
+                            return content;
+                        }
+                        
+                        // Case 3: Content is an array of function calls
+                        if (contentJson.isJsonArray()) {
+                            JsonArray array = contentJson.getAsJsonArray();
+                            JsonArray toolCalls = new JsonArray();
+                            for (JsonElement elem : array) {
+                                if (elem.isJsonObject()) {
+                                    JsonObject funcObj = elem.getAsJsonObject();
+                                    if (funcObj.has("name") && funcObj.has("arguments")) {
+                                        JsonObject toolCall = new JsonObject();
+                                        JsonObject function = new JsonObject();
+                                        function.add("name", funcObj.get("name"));
+                                        function.add("arguments", funcObj.get("arguments"));
+                                        toolCall.add("function", function);
+                                        toolCalls.add(toolCall);
+                                    }
+                                }
+                            }
+                            if (toolCalls.size() > 0) {
+                                return "{\"tool_calls\":" + toolCalls.toString() + "}";
+                            }
+                        }
+                    } catch (JsonSyntaxException e) {
+                        // Content is not valid JSON, fall through to return original content
+                    }
+                }
+                
+                // If we couldn't parse as tool calls, return the original content
+                return "{\"tool_calls\":[]}";
+            }
+
+            // No valid tool calls found
+            return "{\"tool_calls\":[]}";
         }
     }
+
 
     @Override
     public List<String> getAvailableModels() throws IOException {
         Request request = new Request.Builder()
-            .url(super.getUrl() + OPENWEBUI_MODELS_ENDPOINT)
+            .url(url + OPENWEBUI_MODELS_ENDPOINT)
             .build();
 
         try (Response response = client.newCall(request).execute()) {
@@ -227,7 +296,7 @@ public class OpenWebUiProvider extends APIProvider {
         payload.addProperty("input", text);
 
         Request request = new Request.Builder()
-            .url(super.getUrl() + OPENWEBUI_EMBEDDINGS_ENDPOINT)
+            .url(url + OPENWEBUI_EMBEDDINGS_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 

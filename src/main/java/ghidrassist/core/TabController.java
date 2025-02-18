@@ -395,7 +395,7 @@ public class TabController {
             @SuppressWarnings("unchecked")
             Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
             if (functionMap.get("name").equals(actionName)) {
-                return functionMap;
+                return fnTemplate;
             }
         }
         return null;
