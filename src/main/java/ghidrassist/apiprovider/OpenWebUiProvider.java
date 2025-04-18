@@ -26,19 +26,20 @@ public class OpenWebUiProvider extends APIProvider {
     private static final String OPENWEBUI_CHAT_ENDPOINT = "ollama/api/chat";
     private static final String OPENWEBUI_EMBEDDINGS_ENDPOINT = "ollama/api/embed";
     private static final String OPENWEBUI_MODELS_ENDPOINT = "ollama/api/tags";
+	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
     public OpenWebUiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.OLLAMA, model, maxTokens, url, key, disableTlsVerification);
+        super(name, ProviderType.OLLAMA, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
     @Override
     protected OkHttpClient buildClient() {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(240))
-                .writeTimeout(Duration.ofSeconds(30))
+                .connectTimeout(super.timeout)
+                .readTimeout(super.timeout)
+                .writeTimeout(super.timeout)
                 .retryOnConnectionFailure(true)
                 .addInterceptor(chain -> {
                     Request originalRequest = chain.request();
@@ -336,10 +337,7 @@ public class OpenWebUiProvider extends APIProvider {
     private JsonObject buildChatCompletionPayload(List<ChatMessage> messages, boolean stream) {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
-        
-        if (stream) {
-            payload.addProperty("stream", true);
-        }
+        payload.addProperty("stream", stream);
 
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {

@@ -10,27 +10,15 @@
 			<arguments>
 			</arguments>
 		</buildCommand>
-		<buildCommand>
-			<name>org.eclipse.buildship.core.gradleprojectbuilder</name>
-			<arguments>
-			</arguments>
-		</buildCommand>
 	</buildSpec>
 	<natures>
 		<nature>org.eclipse.jdt.core.javanature</nature>
-		<nature>org.eclipse.buildship.core.gradleprojectnature</nature>
 	</natures>
 	<linkedResources>
 		<link>
 			<name>Ghidra</name>
 			<type>2</type>
-			<location>/home/jtang613/tools/ghidra_11.3_PUBLIC</location>
+			<location>/home/jtang613/tools/ghidra_11.3.2_PUBLIC</location>
 		</link>
 	</linkedResources>
-	<variableList>
-		<variable>
-			<name>GHIDRA_INSTALL_DIR</name>
-			<value>file:/home/jtang613/tools/ghidra_11.3_PUBLIC</value>
-		</variable>
-	</variableList>
 </projectDescription>

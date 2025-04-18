@@ -21,19 +21,20 @@ public class LMStudioProvider extends APIProvider {
     private static final String LMSTUDIO_CHAT_ENDPOINT = "v1/chat/completions";
     private static final String LMSTUDIO_MODELS_ENDPOINT = "v1/models";
     private static final String LMSTUDIO_EMBEDDINGS_ENDPOINT = "v1/embeddings";
+	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
     public LMStudioProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.LMSTUDIO, model, maxTokens, url, key, disableTlsVerification);
+        super(name, ProviderType.LMSTUDIO, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
     @Override
     protected OkHttpClient buildClient() {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(60))
-                .writeTimeout(Duration.ofSeconds(30))
+                .connectTimeout(super.timeout)
+                .readTimeout(super.timeout)
+                .writeTimeout(super.timeout)
                 .retryOnConnectionFailure(true);
 
             if (disableTlsVerification) {
@@ -247,10 +248,7 @@ public class LMStudioProvider extends APIProvider {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
         payload.addProperty("max_tokens", super.getMaxTokens());
-        
-        if (stream) {
-            payload.addProperty("stream", true);
-        }
+        payload.addProperty("stream", stream);
 
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {

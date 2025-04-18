@@ -8,9 +8,28 @@ public class APIProviderConfig {
     private String key;
     private boolean disableTlsVerification;
     private APIProvider.ProviderType type;
+    private Integer timeout;
 
-    public APIProviderConfig(String name, APIProvider.ProviderType type, String model, Integer maxTokens, 
-                           String url, String key, boolean disableTlsVerification) {
+    public APIProviderConfig(
+            String name,
+            APIProvider.ProviderType type,
+            String model,
+            Integer maxTokens,
+            String url,
+            String key,
+            boolean disableTlsVerification) {
+        this(name, type, model, maxTokens, url, key, disableTlsVerification, 120); // Default timeout of 120 seconds
+    }
+
+    public APIProviderConfig(
+            String name,
+            APIProvider.ProviderType type,
+            String model,
+            Integer maxTokens,
+            String url,
+            String key,
+            boolean disableTlsVerification,
+            Integer timeout) {
         this.name = name;
         this.type = type;
         this.model = model;
@@ -18,6 +37,7 @@ public class APIProviderConfig {
         this.url = url;
         this.key = key;
         this.disableTlsVerification = disableTlsVerification;
+        this.timeout = timeout;
     }
 
     // Getters
@@ -28,6 +48,7 @@ public class APIProviderConfig {
     public String getUrl() { return url; }
     public String getKey() { return key; }
     public boolean isDisableTlsVerification() { return disableTlsVerification; }
+    public Integer getTimeout() { return timeout; }
 
     // Setters
     public void setName(String name) { this.name = name; }
@@ -37,11 +58,12 @@ public class APIProviderConfig {
     public void setUrl(String url) { this.url = url; }
     public void setKey(String key) { this.key = key; }
     public void setDisableTlsVerification(boolean disableTlsVerification) { this.disableTlsVerification = disableTlsVerification; }
+    public void setTimeout(Integer timeout) { this.timeout = timeout; }
 
     public APIProvider createProvider() {
         switch (type) {
             case OPENAI:
-                return new OpenAIProvider(name, model, maxTokens, url, key, disableTlsVerification);
+                return new OpenAIProvider(name, model, maxTokens, url, key, disableTlsVerification, timeout);
             case ANTHROPIC:
                 return new AnthropicProvider(name, model, maxTokens, url, key, disableTlsVerification);
             case OLLAMA:

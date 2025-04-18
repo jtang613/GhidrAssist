@@ -49,6 +49,12 @@ public class LlmApi {
         this.provider = config.createProvider();
         this.analysisDB = new AnalysisDB();
         this.plugin = plugin;
+        
+        // Get the global API timeout and set it if the provider doesn't have one
+        if (provider != null && provider.getTimeout() == null) {
+            Integer timeout = GhidrAssistPlugin.getGlobalApiTimeout();
+            provider.setTimeout(timeout);
+        }
     }
 
     public String getSystemPrompt() {
@@ -134,7 +140,7 @@ public class LlmApi {
         cancelCurrentRequest();
 
         String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
-        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-")) {
+        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-") || this.provider.getModel().startsWith("o4-")) {
         	systemUser = ChatMessage.ChatMessageRole.USER;
         }
         List<ChatMessage> messages = new ArrayList<>();
@@ -206,7 +212,7 @@ public class LlmApi {
         }
 
         String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
-        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-")) {
+        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-") || this.provider.getModel().startsWith("o3-")) {
         	systemUser = ChatMessage.ChatMessageRole.USER;
         }
 

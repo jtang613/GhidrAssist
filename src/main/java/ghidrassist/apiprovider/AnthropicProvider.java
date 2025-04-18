@@ -21,19 +21,20 @@ public class AnthropicProvider extends APIProvider {
     private static final String ANTHROPIC_MESSAGES_ENDPOINT = "v1/messages";
     private static final String ANTHROPIC_MODELS_ENDPOINT = "v1/models";
     private static final int MAX_RETRY_ATTEMPTS = 3;
+	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
     public AnthropicProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.ANTHROPIC, model, maxTokens, url, key, disableTlsVerification);
+        super(name, ProviderType.ANTHROPIC, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
     @Override
     protected OkHttpClient buildClient() {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(60))
-                .writeTimeout(Duration.ofSeconds(30))
+                .connectTimeout(super.timeout)
+                .readTimeout(super.timeout)
+                .writeTimeout(super.timeout)
                 .retryOnConnectionFailure(true)
                 .addInterceptor(chain -> {
                     Request originalRequest = chain.request();
@@ -256,10 +257,7 @@ public class AnthropicProvider extends APIProvider {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
         payload.addProperty("max_tokens", super.getMaxTokens());
-        
-        if (stream) {
-            payload.addProperty("stream", true);
-        }
+        payload.addProperty("stream", stream);
 
         // Convert the messages to Anthropic's format
         JsonArray messagesArray = new JsonArray();

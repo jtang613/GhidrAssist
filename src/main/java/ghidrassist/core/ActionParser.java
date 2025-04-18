@@ -58,7 +58,7 @@ public class ActionParser {
                 json = json.substring(1, json.length() - 1).trim();
             }
         }
-        json = json.replace("\\n", "").replace("\\", "");
+        json = json.replace("\\n", "").replace("\\", "").replace(":\"{\"", ":{\"").replace("\"}\"}", "\"}}");
         return json;
     }
     

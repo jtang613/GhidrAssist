@@ -1,6 +1,7 @@
 package ghidrassist.apiprovider;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -20,17 +21,18 @@ public abstract class APIProvider {
         LMSTUDIO
     }
 
-    protected final String name;
-    protected final String model;
-    protected final Integer maxTokens;
-    protected final String url;
-    protected final String key;
-    protected final boolean disableTlsVerification;
-    protected final ProviderType type;
-    protected final OkHttpClient client;
+    protected String name;
+    protected String model;
+    protected Integer maxTokens;
+    protected String url;
+    protected String key;
+    protected boolean disableTlsVerification;
+    protected ProviderType type;
+    protected OkHttpClient client;
+    protected Duration timeout;
 
     public APIProvider(String name, ProviderType type, String model, Integer maxTokens, 
-                      String url, String key, boolean disableTlsVerification) {
+                      String url, String key, boolean disableTlsVerification, Integer timeout) {
         this.name = name;
         this.type = type;
         this.model = model;
@@ -38,6 +40,7 @@ public abstract class APIProvider {
         this.url = url.endsWith("/") ? url : url + "/";
         this.key = key;
         this.disableTlsVerification = disableTlsVerification;
+        this.timeout = Duration.ofSeconds(timeout);
         this.client = buildClient();
     }
 
@@ -57,6 +60,8 @@ public abstract class APIProvider {
     public abstract List<String> getAvailableModels() throws IOException;
     //public abstract double[] getEmbeddings(String text) throws IOException;
     public abstract void getEmbeddingsAsync(String text, EmbeddingCallback callback);
+	public void setTimeout(Integer timeout2) { this.timeout = Duration.ofSeconds(timeout2); }
+	public Integer getTimeout() { return this.timeout.toSecondsPart(); }
 
     
     public double[] getEmbeddings(String text) throws IOException {
@@ -85,4 +90,6 @@ public abstract class APIProvider {
         void onSuccess(double[] embedding);
         void onError(Throwable error);
     }
+
+
 }
