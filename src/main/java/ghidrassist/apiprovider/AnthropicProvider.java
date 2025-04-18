@@ -21,10 +21,9 @@ public class AnthropicProvider extends APIProvider {
     private static final String ANTHROPIC_MESSAGES_ENDPOINT = "v1/messages";
     private static final String ANTHROPIC_MODELS_ENDPOINT = "v1/models";
     private static final int MAX_RETRY_ATTEMPTS = 3;
-	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
-    public AnthropicProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
+    public AnthropicProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
         super(name, ProviderType.ANTHROPIC, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 

@@ -66,6 +66,36 @@ public class AnalysisDB {
         }
     }
 
+    /**
+     * Deletes the analysis entry for the specified program and function
+     * 
+     * @param programHash The hash of the program
+     * @param functionAddress The address of the function
+     * @return true if an entry was deleted, false otherwise
+     */
+    public boolean deleteAnalysis(String programHash, Address functionAddress) {
+        String deleteSQL = "DELETE FROM GHAnalysis WHERE program_hash = ? AND function_address = ?";
+        
+        if (programHash == null || functionAddress == null) {
+            Msg.error(this, "Cannot delete analysis: programHash or functionAddress is null");
+            return false;
+        }
+        
+        Msg.info(this, "Attempting to delete analysis for " + programHash + " at " + functionAddress.toString());
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(deleteSQL)) {
+            pstmt.setString(1, programHash);
+            pstmt.setString(2, functionAddress.toString());
+            
+            int rowsAffected = pstmt.executeUpdate();
+            Msg.info(this, "Delete operation affected " + rowsAffected + " rows");
+            return rowsAffected > 0;
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to delete analysis: " + e.getMessage());
+            return false;
+        }
+    }
+
     public Analysis getAnalysis(String programHash, Address functionAddress) {
         String selectSQL = "SELECT query, response, timestamp FROM GHAnalysis "
                 + "WHERE program_hash = ? AND function_address = ?";

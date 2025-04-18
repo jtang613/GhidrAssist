@@ -21,10 +21,9 @@ public class LMStudioProvider extends APIProvider {
     private static final String LMSTUDIO_CHAT_ENDPOINT = "v1/chat/completions";
     private static final String LMSTUDIO_MODELS_ENDPOINT = "v1/models";
     private static final String LMSTUDIO_EMBEDDINGS_ENDPOINT = "v1/embeddings";
-	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
-    public LMStudioProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
+    public LMStudioProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
         super(name, ProviderType.LMSTUDIO, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 

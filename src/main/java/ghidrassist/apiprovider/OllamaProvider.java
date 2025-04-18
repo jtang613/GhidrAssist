@@ -26,10 +26,9 @@ public class OllamaProvider extends APIProvider {
     private static final String OLLAMA_CHAT_ENDPOINT = "api/chat";
     private static final String OLLAMA_EMBEDDINGS_ENDPOINT = "api/embed";
     private static final String OLLAMA_MODELS_ENDPOINT = "api/tags";
-	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
-    public OllamaProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
+    public OllamaProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
         super(name, ProviderType.OLLAMA, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 

@@ -773,4 +773,103 @@ public class TabController {
             }
         }
     }
+    
+    
+    /**
+     * Updates the analysis text in the database for the current function
+     * 
+     * @param updatedContent The edited markdown content to save
+     */
+    public void handleUpdateAnalysis(String updatedContent) {
+        // Get the current program and function
+        Program program = plugin.getCurrentProgram();
+        Function function = plugin.getCurrentFunction();
+        
+        if (program == null || function == null) {
+            Msg.error(this, "Cannot update analysis: No active program or function");
+            return;
+        }
+        
+        // Get program hash and function address
+        String programHash = program.getExecutableSHA256();
+        Address functionAddress = function.getEntryPoint();
+        
+        Msg.info(this, "Updating analysis for program " + programHash + " at function " + functionAddress.toString());
+        
+        // Create a new AnalysisDB instance and update the entry
+        AnalysisDB analysisDB = new AnalysisDB();
+        try {
+            // First get the existing analysis to preserve the query
+            AnalysisDB.Analysis existingAnalysis = analysisDB.getAnalysis(programHash, functionAddress);
+            
+            if (existingAnalysis == null) {
+                // No existing entry, create a new one with a generic query
+                analysisDB.upsertAnalysis(
+                    programHash,
+                    functionAddress,
+                    "Edited explanation",  // Generic query text
+                    updatedContent
+                );
+                Msg.info(this, "Created new analysis entry with edited content");
+            } else {
+                // Update the existing entry, preserving the original query
+                analysisDB.upsertAnalysis(
+                    programHash,
+                    functionAddress,
+                    existingAnalysis.getQuery(),
+                    updatedContent
+                );
+                Msg.info(this, "Updated existing analysis entry with edited content");
+            }
+        } finally {
+            // Make sure to close the database connection
+            analysisDB.close();
+        }
+    }
+    
+    /**
+     * Clears analysis data from the database for the current function
+     */
+    public void handleClearAnalysisData() {
+        // Get the current program and function
+        Program program = plugin.getCurrentProgram();
+        Function function = plugin.getCurrentFunction();
+        
+        if (program == null) {
+            Msg.error(this, "Cannot clear analysis: No active program");
+            return;
+        }
+        
+        if (function == null) {
+            Msg.error(this, "Cannot clear analysis: No active function");
+            return;
+        }
+        
+        // Get program hash and function address
+        String programHash = program.getExecutableSHA256();
+        Address functionAddress = function.getEntryPoint();
+        
+        Msg.info(this, "Clearing analysis for program " + programHash + " at function " + functionAddress.toString());
+        
+        // Create a new AnalysisDB instance and delete the entry
+        AnalysisDB analysisDB = new AnalysisDB();
+        try {
+            // Delete the analysis entry for this function
+            boolean success = analysisDB.deleteAnalysis(programHash, functionAddress);
+            
+            if (success) {
+                Msg.info(this, "Successfully cleared analysis data");
+                
+                // Also clear any UI components that might display this data
+                if (explainTab != null) {
+                    explainTab.setExplanationText("");
+                }
+            } else {
+                Msg.warn(this, "No analysis data was found to clear");
+            }
+        } finally {
+            // Make sure to close the database connection
+            analysisDB.close();
+        }
+    }
 }
