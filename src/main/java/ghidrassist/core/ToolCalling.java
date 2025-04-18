@@ -102,6 +102,7 @@ public class ToolCalling {
         functionMap.put("name", name);
         functionMap.put("description", description);
         functionMap.put("parameters", parameters);
+        functionMap.put("strict", true);
 
         Map<String, Object> template = new HashMap<>();
         template.put("type", "function");
@@ -118,6 +119,7 @@ public class ToolCalling {
         }
         Map<String, Object> parameters = new HashMap<>();
         parameters.put("type", "object");
+        parameters.put("additionalProperties", false);
         parameters.put("properties", properties);
         List<String> required = new ArrayList<>();
         for (Map<String, Object> param : params) {

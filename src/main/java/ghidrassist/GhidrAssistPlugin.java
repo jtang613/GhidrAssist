@@ -125,14 +125,36 @@ public class GhidrAssistPlugin extends ProgramPlugin {
 
         // Load the selected provider name
         String selectedProviderName = Preferences.getProperty("GhidrAssist.SelectedAPIProvider", "");
+        
+        // Load the global API timeout setting
+        String apiTimeoutStr = Preferences.getProperty("GhidrAssist.APITimeout", "120");
+        Integer apiTimeout = 120; // Default value
+        try {
+            apiTimeout = Integer.parseInt(apiTimeoutStr);
+        } catch (NumberFormatException e) {
+            // Use default if there's an error
+        }
 
         for (APIProviderConfig provider : apiProviders) {
             if (provider.getName().equals(selectedProviderName)) {
+                // If the provider doesn't have a timeout set, use the global setting
+                if (provider.getTimeout() == null) {
+                    provider.setTimeout(apiTimeout);
+                }
                 return provider;
             }
         }
 
         return null;
+    }
+    
+    public static Integer getGlobalApiTimeout() {
+        String apiTimeoutStr = Preferences.getProperty("GhidrAssist.APITimeout", "120");
+        try {
+            return Integer.parseInt(apiTimeoutStr);
+        } catch (NumberFormatException e) {
+            return 120; // Default value
+        }
     }
 
 	public GhidrAssistPlugin getInstance() {

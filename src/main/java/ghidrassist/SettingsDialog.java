@@ -38,6 +38,9 @@ public class SettingsDialog extends DialogComponentProvider {
     private JTextField analysisDbPathField;
     private JButton analysisDbBrowseButton;
 
+    // API Timeout
+    private JTextField apiTimeoutField;
+    
     public SettingsDialog(Component parent, String title, GhidrAssistPlugin plugin) {
         super(title, true, false, true, false);
         this.plugin = plugin;
@@ -70,7 +73,15 @@ public class SettingsDialog extends DialogComponentProvider {
         // Load the Lucene index path
         String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene");
         
-
+        // Load the API timeout
+        String apiTimeout = Preferences.getProperty("GhidrAssist.APITimeout", "120");
+        JLabel apiTimeoutLabel = new JLabel("API Timeout (seconds):");
+        apiTimeoutField = new JTextField(apiTimeout, 5);
+        
+        JPanel apiTimeoutPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        apiTimeoutPanel.add(apiTimeoutLabel);
+        apiTimeoutPanel.add(apiTimeoutField);
+        
         // Initialize the UI components
         JPanel panel = new JPanel(new BorderLayout());
 
@@ -175,6 +186,7 @@ public class SettingsDialog extends DialogComponentProvider {
         topPanel.add(rlhfDbPanel);
         topPanel.add(analysisDbPanel);
         topPanel.add(luceneIndexPanel);
+        topPanel.add(apiTimeoutPanel);
 
         // Add components to the panel
         panel.add(topPanel, BorderLayout.NORTH);
@@ -451,7 +463,25 @@ public class SettingsDialog extends DialogComponentProvider {
         // Get the selected provider name
         selectedProviderName = (String) activeProviderComboBox.getSelectedItem();
 
-
+        // Get the API timeout from the text field
+        String apiTimeout = apiTimeoutField.getText().trim();
+        try {
+            int timeout = Integer.parseInt(apiTimeout);
+            if (timeout <= 0) {
+                JOptionPane.showMessageDialog(getComponent(), 
+                    "API Timeout must be a positive integer.", 
+                    "Validation Error", 
+                    JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+        } catch (NumberFormatException e) {
+            JOptionPane.showMessageDialog(getComponent(), 
+                "API Timeout must be a valid integer.", 
+                "Validation Error", 
+                JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        
         // Serialize the list of providers to JSON
         Gson gson = new Gson();
         String providersJson = gson.toJson(apiProviders);
@@ -470,6 +500,7 @@ public class SettingsDialog extends DialogComponentProvider {
         Preferences.setProperty("GhidrAssist.SelectedAPIProvider", selectedProviderName);
         Preferences.setProperty("GhidrAssist.RLHFDatabasePath", rlhfDbPath);
         Preferences.setProperty("GhidrAssist.LuceneIndexPath", luceneIndexPath);
+        Preferences.setProperty("GhidrAssist.APITimeout", apiTimeout);
         Preferences.store(); // Save preferences to disk
 
         close();

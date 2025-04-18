@@ -28,8 +28,8 @@ public class OpenAIProvider extends APIProvider {
     private static final String OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002";
     private volatile boolean isCancelled = false;
 
-    public OpenAIProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
-        super(name, ProviderType.OPENAI, model, maxTokens, url, key, disableTlsVerification);
+    public OpenAIProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
+        super(name, ProviderType.OPENAI, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
     public static OpenAIProvider fromConfig(APIProviderConfig config) {
@@ -39,7 +39,8 @@ public class OpenAIProvider extends APIProvider {
             config.getMaxTokens(),
             config.getUrl(),
             config.getKey(),
-            config.isDisableTlsVerification()
+            config.isDisableTlsVerification(),
+            config.getTimeout()
         );
     }
 
@@ -47,9 +48,9 @@ public class OpenAIProvider extends APIProvider {
     protected OkHttpClient buildClient() {
         try {
             OkHttpClient.Builder builder = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(30))
-                .readTimeout(Duration.ofSeconds(60))
-                .writeTimeout(Duration.ofSeconds(30))
+                .connectTimeout(super.timeout)
+                .readTimeout(super.timeout)
+                .writeTimeout(super.timeout)
                 .retryOnConnectionFailure(true)
                 .addInterceptor(chain -> {
                     Request originalRequest = chain.request();
@@ -190,11 +191,18 @@ public class OpenAIProvider extends APIProvider {
 
         try (Response response = client.newCall(request).execute()) {
             if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code() + " " + response.message());
+                throw new IOException("Failed to get completion: " + 
+                		response.code() + 
+                		" " + 
+                		response.message() + 
+                		" " + 
+                		response.body().string()
+                	);
             }
-
+            StringReader responseStr = new StringReader(response.body().string().replaceFirst("```json", "").replaceAll("```", ""));
+            
             // Create a lenient JsonReader
-            JsonReader jsonReader = new JsonReader(new StringReader(response.body().string()));
+            JsonReader jsonReader = new JsonReader(responseStr);
             jsonReader.setLenient(true);
 
             // Parse with lenient reader
@@ -351,15 +359,13 @@ public class OpenAIProvider extends APIProvider {
 
         // Handle different token field names based on model
         String modelName = super.getModel();
-        if (modelName != null && (modelName.startsWith("o1-") || modelName.startsWith("o3-"))) {
+        if (modelName != null && (modelName.startsWith("o1-") || modelName.startsWith("o3-") || modelName.startsWith("o4-"))) {
             payload.addProperty("max_completion_tokens", super.getMaxTokens());
         } else {
             payload.addProperty("max_tokens", super.getMaxTokens());
         }
         
-        if (stream) {
-            payload.addProperty("stream", true);
-        }
+        payload.addProperty("stream", stream);
 
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {
