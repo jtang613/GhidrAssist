@@ -1,5 +1,7 @@
 package ghidrassist.apiprovider;
 
+import ghidrassist.GhidrAssistPlugin;
+
 public class APIProviderConfig {
     private String name;
     private String model;
@@ -61,17 +63,18 @@ public class APIProviderConfig {
     public void setTimeout(Integer timeout) { this.timeout = timeout; }
 
     public APIProvider createProvider() {
+    	this.timeout = GhidrAssistPlugin.getGlobalApiTimeout();
         switch (type) {
             case OPENAI:
-                return new OpenAIProvider(name, model, maxTokens, url, key, disableTlsVerification, timeout);
+                return new OpenAIProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
             case ANTHROPIC:
-                return new AnthropicProvider(name, model, maxTokens, url, key, disableTlsVerification);
+                return new AnthropicProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
             case OLLAMA:
-                return new OllamaProvider(name, model, maxTokens, url, key, disableTlsVerification);
+                return new OllamaProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
             case OPENWEBUI:
-            	return new OpenWebUiProvider(name, model, maxTokens, url, key, disableTlsVerification);
+            	return new OpenWebUiProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
             case LMSTUDIO:
-                return new LMStudioProvider(name, model, maxTokens, url, key, disableTlsVerification);
+                return new LMStudioProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
             default:
                 throw new IllegalArgumentException("Unsupported provider type: " + type);
         }

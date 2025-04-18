@@ -26,10 +26,9 @@ public class OpenWebUiProvider extends APIProvider {
     private static final String OPENWEBUI_CHAT_ENDPOINT = "ollama/api/chat";
     private static final String OPENWEBUI_EMBEDDINGS_ENDPOINT = "ollama/api/embed";
     private static final String OPENWEBUI_MODELS_ENDPOINT = "ollama/api/tags";
-	private static Integer timeout;
     private volatile boolean isCancelled = false;
 
-    public OpenWebUiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification) {
+    public OpenWebUiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
         super(name, ProviderType.OLLAMA, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 

@@ -32,7 +32,7 @@ public abstract class APIProvider {
     protected Duration timeout;
 
     public APIProvider(String name, ProviderType type, String model, Integer maxTokens, 
-                      String url, String key, boolean disableTlsVerification, Integer timeout) {
+                      String url, String key, boolean disableTlsVerification, Integer timeout2) {
         this.name = name;
         this.type = type;
         this.model = model;
@@ -40,7 +40,7 @@ public abstract class APIProvider {
         this.url = url.endsWith("/") ? url : url + "/";
         this.key = key;
         this.disableTlsVerification = disableTlsVerification;
-        this.timeout = Duration.ofSeconds(timeout);
+        this.timeout = Duration.ofSeconds(timeout2);
         this.client = buildClient();
     }
 
