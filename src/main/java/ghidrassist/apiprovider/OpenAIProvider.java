@@ -9,6 +9,7 @@ import com.google.gson.JsonSyntaxException;
 import com.google.gson.stream.JsonReader;
 
 import ghidrassist.LlmApi;
+import ghidrassist.apiprovider.exceptions.*;
 import okhttp3.*;
 import okio.BufferedSource;
 import javax.net.ssl.*;
@@ -87,12 +88,12 @@ public class OpenAIProvider extends APIProvider {
 
             return builder.build();
         } catch (Exception e) {
-            throw new RuntimeException("Failed to build HTTP client", e);
+            throw new RuntimeException("Failed to build OpenAI HTTP client: " + e.getMessage(), e);
         }
     }
 
     @Override
-    public String createChatCompletion(List<ChatMessage> messages) throws IOException {
+    public String createChatCompletion(List<ChatMessage> messages) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
         Request request = new Request.Builder()
@@ -100,20 +101,22 @@ public class OpenAIProvider extends APIProvider {
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "No error body";
-                throw new IOException("Failed to get completion: " + response.code() + 
-                    " " + response.message() + "\nError: " + errorBody);
+        try (Response response = executeWithRetry(request, "createChatCompletion")) {
+            String responseBody = response.body().string();
+            try {
+                JsonObject responseObj = gson.fromJson(responseBody, JsonObject.class);
+                return extractContentFromResponse(responseObj);
+            } catch (JsonSyntaxException e) {
+                throw new ResponseException(name, "createChatCompletion", 
+                    ResponseException.ResponseErrorType.MALFORMED_JSON, e);
             }
-
-            JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return extractContentFromResponse(responseObj);
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletion");
         }
     }
 
     @Override
-    public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler) throws IOException {
+    public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, true);
 
         Request request = new Request.Builder()
@@ -126,48 +129,76 @@ public class OpenAIProvider extends APIProvider {
 
             @Override
             public void onFailure(Call call, IOException e) {
-                handler.onError(e);
+                APIProviderException apiException;
+                if (call.isCanceled()) {
+                    apiException = new StreamCancelledException(name, "stream_chat_completion", 
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e);
+                } else {
+                    apiException = handleNetworkError(e, "stream_chat_completion");
+                }
+                handler.onError(apiException);
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        String errorBody = responseBody != null ? responseBody.string() : "No error body";
-                        handler.onError(new IOException("Failed to get completion: " + response.code() + 
-                            "\nError: " + errorBody));
+                        APIProviderException apiException = handleHttpError(response, "stream_chat_completion");
+                        handler.onError(apiException);
+                        return;
+                    }
+
+                    if (responseBody == null) {
+                        handler.onError(new ResponseException(name, "stream_chat_completion", 
+                            ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                         return;
                     }
 
                     BufferedSource source = responseBody.source();
                     StringBuilder contentBuilder = new StringBuilder();
 
-                    while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
-                        String line = source.readUtf8Line();
-                        if (line == null || line.isEmpty()) continue;
-                        if (line.startsWith("data: ")) {
-                            String data = line.substring(6).trim();
-                            if (data.equals("[DONE]")) {
-                                handler.onComplete(contentBuilder.toString());
-                                return;
-                            }
-
-                            JsonObject chunk = gson.fromJson(data, JsonObject.class);
-                            String content = extractDeltaContent(chunk);
+                    try {
+                        while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
+                            String line = source.readUtf8Line();
+                            if (line == null || line.isEmpty()) continue;
                             
-                            if (content != null) {
-                                if (isFirst) {
-                                    handler.onStart();
-                                    isFirst = false;
+                            if (line.startsWith("data: ")) {
+                                String data = line.substring(6).trim();
+                                if (data.equals("[DONE]")) {
+                                    handler.onComplete(contentBuilder.toString());
+                                    return;
                                 }
-                                contentBuilder.append(content);
-                                handler.onUpdate(content);
+
+                                try {
+                                    JsonObject chunk = gson.fromJson(data, JsonObject.class);
+                                    String content = extractDeltaContent(chunk);
+                                    
+                                    if (content != null) {
+                                        if (isFirst) {
+                                            handler.onStart();
+                                            isFirst = false;
+                                        }
+                                        contentBuilder.append(content);
+                                        handler.onUpdate(content);
+                                    }
+                                } catch (JsonSyntaxException e) {
+                                    handler.onError(new ResponseException(name, "stream_chat_completion", 
+                                        ResponseException.ResponseErrorType.MALFORMED_JSON, e));
+                                    return;
+                                }
                             }
                         }
-                    }
 
-                    if (isCancelled) {
-                        handler.onError(new IOException("Request cancelled"));
+                        if (isCancelled) {
+                            handler.onError(new StreamCancelledException(name, "stream_chat_completion", 
+                                StreamCancelledException.CancellationReason.USER_REQUESTED));
+                        } else if (!handler.shouldContinue()) {
+                            handler.onError(new StreamCancelledException(name, "stream_chat_completion", 
+                                StreamCancelledException.CancellationReason.USER_REQUESTED));
+                        }
+                    } catch (IOException e) {
+                        handler.onError(new ResponseException(name, "stream_chat_completion", 
+                            ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                     }
                 }
             }
@@ -175,7 +206,7 @@ public class OpenAIProvider extends APIProvider {
     }
 
     @Override
-    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
+    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
         // Add tools (functions) to the payload
@@ -189,24 +220,17 @@ public class OpenAIProvider extends APIProvider {
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + 
-                		response.code() + 
-                		" " + 
-                		response.message() + 
-                		" " + 
-                		response.body().string()
-                	);
-            }
-            StringReader responseStr = new StringReader(response.body().string().replaceFirst("```json", "").replaceAll("```", ""));
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
+            String responseBody = response.body().string();
+            StringReader responseStr = new StringReader(responseBody.replaceFirst("```json", "").replaceAll("```", ""));
             
-            // Create a lenient JsonReader
-            JsonReader jsonReader = new JsonReader(responseStr);
-            jsonReader.setLenient(true);
+            try {
+                // Create a lenient JsonReader
+                JsonReader jsonReader = new JsonReader(responseStr);
+                jsonReader.setLenient(true);
 
-            // Parse with lenient reader
-            JsonObject responseObj = JsonParser.parseReader(jsonReader).getAsJsonObject();
+                // Parse with lenient reader
+                JsonObject responseObj = JsonParser.parseReader(jsonReader).getAsJsonObject();
             JsonObject message = new JsonObject();
             if ( responseObj.has("message") ) {
             	message = responseObj.getAsJsonObject("message");
@@ -282,30 +306,48 @@ public class OpenAIProvider extends APIProvider {
 
             // No valid tool calls found
             return "{\"tool_calls\":[]}";
+            
+            } catch (JsonSyntaxException e) {
+                throw new ResponseException(name, "createChatCompletionWithFunctions", 
+                    ResponseException.ResponseErrorType.MALFORMED_JSON, e);
+            }
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctions");
         }
     }
 
 
     @Override
-    public List<String> getAvailableModels() throws IOException {
+    public List<String> getAvailableModels() throws APIProviderException {
         Request request = new Request.Builder()
             .url(url + OPENAI_MODELS_ENDPOINT)
             .build();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get models: " + response.code() + " " + response.message());
+        try (Response response = executeWithRetry(request, "getAvailableModels")) {
+            String responseBody = response.body().string();
+            try {
+                JsonObject responseObj = gson.fromJson(responseBody, JsonObject.class);
+                List<String> modelIds = new ArrayList<>();
+                
+                if (!responseObj.has("data")) {
+                    throw new ResponseException(name, "get_models", 
+                        ResponseException.ResponseErrorType.MISSING_REQUIRED_FIELD);
+                }
+                
+                JsonArray models = responseObj.getAsJsonArray("data");
+                for (JsonElement model : models) {
+                    if (model.isJsonObject() && model.getAsJsonObject().has("id")) {
+                        modelIds.add(model.getAsJsonObject().get("id").getAsString());
+                    }
+                }
+                
+                return modelIds;
+            } catch (JsonSyntaxException e) {
+                throw new ResponseException(name, "getAvailableModels", 
+                    ResponseException.ResponseErrorType.MALFORMED_JSON, e);
             }
-
-            JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            List<String> modelIds = new ArrayList<>();
-            JsonArray models = responseObj.getAsJsonArray("data");
-            
-            for (JsonElement model : models) {
-                modelIds.add(model.getAsJsonObject().get("id").getAsString());
-            }
-            
-            return modelIds;
+        } catch (IOException e) {
+            throw handleNetworkError(e, "getAvailableModels");
         }
     }
 
@@ -323,31 +365,73 @@ public class OpenAIProvider extends APIProvider {
         client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                callback.onError(e);
+                APIProviderException apiException;
+                if (call.isCanceled()) {
+                    apiException = new StreamCancelledException(name, "get_embeddings", 
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e);
+                } else {
+                    apiException = handleNetworkError(e, "get_embeddings");
+                }
+                callback.onError(apiException);
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        callback.onError(new IOException("Failed to get embeddings: " + 
-                            response.code() + " " + response.message()));
+                        APIProviderException apiException = handleHttpError(response, "get_embeddings");
+                        callback.onError(apiException);
                         return;
                     }
 
-                    JsonObject responseObj = gson.fromJson(responseBody.string(), JsonObject.class);
-                    JsonArray embedding = responseObj.getAsJsonArray("data")
-                        .get(0).getAsJsonObject()
-                        .getAsJsonArray("embedding");
-
-                    double[] embeddingArray = new double[embedding.size()];
-                    for (int i = 0; i < embedding.size(); i++) {
-                        embeddingArray[i] = embedding.get(i).getAsDouble();
+                    if (responseBody == null) {
+                        callback.onError(new ResponseException(name, "get_embeddings", 
+                            ResponseException.ResponseErrorType.EMPTY_RESPONSE));
+                        return;
                     }
-                    
-                    callback.onSuccess(embeddingArray);
-                } catch (Exception e) {
-                    callback.onError(e);
+
+                    try {
+                        String responseBodyStr = responseBody.string();
+                        JsonObject responseObj = gson.fromJson(responseBodyStr, JsonObject.class);
+                        
+                        if (!responseObj.has("data")) {
+                            callback.onError(new ResponseException(name, "get_embeddings", 
+                                ResponseException.ResponseErrorType.MISSING_REQUIRED_FIELD));
+                            return;
+                        }
+                        
+                        JsonArray dataArray = responseObj.getAsJsonArray("data");
+                        if (dataArray.size() == 0) {
+                            callback.onError(new ResponseException(name, "get_embeddings", 
+                                "No embedding data in response"));
+                            return;
+                        }
+                        
+                        JsonObject firstElement = dataArray.get(0).getAsJsonObject();
+                        if (!firstElement.has("embedding")) {
+                            callback.onError(new ResponseException(name, "get_embeddings", 
+                                ResponseException.ResponseErrorType.MISSING_REQUIRED_FIELD));
+                            return;
+                        }
+                        
+                        JsonArray embedding = firstElement.getAsJsonArray("embedding");
+
+                        double[] embeddingArray = new double[embedding.size()];
+                        for (int i = 0; i < embedding.size(); i++) {
+                            embeddingArray[i] = embedding.get(i).getAsDouble();
+                        }
+                        
+                        callback.onSuccess(embeddingArray);
+                    } catch (JsonSyntaxException e) {
+                        callback.onError(new ResponseException(name, "get_embeddings", 
+                            ResponseException.ResponseErrorType.MALFORMED_JSON, e));
+                    } catch (NumberFormatException e) {
+                        callback.onError(new ResponseException(name, "get_embeddings", 
+                            "Invalid embedding format: " + e.getMessage()));
+                    }
+                } catch (IOException e) {
+                    callback.onError(new ResponseException(name, "get_embeddings", 
+                        ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                 }
             }
         });
@@ -404,5 +488,75 @@ public class OpenAIProvider extends APIProvider {
     public void cancelRequest() {
         isCancelled = true;
     }
-
+    
+    @Override
+    protected String extractApiErrorCode(String responseBody) {
+        if (responseBody == null || responseBody.isEmpty()) {
+            return null;
+        }
+        
+        try {
+            JsonObject errorObj = gson.fromJson(responseBody, JsonObject.class);
+            if (errorObj.has("error")) {
+                JsonObject error = errorObj.getAsJsonObject("error");
+                if (error.has("type")) {
+                    return error.get("type").getAsString();
+                } else if (error.has("code")) {
+                    return error.get("code").getAsString();
+                }
+            }
+        } catch (JsonSyntaxException e) {
+            // Ignore parsing errors
+        }
+        
+        return null;
+    }
+    
+    @Override
+    protected String extractErrorMessage(String responseBody, int statusCode) {
+        if (responseBody == null || responseBody.isEmpty()) {
+            return null;
+        }
+        
+        try {
+            JsonObject errorObj = gson.fromJson(responseBody, JsonObject.class);
+            if (errorObj.has("error")) {
+                JsonObject error = errorObj.getAsJsonObject("error");
+                if (error.has("message")) {
+                    return error.get("message").getAsString();
+                }
+            }
+        } catch (JsonSyntaxException e) {
+            // Ignore parsing errors and fall back to parent implementation
+        }
+        
+        // Fallback to parent implementation
+        return super.extractErrorMessage(responseBody, statusCode);
+    }
+    
+    @Override
+    protected Integer extractRetryAfter(Response response, String responseBody) {
+        // First check the parent implementation for standard headers
+        Integer retryAfter = super.extractRetryAfter(response, responseBody);
+        if (retryAfter != null) {
+            return retryAfter;
+        }
+        
+        // Check OpenAI-specific retry information in response body
+        if (responseBody != null) {
+            try {
+                JsonObject errorObj = gson.fromJson(responseBody, JsonObject.class);
+                if (errorObj.has("error")) {
+                    JsonObject error = errorObj.getAsJsonObject("error");
+                    if (error.has("retry_after")) {
+                        return error.get("retry_after").getAsInt();
+                    }
+                }
+            } catch (Exception e) {
+                // Ignore parsing errors
+            }
+        }
+        
+        return null;
+    }
 }

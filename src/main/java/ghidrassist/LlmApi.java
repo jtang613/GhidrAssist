@@ -11,7 +11,13 @@ import javax.swing.SwingWorker;
 import ghidra.util.Msg;
 import ghidrassist.apiprovider.APIProvider;
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.APIProviderLogger;
 import ghidrassist.apiprovider.ChatMessage;
+import ghidrassist.apiprovider.ErrorAction;
+import ghidrassist.apiprovider.ErrorMessageBuilder;
+import ghidrassist.apiprovider.RetryHandler;
+import ghidrassist.apiprovider.exceptions.*;
+import ghidrassist.ui.EnhancedErrorDialog;
 
 public class LlmApi {
     private APIProvider provider;
@@ -188,9 +194,7 @@ public class LlmApi {
                         synchronized (streamLock) {
                             isStreaming = false;
                         }
-                        if (!error.getMessage().contains("cancelled")) {
-                            Msg.showError(LlmApi.this, null, "LLM Error", "An error occurred: " + error.getMessage());
-                        }
+                        handleError(error, "stream chat completion", null);
                         responseHandler.onError(error);
                     }
 
@@ -237,8 +241,9 @@ public class LlmApi {
                         String filteredResponse = filterThinkBlocks(response);
                         responseHandler.onComplete(filteredResponse);
                     }
-                } catch (IOException e) {
+                } catch (APIProviderException e) {
                     if (responseHandler.shouldContinue()) {
+                        handleError(e, "chat completion with functions", null);
                         responseHandler.onError(e);
                     }
                 } finally {
@@ -277,6 +282,126 @@ public class LlmApi {
         void onError(Throwable error);
         default boolean shouldContinue() {
             return true;
+        }
+    }
+    
+    /**
+     * Enhanced error handling with user-friendly dialogs and logging
+     */
+    private void handleError(Throwable error, String operation, Runnable retryAction) {
+        if (error instanceof APIProviderException) {
+            APIProviderException ape = (APIProviderException) error;
+            
+            // Log the error with structured information
+            APIProviderLogger.logError(this, ape);
+            
+            // Skip showing error dialog for cancellations unless it's unexpected
+            if (ape.getCategory() == APIProviderException.ErrorCategory.CANCELLED) {
+                if (ape instanceof StreamCancelledException) {
+                    StreamCancelledException sce = (StreamCancelledException) ape;
+                    if (sce.getCancellationReason() == StreamCancelledException.CancellationReason.USER_REQUESTED) {
+                        return; // Don't show dialog for user-requested cancellations
+                    }
+                }
+            }
+            
+            // Create appropriate error actions
+            List<ErrorAction> actions = createErrorActions(ape, retryAction);
+            
+            // Show enhanced error dialog
+            java.awt.Window parentWindow = getParentWindow();
+            EnhancedErrorDialog.showError(parentWindow, ape, actions);
+            
+        } else {
+            // Handle non-API provider exceptions (fallback)
+            String message = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
+            Msg.showError(this, null, "Unexpected Error", 
+                "An unexpected error occurred during " + operation + ": " + message);
+            
+            // Log the error
+            Msg.error(this, "Unexpected error during " + operation, error);
+        }
+    }
+    
+    /**
+     * Create appropriate error actions based on the exception type
+     */
+    private List<ErrorAction> createErrorActions(APIProviderException ape, Runnable retryAction) {
+        List<ErrorAction> actions = new ArrayList<>();
+        
+        // Add retry action for retryable errors
+        if (ape.isRetryable() && retryAction != null) {
+            actions.add(ErrorAction.createRetryAction(retryAction));
+        }
+        
+        // Add settings action for configuration-related errors
+        if (ape.getCategory() == APIProviderException.ErrorCategory.AUTHENTICATION ||
+            ape.getCategory() == APIProviderException.ErrorCategory.CONFIGURATION ||
+            ape.getCategory() == APIProviderException.ErrorCategory.MODEL_ERROR) {
+            actions.add(ErrorAction.createSettingsAction(() -> openSettings()));
+        }
+        
+        // Add provider switching action for persistent errors
+        APIProviderLogger.ErrorStats stats = APIProviderLogger.getErrorStats(ape.getProviderName());
+        if (stats != null && stats.isFrequentErrorsDetected()) {
+            actions.add(ErrorAction.createSwitchProviderAction(() -> suggestProviderSwitch()));
+        }
+        
+        // Add copy error details action
+        actions.add(ErrorAction.createCopyErrorAction(ape.getTechnicalDetails()));
+        
+        // Add dismiss action
+        actions.add(ErrorAction.createDismissAction());
+        
+        return actions;
+    }
+    
+    /**
+     * Get the parent window for error dialogs
+     */
+    private java.awt.Window getParentWindow() {
+        try {
+            // Try to get the main Ghidra window
+            if (plugin != null && plugin.getTool() != null) {
+                return plugin.getTool().getToolFrame();
+            }
+        } catch (Exception e) {
+            // Ignore errors getting parent window
+        }
+        return null;
+    }
+    
+    /**
+     * Open the settings dialog
+     */
+    private void openSettings() {
+        try {
+            if (plugin != null) {
+                // This would typically call the plugin's settings dialog
+                // The actual implementation depends on how settings are accessed
+                Msg.showInfo(this, null, "Settings", 
+                    "Please go to Tools -> GhidrAssist Settings to configure API providers.");
+            }
+        } catch (Exception e) {
+            Msg.showError(this, null, "Error", "Could not open settings: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Suggest switching to a different provider
+     */
+    private void suggestProviderSwitch() {
+        try {
+            // Generate a simple suggestion message
+            StringBuilder suggestion = new StringBuilder();
+            suggestion.append("Current provider is experiencing frequent errors.\n\n");
+            suggestion.append("Consider switching to a different provider in Settings.\n\n");
+            suggestion.append("Provider Error Statistics:\n");
+            suggestion.append(APIProviderLogger.generateDiagnosticsReport());
+            
+            Msg.showInfo(this, null, "Provider Reliability", suggestion.toString());
+        } catch (Exception e) {
+            Msg.showError(this, null, "Error", "Could not generate provider statistics: " + e.getMessage());
         }
     }
 }

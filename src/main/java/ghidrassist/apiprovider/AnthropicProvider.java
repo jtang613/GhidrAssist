@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import ghidrassist.LlmApi.LlmResponseHandler;
+import ghidrassist.apiprovider.exceptions.APIProviderException;
 import okhttp3.*;
 import okio.BufferedSource;
 
@@ -72,7 +73,7 @@ public class AnthropicProvider extends APIProvider {
     }
 
     @Override
-    public String createChatCompletion(List<ChatMessage> messages) throws IOException {
+    public String createChatCompletion(List<ChatMessage> messages) throws APIProviderException {
         JsonObject payload = buildMessagesPayload(messages, false);
         
         Request request = new Request.Builder()
@@ -80,20 +81,16 @@ public class AnthropicProvider extends APIProvider {
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                String errorBody = response.body() != null ? response.body().string() : "No error body";
-                throw new IOException("Failed to get completion: " + response.code() + 
-                    " " + response.message() + "\nError: " + errorBody);
-            }
-
+        try (Response response = executeWithRetry(request, "createChatCompletion")) {
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
             return responseObj.getAsJsonObject("content").get("text").getAsString();
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletion");
         }
     }
 
     @Override
-    public void streamChatCompletion(List<ChatMessage> messages, LlmResponseHandler handler) throws IOException {
+    public void streamChatCompletion(List<ChatMessage> messages, LlmResponseHandler handler) throws APIProviderException {
         JsonObject payload = buildMessagesPayload(messages, true);
 
         Request request = new Request.Builder()
@@ -107,16 +104,15 @@ public class AnthropicProvider extends APIProvider {
 
             @Override
             public void onFailure(Call call, IOException e) {
-                handler.onError(e);
+                handler.onError(handleNetworkError(e, "streamChatCompletion"));
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        String errorBody = responseBody != null ? responseBody.string() : "No error body";
-                        handler.onError(new IOException("Failed to get completion: " + response.code() + 
-                            "\nError: " + errorBody));
+                        String errorBody = responseBody != null ? responseBody.string() : null;
+                        handler.onError(handleHttpError(response, errorBody, "streamChatCompletion"));
                         return;
                     }
 
@@ -142,7 +138,8 @@ public class AnthropicProvider extends APIProvider {
                             
                             // Check for error events
                             if (event.has("type") && event.get("type").getAsString().equals("error")) {
-                                handler.onError(new IOException(event.get("error").getAsString()));
+                                handler.onError(new APIProviderException(APIProviderException.ErrorCategory.SERVICE_ERROR,
+                                    name, "streamChatCompletion", event.get("error").getAsString()));
                                 return;
                             }
                             
@@ -162,7 +159,8 @@ public class AnthropicProvider extends APIProvider {
                     }
 
                     if (isCancelled) {
-                        handler.onError(new IOException("Request cancelled"));
+                        handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                            name, "streamChatCompletion", "Request cancelled"));
                     } else {
                         handler.onComplete(contentBuilder.toString());
                     }
@@ -172,7 +170,7 @@ public class AnthropicProvider extends APIProvider {
     }
 
     @Override
-    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws IOException {
+    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         // Create a system message that instructs Claude about the available functions
         StringBuilder systemMessage = new StringBuilder("You can call these functions:\n");
         for (Map<String, Object> tool : functions) {
@@ -213,27 +211,21 @@ public class AnthropicProvider extends APIProvider {
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get completion: " + response.code());
-            }
-
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
             return responseObj.getAsJsonArray("content").get(0).getAsJsonObject().get("text").toString();
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctions");
         }
     }
 
     @Override
-    public List<String> getAvailableModels() throws IOException {
+    public List<String> getAvailableModels() throws APIProviderException {
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MODELS_ENDPOINT)
             .build();
 
-        try (Response response = client.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new IOException("Failed to get models: " + response.code() + " " + response.message());
-            }
-
+        try (Response response = executeWithRetry(request, "getAvailableModels")) {
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
             List<String> modelIds = new ArrayList<>();
             JsonArray models = responseObj.getAsJsonArray("models");
@@ -243,6 +235,8 @@ public class AnthropicProvider extends APIProvider {
             }
             
             return modelIds;
+        } catch (IOException e) {
+            throw handleNetworkError(e, "getAvailableModels");
         }
     }
 
