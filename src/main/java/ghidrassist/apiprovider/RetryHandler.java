@@ -110,11 +110,11 @@ public class RetryHandler {
         int waitTimeMs = calculateWaitTime(e, attempt);
         
         if (source != null) {
-            Msg.info(source, String.format("Waiting %d seconds before retry...", waitTimeMs / 1000));
+            Msg.info(source, String.format("Waiting %d seconds before retry...", waitTimeMs / 1000 / 10));
         }
         
         try {
-            Thread.sleep(waitTimeMs);
+            Thread.sleep(waitTimeMs / 10);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Retry interrupted", ie);

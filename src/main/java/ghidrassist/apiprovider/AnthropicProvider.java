@@ -6,6 +6,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import ghidrassist.LlmApi.LlmResponseHandler;
 import ghidrassist.apiprovider.exceptions.APIProviderException;
+import ghidrassist.apiprovider.capabilities.FunctionCallingProvider;
+import ghidrassist.apiprovider.capabilities.ModelListProvider;
 import okhttp3.*;
 import okio.BufferedSource;
 
@@ -16,7 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class AnthropicProvider extends APIProvider {
+public class AnthropicProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String ANTHROPIC_MESSAGES_ENDPOINT = "v1/messages";
@@ -213,7 +215,7 @@ public class AnthropicProvider extends APIProvider {
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return responseObj.getAsJsonArray("content").get(0).getAsJsonObject().get("text").toString();
+            return responseObj.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString();
         } catch (IOException e) {
             throw handleNetworkError(e, "createChatCompletionWithFunctions");
         }

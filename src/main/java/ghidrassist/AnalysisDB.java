@@ -119,6 +119,12 @@ public class AnalysisDB {
     }
 
     public void upsertContext(String programHash, String context) {
+        if (context == null) {
+            // If context is null, delete the entry to revert to default
+            deleteContext(programHash);
+            return;
+        }
+        
         String upsertSQL = "INSERT INTO GHContext (program_hash, system_context) "
                 + "VALUES (?, ?) "
                 + "ON CONFLICT(program_hash) "
@@ -131,6 +137,17 @@ public class AnalysisDB {
             pstmt.executeUpdate();
         } catch (SQLException e) {
             Msg.showError(this, null, "Database Error", "Failed to store context: " + e.getMessage());
+        }
+    }
+    
+    public void deleteContext(String programHash) {
+        String deleteSQL = "DELETE FROM GHContext WHERE program_hash = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(deleteSQL)) {
+            pstmt.setString(1, programHash);
+            pstmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to delete context: " + e.getMessage());
         }
     }
 

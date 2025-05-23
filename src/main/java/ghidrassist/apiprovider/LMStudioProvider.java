@@ -6,6 +6,9 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import ghidrassist.LlmApi.LlmResponseHandler;
 import ghidrassist.apiprovider.exceptions.APIProviderException;
+import ghidrassist.apiprovider.capabilities.FunctionCallingProvider;
+import ghidrassist.apiprovider.capabilities.ModelListProvider;
+import ghidrassist.apiprovider.capabilities.EmbeddingProvider;
 import okhttp3.*;
 import okio.BufferedSource;
 
@@ -16,7 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class LMStudioProvider extends APIProvider {
+public class LMStudioProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider, EmbeddingProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String LMSTUDIO_CHAT_ENDPOINT = "v1/chat/completions";

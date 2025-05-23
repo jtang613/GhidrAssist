@@ -10,6 +10,9 @@ import com.google.gson.stream.JsonReader;
 
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.exceptions.*;
+import ghidrassist.apiprovider.capabilities.FunctionCallingProvider;
+import ghidrassist.apiprovider.capabilities.ModelListProvider;
+import ghidrassist.apiprovider.capabilities.EmbeddingProvider;
 import okhttp3.*;
 import okio.BufferedSource;
 import javax.net.ssl.*;
@@ -20,7 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class OpenAIProvider extends APIProvider {
+public class OpenAIProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider, EmbeddingProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String OPENAI_CHAT_ENDPOINT = "chat/completions";

@@ -26,7 +26,7 @@ public class ActionParser {
      * @throws Exception if parsing fails
      */
     public static void parseAndDisplay(String response, DefaultTableModel model) throws Exception {
-        String jsonStr = preprocessJsonResponse(response);
+        String jsonStr = extractToolCallsJson(response);
         JsonObject jsonObject = parseJson(jsonStr);
         
         if (!jsonObject.has("tool_calls")) {
@@ -37,6 +37,39 @@ public class ActionParser {
         processToolCalls(toolCallsArray, model);
     }
     
+    /**
+     * Extract tool calls JSON from various response formats (Anthropic, OpenAI, etc.).
+     */
+    private static String extractToolCallsJson(String response) throws Exception {
+        // First check if this is already a tool calls JSON object
+        try {
+            JsonObject responseObj = gson.fromJson(response, JsonObject.class);
+            
+            // Check if this is already tool calls JSON
+            if (responseObj.has("tool_calls")) {
+                return response;
+            }
+            
+            // Check if this is an Anthropic response with content array
+            if (responseObj.has("content") && responseObj.get("content").isJsonArray()) {
+                JsonArray contentArray = responseObj.getAsJsonArray("content");
+                if (contentArray.size() > 0) {
+                    JsonObject firstContent = contentArray.get(0).getAsJsonObject();
+                    if (firstContent.has("type") && "text".equals(firstContent.get("type").getAsString()) 
+                        && firstContent.has("text")) {
+                        String textContent = firstContent.get("text").getAsString();
+                        return preprocessJsonResponse(textContent);
+                    }
+                }
+            }
+        } catch (JsonSyntaxException e) {
+            // Not a JSON object, treat as raw text that needs preprocessing
+        }
+        
+        // This is likely text content from Anthropic provider that needs preprocessing
+        return preprocessJsonResponse(response);
+    }
+
     /**
      * Preprocess the response to extract JSON from potential code blocks.
      */
@@ -52,13 +85,41 @@ public class ActionParser {
             json = matcher.group(2).trim();
         } else {
             // If no code block markers, attempt to find the JSON content directly
-            // Remove any leading or trailing quotes
+            // Remove any leading or trailing quotes (but be careful about JSON strings)
             if ((json.startsWith("\"") && json.endsWith("\"")) || 
                 (json.startsWith("'") && json.endsWith("'"))) {
-                json = json.substring(1, json.length() - 1).trim();
+                // Only remove if it's wrapping the entire content, not part of JSON
+                String withoutQuotes = json.substring(1, json.length() - 1).trim();
+                try {
+                    // Test if removing quotes gives us valid JSON
+                    gson.fromJson(withoutQuotes, JsonElement.class);
+                    json = withoutQuotes;
+                } catch (JsonSyntaxException e) {
+                    // Keep original if removing quotes breaks JSON
+                }
             }
         }
-        json = json.replace("\\n", "").replace("\\", "").replace(":\"{\"", ":{\"").replace("\"}\"}", "\"}}");
+        
+        // Handle escaped quotes in JSON strings from Anthropic
+        // This handles the case where the JSON content itself has escaped quotes
+        if (json.contains("\\\"")) {
+            // Try to parse with escaped quotes
+            try {
+                gson.fromJson(json, JsonElement.class);
+                // If it parses, return as-is
+                return json;
+            } catch (JsonSyntaxException e) {
+                // If parsing fails, try unescaping quotes
+                json = json.replace("\\\"", "\"");
+            }
+        }
+        
+        // Clean up escaped whitespace
+        json = json.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r");
+        
+        // Clean up some specific malformed patterns but preserve valid escapes
+        json = json.replace(":\"{\"", ":{\"").replace("\"}\"}", "\"}}");
+        
         return json;
     }
     

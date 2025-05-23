@@ -5,5 +5,7 @@ os/
 .gradle/
 .settings/
 .classpath
-/ghidrassist_rlhf.db
-/ghidrassist_analysis.db
+ghidrassist_rlhf.db
+ghidrassist_analysis.db
+lucene/
+node_modules/

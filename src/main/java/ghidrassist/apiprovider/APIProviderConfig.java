@@ -1,6 +1,8 @@
 package ghidrassist.apiprovider;
 
 import ghidrassist.GhidrAssistPlugin;
+import ghidrassist.apiprovider.factory.ProviderRegistry;
+import ghidrassist.apiprovider.factory.UnsupportedProviderException;
 
 public class APIProviderConfig {
     private String name;
@@ -62,21 +64,26 @@ public class APIProviderConfig {
     public void setDisableTlsVerification(boolean disableTlsVerification) { this.disableTlsVerification = disableTlsVerification; }
     public void setTimeout(Integer timeout) { this.timeout = timeout; }
 
+    /**
+     * Create a provider using the factory pattern
+     * @return Configured API provider instance
+     * @throws RuntimeException if provider creation fails
+     */
     public APIProvider createProvider() {
-    	this.timeout = GhidrAssistPlugin.getGlobalApiTimeout();
-        switch (type) {
-            case OPENAI:
-                return new OpenAIProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
-            case ANTHROPIC:
-                return new AnthropicProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
-            case OLLAMA:
-                return new OllamaProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
-            case OPENWEBUI:
-            	return new OpenWebUiProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
-            case LMSTUDIO:
-                return new LMStudioProvider(name, model, maxTokens, url, key, disableTlsVerification, this.timeout);
-            default:
-                throw new IllegalArgumentException("Unsupported provider type: " + type);
+        this.timeout = GhidrAssistPlugin.getGlobalApiTimeout();
+        
+        try {
+            return ProviderRegistry.getInstance().createProvider(this);
+        } catch (UnsupportedProviderException e) {
+            throw new IllegalArgumentException("Failed to create provider: " + e.getMessage(), e);
         }
+    }
+    
+    /**
+     * Check if this provider type is supported
+     * @return true if the provider type is supported
+     */
+    public boolean isSupported() {
+        return ProviderRegistry.getInstance().isSupported(type);
     }
 }
