@@ -15,11 +15,12 @@ import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SSLException;
 
 import ghidrassist.LlmApi;
+import ghidrassist.apiprovider.capabilities.ChatProvider;
 import ghidrassist.apiprovider.exceptions.*;
 import okhttp3.OkHttpClient;
 import okhttp3.Response;
 
-public abstract class APIProvider {
+public abstract class APIProvider implements ChatProvider {
     public enum ProviderType {
         OPENAI,
         ANTHROPIC,

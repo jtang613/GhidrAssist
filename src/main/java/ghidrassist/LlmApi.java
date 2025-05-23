@@ -1,280 +1,161 @@
 package ghidrassist;
 
-import java.io.IOException;
-import java.util.ArrayList;
+import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.core.LlmApiClient;
+import ghidrassist.core.LlmErrorHandler;
+import ghidrassist.core.LlmTaskExecutor;
+import ghidrassist.core.ResponseProcessor;
+
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 
-import javax.swing.SwingWorker;
-
-import ghidra.util.Msg;
-import ghidrassist.apiprovider.APIProvider;
-import ghidrassist.apiprovider.APIProviderConfig;
-import ghidrassist.apiprovider.APIProviderLogger;
-import ghidrassist.apiprovider.ChatMessage;
-import ghidrassist.apiprovider.ErrorAction;
-import ghidrassist.apiprovider.ErrorMessageBuilder;
-import ghidrassist.apiprovider.RetryHandler;
-import ghidrassist.apiprovider.exceptions.*;
-import ghidrassist.ui.EnhancedErrorDialog;
-
+/**
+ * - LlmApiClient: Provider management and API calls
+ * - ResponseProcessor: Text filtering and processing
+ * - LlmTaskExecutor: Background task execution
+ * - LlmErrorHandler: Error handling and user feedback
+ */
 public class LlmApi {
-    private APIProvider provider;
-    private final AnalysisDB analysisDB;
-    private final GhidrAssistPlugin plugin;
-    private final Object streamLock = new Object();
-    private volatile boolean isStreaming = false;
     
-    // Pattern for matching complete <think> blocks and opening/closing tags
-    private static final Pattern COMPLETE_THINK_PATTERN = Pattern.compile("<think>.*?</think>", Pattern.DOTALL);
+    private final LlmApiClient apiClient;
+    private final ResponseProcessor responseProcessor;
+    private final LlmTaskExecutor taskExecutor;
+    private final LlmErrorHandler errorHandler;
     
-    private final String DEFAULT_SYSTEM_PROMPT = 
-            "You are a professional software reverse engineer specializing in cybersecurity. You are intimately \n"
-            + "familiar with x86_64, ARM, PPC and MIPS architectures. You are an expert C and C++ developer.\n"
-            + "You are an expert Python and Rust developer. You are familiar with common frameworks and libraries \n"
-            + "such as WinSock, OpenSSL, MFC, etc. You are an expert in TCP/IP network programming and packet analysis.\n"
-            + "You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
-            + "You format code blocks using back-tick code-fencing.\n";
-            
-    private final String FUNCTION_PROMPT = "USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.";
-    private final String FORMAT_PROMPT = 
-        "The output MUST strictly adhere to the following JSON format, do not include any other text.\n" +
-        "The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.\n" +
-        "```\n" +
-        "{\n" +
-        "    \"tool_calls\": [\n" +
-        "    {\"name\": \"rename_function\", \"arguments\": {\"new_name\": \"new_name\"}},\n" +
-        "    ... (more tool calls as required)\n" +
-        "    ]\n" +
-        "}\n" +
-        "```\n" +
-        "REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!";
-
     public LlmApi(APIProviderConfig config, GhidrAssistPlugin plugin) {
-        this.provider = config.createProvider();
-        this.analysisDB = new AnalysisDB();
-        this.plugin = plugin;
-        
-        // Get the global API timeout and set it if the provider doesn't have one
-        if (provider != null && provider.getTimeout() == null) {
-            Integer timeout = GhidrAssistPlugin.getGlobalApiTimeout();
-            provider.setTimeout(timeout);
-        }
+        this.apiClient = new LlmApiClient(config, plugin);
+        this.responseProcessor = new ResponseProcessor();
+        this.taskExecutor = new LlmTaskExecutor();
+        this.errorHandler = new LlmErrorHandler(plugin, this);
     }
 
+    /**
+     * Get the system prompt for regular queries
+     */
     public String getSystemPrompt() {
-        return this.DEFAULT_SYSTEM_PROMPT;
+        return apiClient.getSystemPrompt();
     }
 
-    private String getCurrentContext() {
-        if (plugin.getCurrentProgram() != null) {
-            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-            String context = analysisDB.getContext(programHash);
-            if (context != null) {
-                return context;
-            }
-        }
-        return DEFAULT_SYSTEM_PROMPT;
-    }
-    
-    private static class StreamingResponseFilter {
-        private StringBuilder buffer = new StringBuilder();
-        private StringBuilder visibleBuffer = new StringBuilder();
-        private boolean insideThinkBlock = false;
-        
-        public String processChunk(String chunk) {
-            if (chunk == null) {
-                return null;
-            }
-            
-            buffer.append(chunk);
-            
-            // Process the buffer until we can't anymore
-            String currentBuffer = buffer.toString();
-            int lastSafeIndex = 0;
-            
-            for (int i = 0; i < currentBuffer.length(); i++) {
-                // Look for start tag
-                if (!insideThinkBlock && currentBuffer.startsWith("<think>", i)) {
-                    // Append everything up to this point to visible buffer
-                    visibleBuffer.append(currentBuffer.substring(lastSafeIndex, i));
-                    insideThinkBlock = true;
-                    lastSafeIndex = i + 7; // Skip "<think>"
-                    i += 6; // Move past "<think>"
-                }
-                // Look for end tag
-                else if (insideThinkBlock && currentBuffer.startsWith("</think>", i)) {
-                    insideThinkBlock = false;
-                    lastSafeIndex = i + 8; // Skip "</think>"
-                    i += 7; // Move past "</think>"
-                }
-            }
-            
-            // If we're not in a think block, append any remaining safe content
-            if (!insideThinkBlock) {
-                visibleBuffer.append(currentBuffer.substring(lastSafeIndex));
-                // Clear processed content from buffer
-                buffer.setLength(0);
-            } else {
-                // Keep everything from lastSafeIndex in buffer
-                buffer = new StringBuilder(currentBuffer.substring(lastSafeIndex));
-            }
-            
-            return visibleBuffer.toString();
-        }
-        
-        public String getFilteredContent() {
-            return visibleBuffer.toString();
-        }
-    }
-    
-    private String filterThinkBlocks(String response) {
-        if (response == null) {
-            return null;
-        }
-        return COMPLETE_THINK_PATTERN.matcher(response).replaceAll("").trim();
-    }
-    
+    /**
+     * Send a streaming request with enhanced error handling
+     */
     public void sendRequestAsync(String prompt, LlmResponseHandler responseHandler) {
-        if (provider == null) {
-            Msg.showError(this, null, "Service Error", "LLM provider is not initialized.");
+        if (!apiClient.isProviderAvailable()) {
+            errorHandler.handleError(
+                new IllegalStateException("LLM provider is not initialized."), 
+                "send request", 
+                null
+            );
             return;
         }
 
-        // Cancel any existing stream
-        cancelCurrentRequest();
-
-        String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
-        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-") || this.provider.getModel().startsWith("o4-")) {
-        	systemUser = ChatMessage.ChatMessageRole.USER;
-        }
-        List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage(systemUser, getCurrentContext()));
-        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
-
-        if (!responseHandler.shouldContinue()) {
-            return;
-        }
-
-        try {
-            synchronized (streamLock) {
-                isStreaming = true;
-                StreamingResponseFilter filter = new StreamingResponseFilter();
-                
-                provider.streamChatCompletion(messages, new LlmResponseHandler() {
-                    private boolean isFirst = true;
-
-                    @Override
-                    public void onStart() {
-                        if (isFirst) {
-                            responseHandler.onStart();
-                            isFirst = false;
-                        }
-                    }
-
-                    @Override
-                    public void onUpdate(String partialResponse) {
-                        String filteredContent = filter.processChunk(partialResponse);
-                        if (filteredContent != null && !filteredContent.isEmpty()) {
-                            responseHandler.onUpdate(filteredContent);
-                        }
-                    }
-
-                    @Override
-                    public void onComplete(String fullResponse) {
-                        synchronized (streamLock) {
-                            isStreaming = false;
-                        }
-                        responseHandler.onComplete(filter.getFilteredContent());
-                    }
-
-                    @Override
-                    public void onError(Throwable error) {
-                        synchronized (streamLock) {
-                            isStreaming = false;
-                        }
-                        handleError(error, "stream chat completion", null);
-                        responseHandler.onError(error);
-                    }
-
-                    @Override
-                    public boolean shouldContinue() {
-                        return responseHandler.shouldContinue();
-                    }
-                });
-            }
-        } catch (Exception e) {
-            responseHandler.onError(e);
-        }
-    }
-
-    public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
-        if (provider == null) {
-            Msg.showError(this, null, "Service Error", "LLM provider is not initialized.");
-            return;
-        }
-
-        String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
-        if (this.provider.getModel().startsWith("o1-") || this.provider.getModel().startsWith("o3-") || this.provider.getModel().startsWith("o3-")) {
-        	systemUser = ChatMessage.ChatMessageRole.USER;
-        }
-
-        List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage(systemUser, 
-            getCurrentContext() + "\n" + FUNCTION_PROMPT + "\n" + FORMAT_PROMPT));
-        messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
-
-        // Create a background task
-        SwingWorker<Void, String> worker = new SwingWorker<>() {
+        // Create enhanced response handler that includes error handling
+        LlmTaskExecutor.LlmResponseHandler enhancedHandler = new LlmTaskExecutor.LlmResponseHandler() {
             @Override
-            protected Void doInBackground() {
-                try {
-                    synchronized (streamLock) {
-                        isStreaming = true;
-                    }
-                    
-                    responseHandler.onStart();
-                    String response = provider.createChatCompletionWithFunctions(messages, functions);
-                    
-                    if (responseHandler.shouldContinue()) {
-                        String filteredResponse = filterThinkBlocks(response);
-                        responseHandler.onComplete(filteredResponse);
-                    }
-                } catch (APIProviderException e) {
-                    if (responseHandler.shouldContinue()) {
-                        handleError(e, "chat completion with functions", null);
-                        responseHandler.onError(e);
-                    }
-                } finally {
-                    synchronized (streamLock) {
-                        isStreaming = false;
-                    }
-                }
-                return null;
+            public void onStart() {
+                responseHandler.onStart();
             }
 
             @Override
-            protected void done() {
-                try {
-                    get(); // Check for exceptions
-                } catch (Exception e) {
-                    if (responseHandler.shouldContinue()) {
-                        responseHandler.onError(e);
-                    }
-                }
+            public void onUpdate(String partialResponse) {
+                responseHandler.onUpdate(partialResponse);
+            }
+
+            @Override
+            public void onComplete(String fullResponse) {
+                responseHandler.onComplete(fullResponse);
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                // Handle error with enhanced error handling
+                Runnable retryAction = () -> sendRequestAsync(prompt, responseHandler);
+                errorHandler.handleError(error, "stream chat completion", retryAction);
+                responseHandler.onError(error);
+            }
+
+            @Override
+            public boolean shouldContinue() {
+                return responseHandler.shouldContinue();
             }
         };
 
-        worker.execute();
+        taskExecutor.executeStreamingRequest(apiClient, prompt, responseProcessor, enhancedHandler);
     }
 
-    public void cancelCurrentRequest() {
-        synchronized (streamLock) {
-            isStreaming = false;
+    /**
+     * Send a function calling request with enhanced error handling
+     */
+    public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
+        if (!apiClient.isProviderAvailable()) {
+            errorHandler.handleError(
+                new IllegalStateException("LLM provider is not initialized."), 
+                "send function request", 
+                null
+            );
+            return;
         }
+
+        // Create enhanced response handler that includes error handling
+        LlmTaskExecutor.LlmResponseHandler enhancedHandler = new LlmTaskExecutor.LlmResponseHandler() {
+            @Override
+            public void onStart() {
+                responseHandler.onStart();
+            }
+
+            @Override
+            public void onUpdate(String partialResponse) {
+                responseHandler.onUpdate(partialResponse);
+            }
+
+            @Override
+            public void onComplete(String fullResponse) {
+                responseHandler.onComplete(fullResponse);
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                // Handle error with enhanced error handling
+                Runnable retryAction = () -> sendRequestAsyncWithFunctions(prompt, functions, responseHandler);
+                errorHandler.handleError(error, "chat completion with functions", retryAction);
+                responseHandler.onError(error);
+            }
+
+            @Override
+            public boolean shouldContinue() {
+                return responseHandler.shouldContinue();
+            }
+        };
+
+        taskExecutor.executeFunctionRequest(apiClient, prompt, functions, responseProcessor, enhancedHandler);
     }
 
+    /**
+     * Cancel the current request
+     */
+    public void cancelCurrentRequest() {
+        taskExecutor.cancelCurrentRequest();
+    }
+
+    /**
+     * Check if currently processing a request
+     */
+    public boolean isStreaming() {
+        return taskExecutor.isStreaming();
+    }
+    
+    /**
+     * Get provider information for debugging/logging
+     */
+    public String getProviderInfo() {
+        return String.format("Provider: %s, Model: %s", 
+            apiClient.getProviderName(), 
+            apiClient.getProviderModel());
+    }
+
+    /**
+     * Interface for handling LLM responses - maintains compatibility with existing code
+     */
     public interface LlmResponseHandler {
         void onStart();
         void onUpdate(String partialResponse);
@@ -282,126 +163,6 @@ public class LlmApi {
         void onError(Throwable error);
         default boolean shouldContinue() {
             return true;
-        }
-    }
-    
-    /**
-     * Enhanced error handling with user-friendly dialogs and logging
-     */
-    private void handleError(Throwable error, String operation, Runnable retryAction) {
-        if (error instanceof APIProviderException) {
-            APIProviderException ape = (APIProviderException) error;
-            
-            // Log the error with structured information
-            APIProviderLogger.logError(this, ape);
-            
-            // Skip showing error dialog for cancellations unless it's unexpected
-            if (ape.getCategory() == APIProviderException.ErrorCategory.CANCELLED) {
-                if (ape instanceof StreamCancelledException) {
-                    StreamCancelledException sce = (StreamCancelledException) ape;
-                    if (sce.getCancellationReason() == StreamCancelledException.CancellationReason.USER_REQUESTED) {
-                        return; // Don't show dialog for user-requested cancellations
-                    }
-                }
-            }
-            
-            // Create appropriate error actions
-            List<ErrorAction> actions = createErrorActions(ape, retryAction);
-            
-            // Show enhanced error dialog
-            java.awt.Window parentWindow = getParentWindow();
-            EnhancedErrorDialog.showError(parentWindow, ape, actions);
-            
-        } else {
-            // Handle non-API provider exceptions (fallback)
-            String message = error.getMessage() != null ? error.getMessage() : error.getClass().getSimpleName();
-            Msg.showError(this, null, "Unexpected Error", 
-                "An unexpected error occurred during " + operation + ": " + message);
-            
-            // Log the error
-            Msg.error(this, "Unexpected error during " + operation, error);
-        }
-    }
-    
-    /**
-     * Create appropriate error actions based on the exception type
-     */
-    private List<ErrorAction> createErrorActions(APIProviderException ape, Runnable retryAction) {
-        List<ErrorAction> actions = new ArrayList<>();
-        
-        // Add retry action for retryable errors
-        if (ape.isRetryable() && retryAction != null) {
-            actions.add(ErrorAction.createRetryAction(retryAction));
-        }
-        
-        // Add settings action for configuration-related errors
-        if (ape.getCategory() == APIProviderException.ErrorCategory.AUTHENTICATION ||
-            ape.getCategory() == APIProviderException.ErrorCategory.CONFIGURATION ||
-            ape.getCategory() == APIProviderException.ErrorCategory.MODEL_ERROR) {
-            actions.add(ErrorAction.createSettingsAction(() -> openSettings()));
-        }
-        
-        // Add provider switching action for persistent errors
-        APIProviderLogger.ErrorStats stats = APIProviderLogger.getErrorStats(ape.getProviderName());
-        if (stats != null && stats.isFrequentErrorsDetected()) {
-            actions.add(ErrorAction.createSwitchProviderAction(() -> suggestProviderSwitch()));
-        }
-        
-        // Add copy error details action
-        actions.add(ErrorAction.createCopyErrorAction(ape.getTechnicalDetails()));
-        
-        // Add dismiss action
-        actions.add(ErrorAction.createDismissAction());
-        
-        return actions;
-    }
-    
-    /**
-     * Get the parent window for error dialogs
-     */
-    private java.awt.Window getParentWindow() {
-        try {
-            // Try to get the main Ghidra window
-            if (plugin != null && plugin.getTool() != null) {
-                return plugin.getTool().getToolFrame();
-            }
-        } catch (Exception e) {
-            // Ignore errors getting parent window
-        }
-        return null;
-    }
-    
-    /**
-     * Open the settings dialog
-     */
-    private void openSettings() {
-        try {
-            if (plugin != null) {
-                // This would typically call the plugin's settings dialog
-                // The actual implementation depends on how settings are accessed
-                Msg.showInfo(this, null, "Settings", 
-                    "Please go to Tools -> GhidrAssist Settings to configure API providers.");
-            }
-        } catch (Exception e) {
-            Msg.showError(this, null, "Error", "Could not open settings: " + e.getMessage());
-        }
-    }
-    
-    /**
-     * Suggest switching to a different provider
-     */
-    private void suggestProviderSwitch() {
-        try {
-            // Generate a simple suggestion message
-            StringBuilder suggestion = new StringBuilder();
-            suggestion.append("Current provider is experiencing frequent errors.\n\n");
-            suggestion.append("Consider switching to a different provider in Settings.\n\n");
-            suggestion.append("Provider Error Statistics:\n");
-            suggestion.append(APIProviderLogger.generateDiagnosticsReport());
-            
-            Msg.showInfo(this, null, "Provider Reliability", suggestion.toString());
-        } catch (Exception e) {
-            Msg.showError(this, null, "Error", "Could not generate provider statistics: " + e.getMessage());
         }
     }
 }

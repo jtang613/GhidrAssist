@@ -2,7 +2,11 @@ package ghidrassist.ui.tabs;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
+import ghidra.util.Msg;
 import ghidrassist.core.TabController;
+import ghidrassist.mcp.MCPManager;
 
 public class QueryTab extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -10,6 +14,7 @@ public class QueryTab extends JPanel {
     private JEditorPane responseTextPane;
     private JTextArea queryTextArea;
     private JCheckBox useRAGCheckBox;
+    private JCheckBox useMCPCheckBox;
     private JButton submitButton;
     private JButton clearButton;
     private static final String QUERY_HINT_TEXT = 
@@ -36,11 +41,16 @@ public class QueryTab extends JPanel {
         initializeComponents();
         layoutComponents();
         setupListeners();
+        setupMCPDetection();
     }
 
     private void initializeComponents() {
         useRAGCheckBox = new JCheckBox("Use RAG");
         useRAGCheckBox.setSelected(false);
+        
+        useMCPCheckBox = new JCheckBox("Use GhidraMCP");
+        useMCPCheckBox.setSelected(false);
+        useMCPCheckBox.setEnabled(false); // Disabled by default, enabled when MCP is detected
 
         responseTextPane = new JEditorPane();
         responseTextPane.setEditable(false);
@@ -56,7 +66,11 @@ public class QueryTab extends JPanel {
     }
 
     private void layoutComponents() {
-        add(useRAGCheckBox, BorderLayout.NORTH);
+        // Create panel for checkboxes
+        JPanel checkboxPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        checkboxPanel.add(useRAGCheckBox);
+        checkboxPanel.add(useMCPCheckBox);
+        add(checkboxPanel, BorderLayout.NORTH);
 
         JScrollPane responseScrollPane = new JScrollPane(responseTextPane);
         JScrollPane queryScrollPane = new JScrollPane(queryTextArea);
@@ -75,7 +89,8 @@ public class QueryTab extends JPanel {
     private void setupListeners() {
         submitButton.addActionListener(e -> controller.handleQuerySubmit(
             queryTextArea.getText(),
-            useRAGCheckBox.isSelected()
+            useRAGCheckBox.isSelected(),
+            useMCPCheckBox.isSelected()
         ));
 
         clearButton.addActionListener(e -> {
@@ -133,5 +148,62 @@ public class QueryTab extends JPanel {
     
     public void setSubmitButtonText(String text) {
         submitButton.setText(text);
+    }
+    
+    public void setMCPEnabled(boolean enabled) {
+        useMCPCheckBox.setEnabled(enabled);
+    }
+    
+    public boolean isMCPEnabled() {
+        return useMCPCheckBox.isEnabled();
+    }
+    
+    public boolean isMCPSelected() {
+        return useMCPCheckBox.isSelected();
+    }
+    
+    /**
+     * Setup MCP detection that checks for availability when tab becomes visible
+     */
+    private void setupMCPDetection() {
+        // Check MCP availability when component becomes visible
+        this.addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentShown(ComponentEvent e) {
+                checkMCPAvailability();
+            }
+        });
+        
+        // Also check when gaining focus
+        this.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusGained(java.awt.event.FocusEvent e) {
+                checkMCPAvailability();
+            }
+        });
+        
+        // Initial check
+        SwingUtilities.invokeLater(this::checkMCPAvailability);
+    }
+    
+    /**
+     * Check if MCP is available and update checkbox state
+     */
+    private void checkMCPAvailability() {
+        // Run in background to avoid blocking UI
+        SwingUtilities.invokeLater(() -> {
+            boolean wasEnabled = useMCPCheckBox.isEnabled();
+            boolean mcpAvailable = MCPManager.getInstance().detectAndConnect();
+            
+            useMCPCheckBox.setEnabled(mcpAvailable);
+            
+            // Log status change
+            if (mcpAvailable && !wasEnabled) {
+                Msg.info(this, "GhidraMCP detected and enabled: " + 
+                    MCPManager.getInstance().getStatusInfo());
+            } else if (!mcpAvailable && wasEnabled) {
+                Msg.info(this, "GhidraMCP no longer available");
+            }
+        });
     }
 }
