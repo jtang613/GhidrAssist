@@ -4,7 +4,7 @@ import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.core.QueryProcessor;
-import ghidrassist.mcp.MCPManager;
+import ghidrassist.mcp2.tools.MCPToolManager;
 
 /**
  * Service for handling custom queries and conversations.
@@ -59,21 +59,76 @@ public class QueryService {
         LlmApi llmApi = new LlmApi(config, plugin);
         
         // Use function calling with MCP tools if MCP is enabled and available
-        if (request.shouldUseMCP() && MCPManager.getInstance().isAvailable()) {
-            // Get MCP tools as function schemas
-            java.util.List<java.util.Map<String, Object>> mcpFunctions = 
-                MCPManager.getInstance().getToolsAsFunction();
+        if (request.shouldUseMCP()) {
+            MCPToolManager toolManager = MCPToolManager.getInstance();
             
-            if (!mcpFunctions.isEmpty()) {
-                // Create MCP-aware response handler
-                LlmApi.LlmResponseHandler mcpHandler = createMCPHandler(handler);
-                llmApi.sendRequestAsyncWithFunctions(request.getFullConversation(), 
-                    mcpFunctions, mcpHandler);
-                return;
+            // Initialize servers asynchronously if not already done
+            if (!toolManager.isInitialized()) {
+                // Start initialization in background and handle result asynchronously
+                toolManager.initializeServers()
+                    .thenRun(() -> {
+                        // Once initialized, execute the query with MCP tools
+                        try {
+                            executeMCPQuery(request, llmApi, toolManager, handler);
+                        } catch (Exception e) {
+                            ghidra.util.Msg.warn(this, "MCP query execution failed: " + e.getMessage());
+                            try {
+                                executeRegularQuery(request, llmApi, handler);
+                            } catch (Exception e2) {
+                                ghidra.util.Msg.error(this, "Failed to execute regular query: " + e2.getMessage());
+                                handler.onError(e2);
+                            }
+                        }
+                    })
+                    .exceptionally(throwable -> {
+                        ghidra.util.Msg.warn(this, "MCP initialization failed, falling back to regular query: " + throwable.getMessage());
+                        try {
+                            executeRegularQuery(request, llmApi, handler);
+                        } catch (Exception e) {
+                            ghidra.util.Msg.error(this, "Failed to execute regular query: " + e.getMessage());
+                            handler.onError(e);
+                        }
+                        return null;
+                    });
+                return; // Exit early, will continue asynchronously
+            } else {
+                // Already initialized, execute immediately
+                try {
+                    executeMCPQuery(request, llmApi, toolManager, handler);
+                    return;
+                } catch (Exception e) {
+                    ghidra.util.Msg.warn(this, "MCP query execution failed, falling back to regular query: " + e.getMessage());
+                }
             }
         }
         
         // Fall back to regular query execution
+        executeRegularQuery(request, llmApi, handler);
+    }
+    
+    /**
+     * Execute MCP-enabled query
+     */
+    private void executeMCPQuery(QueryRequest request, LlmApi llmApi, MCPToolManager toolManager, LlmApi.LlmResponseHandler handler) throws Exception {
+        // Get MCP tools as function schemas
+        java.util.List<java.util.Map<String, Object>> mcpFunctions = 
+            toolManager.getToolsAsFunction();
+        
+        if (!mcpFunctions.isEmpty()) {
+            // Create MCP-aware response handler
+            LlmApi.LlmResponseHandler mcpHandler = createMCPHandler(handler, toolManager);
+            llmApi.sendRequestAsyncWithFunctions(request.getFullConversation(), 
+                mcpFunctions, mcpHandler);
+        } else {
+            // No MCP tools available, fall back to regular query
+            executeRegularQuery(request, llmApi, handler);
+        }
+    }
+    
+    /**
+     * Execute regular query without MCP
+     */
+    private void executeRegularQuery(QueryRequest request, LlmApi llmApi, LlmApi.LlmResponseHandler handler) throws Exception {
         llmApi.sendRequestAsync(request.getFullConversation(), handler);
     }
     
@@ -108,7 +163,7 @@ public class QueryService {
     /**
      * Create MCP-aware response handler that can execute MCP tools
      */
-    private LlmApi.LlmResponseHandler createMCPHandler(LlmApi.LlmResponseHandler originalHandler) {
+    private LlmApi.LlmResponseHandler createMCPHandler(LlmApi.LlmResponseHandler originalHandler, MCPToolManager toolManager) {
         return new LlmApi.LlmResponseHandler() {
             @Override
             public void onStart() {
@@ -159,6 +214,7 @@ public class QueryService {
      * Handle response that contains MCP tool calls
      */
     private void handleMCPResponse(String response, LlmApi.LlmResponseHandler originalHandler) {
+        MCPToolManager toolManager = MCPToolManager.getInstance();
         try {
             String jsonStr = extractToolCallsJson(response);
             com.google.gson.JsonObject jsonObject = new com.google.gson.Gson().fromJson(jsonStr, com.google.gson.JsonObject.class);
@@ -170,14 +226,49 @@ public class QueryService {
             // Execute each tool call
             for (com.google.gson.JsonElement toolCall : toolCalls) {
                 com.google.gson.JsonObject toolObj = toolCall.getAsJsonObject();
-                String toolName = toolObj.get("name").getAsString();
-                com.google.gson.JsonObject arguments = toolObj.has("arguments") ? 
-                    toolObj.getAsJsonObject("arguments") : new com.google.gson.JsonObject();
+                
+                // Handle different provider formats
+                String toolName;
+                com.google.gson.JsonObject arguments;
+                
+                if (toolObj.has("function")) {
+                    // OpenAI format: {"function": {"name": "...", "arguments": "..."}}
+                    com.google.gson.JsonObject functionObj = toolObj.getAsJsonObject("function");
+                    toolName = functionObj.get("name").getAsString();
+                    
+                    // Arguments might be a string that needs parsing
+                    if (functionObj.has("arguments")) {
+                        com.google.gson.JsonElement argsElement = functionObj.get("arguments");
+                        if (argsElement.isJsonPrimitive() && argsElement.getAsJsonPrimitive().isString()) {
+                            // Parse string as JSON
+                            try {
+                                arguments = new com.google.gson.Gson().fromJson(argsElement.getAsString(), com.google.gson.JsonObject.class);
+                            } catch (Exception e) {
+                                arguments = new com.google.gson.JsonObject();
+                            }
+                        } else if (argsElement.isJsonObject()) {
+                            arguments = argsElement.getAsJsonObject();
+                        } else {
+                            arguments = new com.google.gson.JsonObject();
+                        }
+                    } else {
+                        arguments = new com.google.gson.JsonObject();
+                    }
+                } else if (toolObj.has("name")) {
+                    // Anthropic/direct format: {"name": "...", "arguments": {...}}
+                    toolName = toolObj.get("name").getAsString();
+                    arguments = toolObj.has("arguments") ? 
+                        toolObj.getAsJsonObject("arguments") : new com.google.gson.JsonObject();
+                } else {
+                    // Skip invalid tool calls
+                    ghidra.util.Msg.warn(this, "Skipping invalid tool call: " + toolObj);
+                    continue;
+                }
                 
                 toolResults.append("**").append(toolName).append(":**\n");
                 
                 // Execute MCP tool
-                MCPManager.getInstance().executeTool(toolName, arguments)
+                toolManager.executeTool(toolName, arguments)
                     .thenAccept(result -> {
                         String resultText = result.getResultText();
                         

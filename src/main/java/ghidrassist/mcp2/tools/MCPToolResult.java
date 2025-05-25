@@ -1,7 +1,8 @@
-package ghidrassist.mcp;
+package ghidrassist.mcp2.tools;
 
 /**
  * Result of an MCP tool execution.
+ * Similar to the original MCPToolResult but for MCP 2.0.
  */
 public class MCPToolResult {
     
