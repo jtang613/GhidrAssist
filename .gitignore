@@ -5,6 +5,7 @@ os/
 .gradle/
 .settings/
 .classpath
+.pydevproject
 ghidrassist_rlhf.db
 ghidrassist_analysis.db
 lucene/
