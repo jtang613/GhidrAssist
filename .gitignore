@@ -10,5 +10,7 @@ ghidrassist_rlhf.db
 ghidrassist_analysis.db
 lucene/
 node_modules/
+package.json
+package-lock.json
 CLAUDE.md
 *_PLAN.md
