@@ -240,6 +240,11 @@ public class TabController {
     // ==== Action Analysis Operations ====
     
     public void handleAnalyzeFunction(Map<String, JCheckBox> filterCheckBoxes) {
+        // Refresh MCP state before analyzing
+        if (queryTab != null) {
+            queryTab.refreshMCPState();
+        }
+        
         if (isQueryRunning) {
             cancelCurrentOperation();
             return;

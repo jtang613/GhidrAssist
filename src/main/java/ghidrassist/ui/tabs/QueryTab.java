@@ -7,6 +7,7 @@ import java.awt.event.ComponentEvent;
 import ghidra.util.Msg;
 import ghidrassist.core.TabController;
 import ghidrassist.mcp2.tools.MCPToolManager;
+import ghidrassist.mcp2.server.MCPServerRegistry;
 
 public class QueryTab extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -170,7 +171,7 @@ public class QueryTab extends JPanel {
         this.addComponentListener(new ComponentAdapter() {
             @Override
             public void componentShown(ComponentEvent e) {
-                checkMCPAvailability();
+                updateMCPCheckboxState();
             }
         });
         
@@ -178,57 +179,50 @@ public class QueryTab extends JPanel {
         this.addFocusListener(new java.awt.event.FocusAdapter() {
             @Override
             public void focusGained(java.awt.event.FocusEvent e) {
-                checkMCPAvailability();
+                updateMCPCheckboxState();
             }
         });
         
         // Initial check
-        SwingUtilities.invokeLater(this::checkMCPAvailability);
+        SwingUtilities.invokeLater(this::updateMCPCheckboxState);
     }
     
     /**
-     * Check if MCP is available and update checkbox state
-     * This method is completely non-blocking and runs asynchronously
+     * Update MCP checkbox state based on enabled server configuration
+     * Checks if any MCP servers are configured and enabled
      */
-    private void checkMCPAvailability() {
-        MCPToolManager toolManager = MCPToolManager.getInstance();
+    private void updateMCPCheckboxState() {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(this::updateMCPCheckboxState);
+            return;
+        }
         
-        // Check current state immediately (non-blocking)
-        boolean currentlyAvailable = toolManager.hasConnectedServers();
+        // Check if any MCP servers are enabled in configuration
+        MCPServerRegistry registry = MCPServerRegistry.getInstance();
+        boolean hasEnabledServers = !registry.getEnabledServers().isEmpty();
         
-        // Update UI with current state
-        SwingUtilities.invokeLater(() -> {
-            boolean wasEnabled = useMCPCheckBox.isEnabled();
-            useMCPCheckBox.setEnabled(currentlyAvailable);
-            
-            if (currentlyAvailable && !wasEnabled) {
-            }
-        });
+        boolean wasEnabled = useMCPCheckBox.isEnabled();
+        useMCPCheckBox.setEnabled(hasEnabledServers);
         
-        // If not initialized yet, start initialization asynchronously
-        if (!currentlyAvailable && !toolManager.isInitialized()) {
-            // Initialize in background - this is completely asynchronous
-            toolManager.initializeServers()
-                .thenRun(() -> {
-                    // Update UI when initialization completes
-                    SwingUtilities.invokeLater(() -> {
-                        boolean nowAvailable = toolManager.hasConnectedServers();
-                        boolean wasEnabled = useMCPCheckBox.isEnabled();
-                        
-                        useMCPCheckBox.setEnabled(nowAvailable);
-                        
-                        if (nowAvailable && !wasEnabled) {
-                        }
-                    });
-                })
-                .exceptionally(throwable -> {
-                    // Log initialization failure but don't block UI
-                    SwingUtilities.invokeLater(() -> {
-                        Msg.error(this, "MCP initialization failed: " + throwable.getMessage());
-                        useMCPCheckBox.setEnabled(false);
-                    });
-                    return null;
-                });
+        // If no servers enabled, also uncheck the box
+        if (!hasEnabledServers) {
+            useMCPCheckBox.setSelected(false);
+        }
+        
+        // Log state change for debugging
+        if (wasEnabled != hasEnabledServers) {
+            String state = hasEnabledServers ? "enabled" : "disabled";
+            int enabledCount = registry.getEnabledServers().size();
+            Msg.info(this, "MCP Tools checkbox " + state + " - enabled servers: " + enabledCount);
         }
     }
+    
+    /**
+     * Public method to update MCP checkbox state
+     * Called by controller when actions are triggered
+     */
+    public void refreshMCPState() {
+        updateMCPCheckboxState();
+    }
+    
 }
