@@ -57,7 +57,13 @@ public class QueryService {
         }
         
         LlmApi llmApi = new LlmApi(config, plugin);
-        
+        executeQuery(request, llmApi, handler);
+    }
+    
+    /**
+     * Execute a query request with provided LlmApi instance
+     */
+    public void executeQuery(QueryRequest request, LlmApi llmApi, LlmApi.LlmResponseHandler handler) throws Exception {
         // Use conversational tool calling with MCP tools if MCP is enabled and available
         if (request.shouldUseMCP()) {
             try {

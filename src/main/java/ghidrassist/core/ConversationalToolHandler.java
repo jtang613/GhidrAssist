@@ -2,6 +2,7 @@ package ghidrassist.core;
 
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.ChatMessage;
+import ghidrassist.apiprovider.exceptions.RateLimitException;
 import ghidrassist.mcp2.tools.MCPToolManager;
 import ghidrassist.mcp2.tools.MCPToolResult;
 import ghidra.util.Msg;
@@ -27,25 +28,30 @@ public class ConversationalToolHandler {
     private final ResponseProcessor responseProcessor;
     private final LlmApi.LlmResponseHandler userHandler;
     private final LlmErrorHandler errorHandler;
+    private final Runnable onCompletionCallback;
     
     private final List<ChatMessage> conversationHistory;
-    private final StringBuilder conversationOutput;
     private volatile boolean isConversationActive = false;
+    private volatile boolean isCancelled = false;
+    private int rateLimitRetries = 0;
+    private static final int MAX_RATE_LIMIT_RETRIES = 3;
+    private static final int MAX_CONVERSATION_HISTORY = 20; // Keep last 20 messages to prevent token overflow
     
     public ConversationalToolHandler(
             LlmApiClient apiClient,
             List<Map<String, Object>> functions,
             ResponseProcessor responseProcessor,
             LlmApi.LlmResponseHandler userHandler,
-            LlmErrorHandler errorHandler) {
+            LlmErrorHandler errorHandler,
+            Runnable onCompletionCallback) {
         
         this.apiClient = apiClient;
         this.availableFunctions = functions;
         this.responseProcessor = responseProcessor;
         this.userHandler = userHandler;
         this.errorHandler = errorHandler;
+        this.onCompletionCallback = onCompletionCallback;
         this.conversationHistory = new ArrayList<>();
-        this.conversationOutput = new StringBuilder();
     }
     
     /**
@@ -58,44 +64,125 @@ public class ConversationalToolHandler {
         }
         
         isConversationActive = true;
+        isCancelled = false; // Reset cancellation flag
         conversationHistory.clear();
-        conversationOutput.setLength(0);
+        rateLimitRetries = 0; // Reset retry counter
         
         // Add initial user message
         conversationHistory.addAll(apiClient.createFunctionMessages(userPrompt));
         
         // Start the conversation loop
         userHandler.onStart();
+        
+        // Provide user feedback about automatic rate limit handling
+        userHandler.onUpdate("🔄 Starting conversational tool calling (automatic retry on rate limits)...\n\n");
+        
         continueConversation();
+    }
+    
+    /**
+     * Cancel the ongoing conversation
+     */
+    public void cancel() {
+        isCancelled = true;
+        isConversationActive = false;
+        userHandler.onUpdate("\n❌ **Cancelled**\n");
+        userHandler.onComplete("Conversation cancelled");
+        
+        // Notify completion callback
+        if (onCompletionCallback != null) {
+            onCompletionCallback.run();
+        }
     }
     
     /**
      * Continue the conversation with the current message history
      */
     private void continueConversation() {
-        if (!isConversationActive) {
+        if (!isConversationActive || isCancelled) {
             return;
         }
         
         try {
+            // Trim conversation history to prevent token overflow
+            trimConversationHistory();
+            
             // Call LLM with current conversation history
             CompletableFuture.runAsync(() -> {
                 try {
+                    // Check cancellation before making API call
+                    if (isCancelled) {
+                        return;
+                    }
+                    
                     String fullResponse = apiClient.createChatCompletionWithFunctionsFullResponse(
                         conversationHistory, availableFunctions);
+                    
+                    // Check cancellation after API call
+                    if (isCancelled) {
+                        return;
+                    }
                     
                     // Parse the response to check for tool calls and finish_reason
                     handleLLMResponse(fullResponse);
                     
                 } catch (Exception e) {
-                    isConversationActive = false;
-                    userHandler.onError(e);
+                    // Handle rate limit errors with additional backoff and retry
+                    if (e instanceof ghidrassist.apiprovider.exceptions.RateLimitException ||
+                        e.getMessage().contains("rate limit") || 
+                        e.getMessage().contains("429")) {
+                        
+                        rateLimitRetries++;
+                        
+                        if (rateLimitRetries <= MAX_RATE_LIMIT_RETRIES) {
+                            Msg.warn(this, String.format("Rate limit exceeded during conversational tool calling (attempt %d/%d). Implementing additional backoff...", 
+                                rateLimitRetries, MAX_RATE_LIMIT_RETRIES));
+                            
+                            // Implement progressively longer backoff
+                            int backoffSeconds = 30 * rateLimitRetries; // 30s, 60s, 90s
+                            userHandler.onUpdate(String.format("⏳ Rate limit exceeded. Pausing for %d seconds...\n", 
+                                backoffSeconds));
+                            
+                            // Schedule retry after progressively longer delay
+                            CompletableFuture.delayedExecutor(backoffSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                                .execute(() -> {
+                                    if (isConversationActive && !isCancelled) {
+                                        userHandler.onUpdate("🔄 Resuming...\n");
+                                        continueConversation();
+                                    }
+                                });
+                        } else {
+                            // Too many rate limit retries - give up
+                            isConversationActive = false;
+                            userHandler.onUpdate("❌ Too many rate limit errors. Please try again later.\n");
+                            userHandler.onError(new Exception("Rate limit exceeded maximum retry attempts. Please try again later or reduce query complexity."));
+                            
+                            // Notify completion callback
+                            if (onCompletionCallback != null) {
+                                onCompletionCallback.run();
+                            }
+                        }
+                    } else {
+                        // Non-rate-limit errors stop the conversation
+                        isConversationActive = false;
+                        userHandler.onError(e);
+                        
+                        // Notify completion callback
+                        if (onCompletionCallback != null) {
+                            onCompletionCallback.run();
+                        }
+                    }
                 }
             });
             
         } catch (Exception e) {
             isConversationActive = false;
             userHandler.onError(e);
+            
+            // Notify completion callback
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
         }
     }
     
@@ -104,7 +191,12 @@ public class ConversationalToolHandler {
      */
     private void handleLLMResponse(String rawResponse) {
         try {
-            Msg.info(this, "Raw LLM response: " + (rawResponse != null ? rawResponse : "NULL"));
+            // Check cancellation before processing response
+            if (isCancelled) {
+                return;
+            }
+            
+            Msg.debug(this, "Raw LLM response: " + (rawResponse != null ? rawResponse : "NULL"));
             
             // Validate response is not null or empty
             if (rawResponse == null || rawResponse.trim().isEmpty()) {
@@ -127,7 +219,7 @@ public class ConversationalToolHandler {
             String finishReason = extractFinishReason(responseObj);
             JsonObject assistantMessage = extractAssistantMessage(responseObj);
             
-            Msg.info(this, "LLM finish_reason: " + finishReason);
+            Msg.debug(this, "LLM finish_reason: " + finishReason);
             
             if ("tool_calls".equals(finishReason) || "tool_use".equals(finishReason)) {
                 handleToolCalls(assistantMessage, rawResponse);
@@ -136,7 +228,7 @@ public class ConversationalToolHandler {
                 handleConversationEnd(assistantMessage);
             } else {
                 // Other finish_reason types (length, content_filter, etc.)
-                Msg.info(this, "LLM finished with reason: " + finishReason + ", ending conversation");
+                Msg.debug(this, "LLM finished with reason: " + finishReason + ", ending conversation");
                 handleConversationEnd(assistantMessage);
             }
             
@@ -145,6 +237,11 @@ public class ConversationalToolHandler {
             Msg.error(this, "Response content: " + (rawResponse != null ? rawResponse.substring(0, Math.min(500, rawResponse.length())) : "NULL"));
             isConversationActive = false;
             userHandler.onError(e);
+            
+            // Notify completion callback
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
         }
     }
     
@@ -268,8 +365,7 @@ public class ConversationalToolHandler {
             }
             
             // Update UI with tool calling status
-            String toolExecutionHeader = "\n\n**🔧 Executing Tools...**\n";
-            conversationOutput.append(toolExecutionHeader);
+            String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
             javax.swing.SwingUtilities.invokeLater(() -> {
                 userHandler.onUpdate(toolExecutionHeader);
             });
@@ -281,6 +377,11 @@ public class ConversationalToolHandler {
             Msg.error(this, "Error handling tool calls: " + e.getMessage());
             isConversationActive = false;
             userHandler.onError(e);
+            
+            // Notify completion callback
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
         }
     }
     
@@ -288,30 +389,65 @@ public class ConversationalToolHandler {
      * Execute tools sequentially and collect results
      */
     private void executeToolsSequentially(JsonArray toolCalls, int index, List<JsonObject> toolResults) {
+        // Check cancellation before processing next tool
+        if (isCancelled) {
+            return;
+        }
+        
         if (index >= toolCalls.size()) {
             // All tools executed, add results to conversation and continue
             addToolResultsToConversation(toolResults);
-            continueConversation();
+            
+            // Show completion message
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                userHandler.onUpdate("✅ All tools completed. Processing response...\n\n");
+            });
+            
+            // Add a small delay before making the next API call to avoid rapid sequential requests
+            // that could trigger rate limits
+            CompletableFuture.delayedExecutor(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .execute(() -> {
+                    if (!isCancelled) {
+                        continueConversation();
+                    }
+                });
             return;
         }
         
         JsonObject toolCall = toolCalls.get(index).getAsJsonObject();
         executeSingleTool(toolCall)
             .thenAccept(result -> {
-                toolResults.add(result);
-                executeToolsSequentially(toolCalls, index + 1, toolResults);
+                if (!isCancelled) {
+                    toolResults.add(result);
+                    
+                    // Add small delay between tool executions to be gentle on API rate limits
+                    CompletableFuture.delayedExecutor(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        .execute(() -> {
+                            if (!isCancelled) {
+                                executeToolsSequentially(toolCalls, index + 1, toolResults);
+                            }
+                        });
+                }
             })
             .exceptionally(throwable -> {
-                Msg.error(this, "Tool execution failed: " + throwable.getMessage());
-                
-                // Create error result and continue
-                JsonObject errorResult = new JsonObject();
-                errorResult.addProperty("tool_call_id", extractToolCallId(toolCall));
-                errorResult.addProperty("role", "tool");
-                errorResult.addProperty("content", "Error: " + throwable.getMessage());
-                toolResults.add(errorResult);
-                
-                executeToolsSequentially(toolCalls, index + 1, toolResults);
+                if (!isCancelled) {
+                    Msg.error(this, "Tool execution failed: " + throwable.getMessage());
+                    
+                    // Create error result and continue
+                    JsonObject errorResult = new JsonObject();
+                    errorResult.addProperty("tool_call_id", extractToolCallId(toolCall));
+                    errorResult.addProperty("role", "tool");
+                    errorResult.addProperty("content", "Error: " + throwable.getMessage());
+                    toolResults.add(errorResult);
+                    
+                    // Add same delay for error case to maintain consistent pacing
+                    CompletableFuture.delayedExecutor(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        .execute(() -> {
+                            if (!isCancelled) {
+                                executeToolsSequentially(toolCalls, index + 1, toolResults);
+                            }
+                        });
+                }
                 return null;
             });
     }
@@ -321,13 +457,17 @@ public class ConversationalToolHandler {
      */
     private CompletableFuture<JsonObject> executeSingleTool(JsonObject toolCall) {
         try {
+            // Check cancellation before executing tool
+            if (isCancelled) {
+                return CompletableFuture.failedFuture(new Exception("Execution cancelled"));
+            }
+            
             String toolName = extractToolName(toolCall);
             JsonObject arguments = extractToolArguments(toolCall);
             String toolCallId = extractToolCallId(toolCall);
             
             // Update UI with current tool execution
-            String executingMessage = "**Executing: " + toolName + "**\n";
-            conversationOutput.append(executingMessage);
+            String executingMessage = "🛠️ Tool call in progress: *" + toolName + "*\n";
             javax.swing.SwingUtilities.invokeLater(() -> {
                 userHandler.onUpdate(executingMessage);
             });
@@ -336,13 +476,23 @@ public class ConversationalToolHandler {
             MCPToolManager toolManager = MCPToolManager.getInstance();
             return toolManager.executeTool(toolName, arguments)
                 .thenApply(mcpResult -> {
-                    // Update UI with tool result
-                    String resultText = mcpResult.getResultText();
-                    String resultMessage = "**" + toolName + " Result:**\n" + resultText + "\n\n";
-                    conversationOutput.append(resultMessage);
+                    // Check cancellation before processing result
+                    if (isCancelled) {
+                        throw new RuntimeException("Execution cancelled");
+                    }
+                    
+                    // Debug logging for development (keep for troubleshooting)
+                    Msg.debug(this, String.format("MCP Tool '%s' completed: success=%s, length=%d", 
+                        toolName, mcpResult.isSuccess(), 
+                        mcpResult.getResultText() != null ? mcpResult.getResultText().length() : 0));
+                    
+                    // Don't show verbose tool results to user - they'll be included in LLM response
+                    String completionMessage = "✓ Completed: *" + toolName + "*\n";
                     
                     javax.swing.SwingUtilities.invokeLater(() -> {
-                        userHandler.onUpdate(resultMessage);
+                        if (!isCancelled) {
+                            userHandler.onUpdate(completionMessage);
+                        }
                     });
                     
                     // Create tool result for conversation
@@ -412,18 +562,18 @@ public class ConversationalToolHandler {
             
             String filteredContent = responseProcessor.filterThinkBlocks(content);
             
-            // Combine the accumulated conversation output with the final response
-            String completeResponse;
-            if (conversationOutput.length() > 0) {
-                completeResponse = conversationOutput.toString() + "\n" + filteredContent;
-            } else {
-                completeResponse = filteredContent;
+            // Debug logging for final response
+            Msg.info(this, String.format("Final LLM response: length=%d", 
+                filteredContent != null ? filteredContent.length() : 0));
+            if (filteredContent != null && filteredContent.length() > 0) {
+                Msg.info(this, "Final response preview: " + 
+                    (filteredContent.length() > 200 ? filteredContent.substring(0, 200) + "..." : filteredContent));
             }
             
-            // Update UI with final response that includes all tool execution history
+            // Send only the final LLM response (tool execution messages were already sent individually)
             javax.swing.SwingUtilities.invokeLater(() -> {
-                userHandler.onUpdate(completeResponse);
-                userHandler.onComplete(completeResponse);
+                userHandler.onUpdate(filteredContent);
+                userHandler.onComplete(filteredContent);
             });
             
         } catch (Exception e) {
@@ -433,6 +583,11 @@ public class ConversationalToolHandler {
                 userHandler.onUpdate("I encountered an error processing the response. Please try again.");
                 userHandler.onComplete("Error processing response");
             });
+        }
+        
+        // Notify completion callback
+        if (onCompletionCallback != null) {
+            onCompletionCallback.run();
         }
     }
     
@@ -486,5 +641,82 @@ public class ConversationalToolHandler {
         }
         // Generate a fallback ID
         return "call_" + System.currentTimeMillis();
+    }
+    
+    /**
+     * Trim conversation history to prevent token overflow
+     * Keeps the first message and ensures tool call/result pairs stay together
+     */
+    private void trimConversationHistory() {
+        if (conversationHistory.size() <= MAX_CONVERSATION_HISTORY) {
+            return; // No trimming needed
+        }
+        
+        List<ChatMessage> trimmedHistory = new ArrayList<>();
+        
+        // Always keep the first message (initial user prompt)
+        if (!conversationHistory.isEmpty()) {
+            trimmedHistory.add(conversationHistory.get(0));
+        }
+        
+        // Find a safe cutoff point that doesn't break tool call/result pairs
+        int safeStartIndex = findSafeTrimPoint();
+        
+        // Add messages from safe point to end
+        for (int i = safeStartIndex; i < conversationHistory.size(); i++) {
+            trimmedHistory.add(conversationHistory.get(i));
+        }
+        
+        // Replace conversation history
+        conversationHistory.clear();
+        conversationHistory.addAll(trimmedHistory);
+        
+        Msg.info(this, String.format("Trimmed conversation history to %d messages (safe tool-call trimming)", 
+            conversationHistory.size()));
+    }
+    
+    /**
+     * Find a safe point to start trimming that doesn't break tool call/result pairs
+     */
+    private int findSafeTrimPoint() {
+        int targetSize = MAX_CONVERSATION_HISTORY - 1; // -1 for first message we always keep
+        int startFromEnd = Math.min(targetSize, conversationHistory.size() - 1);
+        
+        // Start from desired point and look backwards for a safe boundary
+        for (int lookback = 0; lookback < startFromEnd; lookback++) {
+            int candidateIndex = conversationHistory.size() - startFromEnd + lookback;
+            
+            // Check if this is a safe cut point (not in middle of tool call/result sequence)
+            if (isSafeTrimPoint(candidateIndex)) {
+                return candidateIndex;
+            }
+        }
+        
+        // Fallback: keep last half of conversation
+        return Math.max(1, conversationHistory.size() / 2);
+    }
+    
+    /**
+     * Check if we can safely trim at this point without breaking tool call/result pairs
+     */
+    private boolean isSafeTrimPoint(int index) {
+        if (index <= 0 || index >= conversationHistory.size()) {
+            return false;
+        }
+        
+        ChatMessage prevMessage = conversationHistory.get(index - 1);
+        ChatMessage currentMessage = conversationHistory.get(index);
+        
+        // Don't trim if previous message has tool calls (next messages might be tool results)
+        if (prevMessage.getToolCalls() != null && prevMessage.getToolCalls().size() > 0) {
+            return false;
+        }
+        
+        // Don't trim if current message is a tool result (it needs its tool call)
+        if (ChatMessage.ChatMessageRole.TOOL.equals(currentMessage.getRole())) {
+            return false;
+        }
+        
+        return true;
     }
 }
