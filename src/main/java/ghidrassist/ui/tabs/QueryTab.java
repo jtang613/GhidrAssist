@@ -6,7 +6,7 @@ import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import ghidra.util.Msg;
 import ghidrassist.core.TabController;
-import ghidrassist.mcp.MCPManager;
+import ghidrassist.mcp2.tools.MCPToolManager;
 
 public class QueryTab extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -48,7 +48,7 @@ public class QueryTab extends JPanel {
         useRAGCheckBox = new JCheckBox("Use RAG");
         useRAGCheckBox.setSelected(false);
         
-        useMCPCheckBox = new JCheckBox("Use GhidraMCP");
+        useMCPCheckBox = new JCheckBox("Use MCP Tools");
         useMCPCheckBox.setSelected(false);
         useMCPCheckBox.setEnabled(false); // Disabled by default, enabled when MCP is detected
 
@@ -188,22 +188,49 @@ public class QueryTab extends JPanel {
     
     /**
      * Check if MCP is available and update checkbox state
+     * This method is completely non-blocking and runs asynchronously
      */
     private void checkMCPAvailability() {
-        // Run in background to avoid blocking UI
+        MCPToolManager toolManager = MCPToolManager.getInstance();
+        
+        // Check current state immediately (non-blocking)
+        boolean currentlyAvailable = toolManager.hasConnectedServers();
+        
+        // Update UI with current state
         SwingUtilities.invokeLater(() -> {
             boolean wasEnabled = useMCPCheckBox.isEnabled();
-            boolean mcpAvailable = MCPManager.getInstance().detectAndConnect();
+            useMCPCheckBox.setEnabled(currentlyAvailable);
             
-            useMCPCheckBox.setEnabled(mcpAvailable);
-            
-            // Log status change
-            if (mcpAvailable && !wasEnabled) {
-                Msg.info(this, "GhidraMCP detected and enabled: " + 
-                    MCPManager.getInstance().getStatusInfo());
-            } else if (!mcpAvailable && wasEnabled) {
-                Msg.info(this, "GhidraMCP no longer available");
+            if (currentlyAvailable && !wasEnabled) {
+                Msg.info(this, "MCP tools available: " + toolManager.getStatusInfo());
             }
         });
+        
+        // If not initialized yet, start initialization asynchronously
+        if (!currentlyAvailable && !toolManager.isInitialized()) {
+            // Initialize in background - this is completely asynchronous
+            toolManager.initializeServers()
+                .thenRun(() -> {
+                    // Update UI when initialization completes
+                    SwingUtilities.invokeLater(() -> {
+                        boolean nowAvailable = toolManager.hasConnectedServers();
+                        boolean wasEnabled = useMCPCheckBox.isEnabled();
+                        
+                        useMCPCheckBox.setEnabled(nowAvailable);
+                        
+                        if (nowAvailable && !wasEnabled) {
+                            Msg.info(this, "MCP tools available: " + toolManager.getStatusInfo());
+                        }
+                    });
+                })
+                .exceptionally(throwable -> {
+                    // Log initialization failure but don't block UI
+                    SwingUtilities.invokeLater(() -> {
+                        Msg.info(this, "MCP initialization failed: " + throwable.getMessage());
+                        useMCPCheckBox.setEnabled(false);
+                    });
+                    return null;
+                });
+        }
     }
 }

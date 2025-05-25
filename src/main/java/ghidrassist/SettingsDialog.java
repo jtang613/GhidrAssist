@@ -4,6 +4,7 @@ import docking.DialogComponentProvider;
 import ghidra.framework.preferences.Preferences;
 import ghidrassist.apiprovider.APIProvider;
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.ui.tabs.MCPServersTab;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
@@ -82,7 +83,30 @@ public class SettingsDialog extends DialogComponentProvider {
         apiTimeoutPanel.add(apiTimeoutLabel);
         apiTimeoutPanel.add(apiTimeoutField);
         
-        // Initialize the UI components
+        // Create tabbed pane for settings
+        JTabbedPane tabbedPane = new JTabbedPane();
+        
+        // API Providers Tab
+        JPanel apiProvidersTab = createAPIProvidersTab();
+        tabbedPane.addTab("API Providers", apiProvidersTab);
+        
+        // MCP Servers Tab
+        MCPServersTab mcpServersTab = new MCPServersTab();
+        tabbedPane.addTab("MCP Servers", mcpServersTab);
+        
+        // General Settings Tab
+        JPanel generalTab = createGeneralSettingsTab();
+        tabbedPane.addTab("General", generalTab);
+
+        addWorkPanel(tabbedPane);
+
+        addOKButton();
+        addCancelButton();
+
+        setRememberSize(false);
+    }
+    
+    private JPanel createAPIProvidersTab() {
         JPanel panel = new JPanel(new BorderLayout());
 
         // Create the table
@@ -90,7 +114,7 @@ public class SettingsDialog extends DialogComponentProvider {
         tableModel = new DefaultTableModel(columnNames, 0) {
             private static final long serialVersionUID = 1L;
 
-			@Override
+            @Override
             public Class<?> getColumnClass(int column) {
                 // Return Boolean.class for the Disable TLS Verify column
                 return column == 5 ? Boolean.class : String.class;
@@ -103,7 +127,6 @@ public class SettingsDialog extends DialogComponentProvider {
         };
         table = new JTable(tableModel);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-
 
         // Populate the table model with the data
         for (APIProviderConfig provider : apiProviders) {
@@ -137,7 +160,7 @@ public class SettingsDialog extends DialogComponentProvider {
         buttonPanel.add(editButton);
         buttonPanel.add(deleteButton);
 
-     // Create the active provider combo box
+        // Create the active provider combo box
         activeProviderComboBox = new JComboBox<>();
         for (APIProviderConfig provider : apiProviders) {
             activeProviderComboBox.addItem(provider.getName());
@@ -155,11 +178,22 @@ public class SettingsDialog extends DialogComponentProvider {
         activeProviderPanel.add(new APITestPanel(plugin));
         activeProviderPanel.add(Box.createHorizontalGlue()); // This will push everything to the left
 
+        // Add components to the panel
+        panel.add(activeProviderPanel, BorderLayout.NORTH);
+        panel.add(tableScrollPane, BorderLayout.CENTER);
+        panel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        return panel;
+    }
+    
+    private JPanel createGeneralSettingsTab() {
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        
         // Create the RLHF database path components
         JLabel rlhfDbPathLabel = new JLabel("RLHF Database Path:");
-        rlhfDbPathField = new JTextField(rlhfDbPath, 20);
+        rlhfDbPathField = new JTextField(Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db"), 20);
         rlhfDbBrowseButton = new JButton("Browse...");
-
         rlhfDbBrowseButton.addActionListener(e -> onBrowseRLHFDbPath());
 
         JPanel rlhfDbPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -167,11 +201,23 @@ public class SettingsDialog extends DialogComponentProvider {
         rlhfDbPanel.add(rlhfDbPathField);
         rlhfDbPanel.add(rlhfDbBrowseButton);
 
+        // Create the Analysis database path components
+        String analysisDbPath = Preferences.getProperty("GhidrAssist.AnalysisDBPath", "ghidrassist_analysis.db");
+        JLabel analysisDbPathLabel = new JLabel("Analysis Database Path:");
+        analysisDbPathField = new JTextField(analysisDbPath, 20);
+        analysisDbBrowseButton = new JButton("Browse...");
+        analysisDbBrowseButton.addActionListener(e -> onBrowseAnalysisDbPath());
+
+        JPanel analysisDbPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        analysisDbPanel.add(analysisDbPathLabel);
+        analysisDbPanel.add(analysisDbPathField);
+        analysisDbPanel.add(analysisDbBrowseButton);
+
         // Create the Lucene index path components
+        String luceneIndexPath = Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene");
         JLabel luceneIndexPathLabel = new JLabel("Lucene Index Path:");
         luceneIndexPathField = new JTextField(luceneIndexPath, 20);
         luceneIndexBrowseButton = new JButton("Browse...");
-
         luceneIndexBrowseButton.addActionListener(e -> onBrowseLuceneIndexPath());
 
         JPanel luceneIndexPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -179,26 +225,21 @@ public class SettingsDialog extends DialogComponentProvider {
         luceneIndexPanel.add(luceneIndexPathField);
         luceneIndexPanel.add(luceneIndexBrowseButton);
         
-        // Create a panel to hold the active provider panel and RLHF database panel
-        JPanel topPanel = new JPanel();
-        topPanel.setLayout(new BoxLayout(topPanel, BoxLayout.Y_AXIS));
-        topPanel.add(activeProviderPanel);
-        topPanel.add(rlhfDbPanel);
-        topPanel.add(analysisDbPanel);
-        topPanel.add(luceneIndexPanel);
-        topPanel.add(apiTimeoutPanel);
-
-        // Add components to the panel
-        panel.add(topPanel, BorderLayout.NORTH);
-        panel.add(tableScrollPane, BorderLayout.CENTER);
-        panel.add(buttonPanel, BorderLayout.SOUTH);
-
-        addWorkPanel(panel);
-
-        addOKButton();
-        addCancelButton();
-
-        setRememberSize(false);
+        // Load the API timeout
+        String apiTimeout = Preferences.getProperty("GhidrAssist.APITimeout", "120");
+        JLabel apiTimeoutLabel = new JLabel("API Timeout (seconds):");
+        apiTimeoutField = new JTextField(apiTimeout, 5);
+        
+        JPanel apiTimeoutPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        apiTimeoutPanel.add(apiTimeoutLabel);
+        apiTimeoutPanel.add(apiTimeoutField);
+        
+        panel.add(rlhfDbPanel);
+        panel.add(analysisDbPanel);
+        panel.add(luceneIndexPanel);
+        panel.add(apiTimeoutPanel);
+        
+        return panel;
     }
 
     private void onBrowseLuceneIndexPath() {
