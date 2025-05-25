@@ -43,6 +43,9 @@ public class TabController {
     private final GhidrAssistPlugin plugin;
     private final MarkdownHelper markdownHelper;
     
+    // Shared LLM API instance for cancellation
+    private volatile LlmApi currentLlmApi;
+    
     // UI state
     private volatile boolean isQueryRunning;
     
@@ -222,13 +225,16 @@ public class TabController {
                     
                     feedbackService.cacheLastInteraction(request.getProcessedQuery(), null);
                     
-                    queryService.executeQuery(request, createConversationHandler());
+                    // Use shared LlmApi instance for cancellation support
+                    LlmApi llmApi = getCurrentLlmApi();
+                    queryService.executeQuery(request, llmApi, createConversationHandler());
 
                 } catch (Exception e) {
                     SwingUtilities.invokeLater(() -> {
                         Msg.showError(getClass(), queryTab, "Error", 
                             "Failed to perform query: " + e.getMessage());
                         setUIState(false, "Submit", null);
+                        currentLlmApi = null; // Clear on error
                     });
                 }
             }
@@ -441,13 +447,24 @@ public class TabController {
 
     // ==== Private Helper Methods ====
     
+    private LlmApi getCurrentLlmApi() throws Exception {
+        APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
+        if (config == null) {
+            throw new Exception("No API provider configured.");
+        }
+        
+        // Create new instance for this operation
+        currentLlmApi = new LlmApi(config, plugin);
+        return currentLlmApi;
+    }
+    
     private void cancelCurrentOperation() {
         setUIState(false, null, null);
         
-        APIProviderConfig config = GhidrAssistPlugin.getCurrentProviderConfig();
-        if (config != null) {
-            LlmApi llmApi = new LlmApi(config, plugin);
-            llmApi.cancelCurrentRequest();
+        // Cancel the current LLM API instance if it exists
+        if (currentLlmApi != null) {
+            currentLlmApi.cancelCurrentRequest();
+            currentLlmApi = null;
         }
         
         actionAnalysisService.cancelAnalysis();
@@ -545,14 +562,12 @@ public class TabController {
     
     private LlmApi.LlmResponseHandler createConversationHandler() {
         return new LlmApi.LlmResponseHandler() {
-            private final StringBuilder streamBuffer = new StringBuilder();
-            private int lastProcessedLength = 0;
+            private final StringBuilder responseBuffer = new StringBuilder();
 
             @Override
             public void onStart() {
                 SwingUtilities.invokeLater(() -> {
-                    streamBuffer.setLength(0);
-                    lastProcessedLength = 0;
+                    responseBuffer.setLength(0);
                     queryTab.setResponseText("Processing...");
                 });
             }
@@ -560,17 +575,16 @@ public class TabController {
             @Override
             public void onUpdate(String partialResponse) {
                 SwingUtilities.invokeLater(() -> {
-                    if (partialResponse.length() > lastProcessedLength) {
-                        String newContent = partialResponse.substring(lastProcessedLength);
-                        streamBuffer.append(newContent);
-                        lastProcessedLength = partialResponse.length();
-                        
-                        String fullConversation = queryService.getConversationHistory() + 
-                            "**Assistant**:\n" + streamBuffer.toString();
-                        
-                        String html = markdownHelper.markdownToHtml(fullConversation);
-                        queryTab.appendToResponse(html);
-                    }
+                    // For conversational tool calling, partialResponse contains incremental messages
+                    // We need to accumulate them properly
+                    responseBuffer.append(partialResponse);
+                    
+                    // Show conversation history + current assistant response
+                    String fullConversation = queryService.getConversationHistory() + 
+                        "**Assistant**:\n" + responseBuffer.toString();
+                    
+                    String html = markdownHelper.markdownToHtml(fullConversation);
+                    queryTab.setResponseText(html);
                 });
             }
 
@@ -583,6 +597,7 @@ public class TabController {
                     String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
                     queryTab.setResponseText(html);
                     setUIState(false, "Submit", null);
+                    currentLlmApi = null; // Clear after completion
                 });
             }
 
@@ -593,6 +608,7 @@ public class TabController {
                     String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
                     queryTab.setResponseText(html);
                     setUIState(false, "Submit", null);
+                    currentLlmApi = null; // Clear after error
                 });
             }
 

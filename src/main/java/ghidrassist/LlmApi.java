@@ -22,6 +22,7 @@ public class LlmApi {
     private final ResponseProcessor responseProcessor;
     private final LlmTaskExecutor taskExecutor;
     private final LlmErrorHandler errorHandler;
+    private volatile ConversationalToolHandler activeConversationalHandler;
     
     public LlmApi(APIProviderConfig config, GhidrAssistPlugin plugin) {
         this.apiClient = new LlmApiClient(config, plugin);
@@ -98,9 +99,17 @@ public class LlmApi {
             return;
         }
 
+        // Create completion callback to clear reference
+        Runnable onCompletion = () -> {
+            activeConversationalHandler = null;
+        };
+        
         // Create enhanced response handler for conversational tool calling
         ConversationalToolHandler toolHandler = new ConversationalToolHandler(
-            apiClient, functions, responseProcessor, responseHandler, errorHandler);
+            apiClient, functions, responseProcessor, responseHandler, errorHandler, onCompletion);
+        
+        // Store reference for cancellation
+        activeConversationalHandler = toolHandler;
         
         // Start the conversation
         toolHandler.startConversation(prompt);
@@ -157,6 +166,13 @@ public class LlmApi {
      * Cancel the current request
      */
     public void cancelCurrentRequest() {
+        // Cancel conversational tool handler if active
+        if (activeConversationalHandler != null) {
+            activeConversationalHandler.cancel();
+            activeConversationalHandler = null;
+        }
+        
+        // Cancel regular task executor
         taskExecutor.cancelCurrentRequest();
     }
 
