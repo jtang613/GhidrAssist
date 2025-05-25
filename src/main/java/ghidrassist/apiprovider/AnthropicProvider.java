@@ -172,41 +172,151 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
     }
 
     @Override
-    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
-        // Create a system message that instructs Claude about the available functions
-        StringBuilder systemMessage = new StringBuilder("You can call these functions:\n");
+    public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
+        // Build payload with native Anthropic tools support
+        JsonObject payload = buildMessagesPayload(messages, false);
+        
+        // Convert OpenAI function format to Anthropic tools format
+        JsonArray anthropicTools = new JsonArray();
         for (Map<String, Object> tool : functions) {
-        	@SuppressWarnings("unchecked")
-			Map<String, Object> function = (Map<String, Object>) tool.get("function");
-            systemMessage.append("- ").append(function.get("name")).append(": ")
-                        .append(function.get("description")).append("\n");
+            Map<String, Object> function = (Map<String, Object>) tool.get("function");
             
-            @SuppressWarnings("unchecked")
+            JsonObject anthropicTool = new JsonObject();
+            anthropicTool.addProperty("name", (String) function.get("name"));
+            anthropicTool.addProperty("description", (String) function.get("description"));
+            
+            // Convert parameters schema to input_schema
             Map<String, Object> parameters = (Map<String, Object>) function.get("parameters");
-            if (parameters != null && parameters.containsKey("properties")) {
-                systemMessage.append("  Parameters:\n");
-                @SuppressWarnings("unchecked")
-                Map<String, Object> properties = (Map<String, Object>) parameters.get("properties");
-                for (Map.Entry<String, Object> property : properties.entrySet()) {
-                    @SuppressWarnings("unchecked")
-                    Map<String, Object> propertyDetails = (Map<String, Object>) property.getValue();
-                    systemMessage.append("  - ").append(property.getKey())
-                                .append(" (").append(propertyDetails.get("type")).append("): ")
-                                .append(propertyDetails.get("description")).append("\n");
+            if (parameters != null) {
+                anthropicTool.add("input_schema", gson.toJsonTree(parameters));
+            }
+            
+            anthropicTools.add(anthropicTool);
+        }
+        
+        payload.add("tools", anthropicTools);
+
+        Request request = new Request.Builder()
+            .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
+            JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
+            
+            // Convert Anthropic response to OpenAI format
+            JsonObject fullResponse = new JsonObject();
+            JsonArray choices = new JsonArray();
+            JsonObject choice = new JsonObject();
+            JsonObject message = new JsonObject();
+            
+            message.addProperty("role", "assistant");
+            
+            // Parse Anthropic's content array for tool_use blocks
+            String finishReason = "stop";
+            JsonArray toolCalls = null;
+            StringBuilder textContent = new StringBuilder();
+            
+            if (responseObj.has("content")) {
+                JsonArray contentArray = responseObj.getAsJsonArray("content");
+                
+                for (JsonElement contentElement : contentArray) {
+                    JsonObject contentBlock = contentElement.getAsJsonObject();
+                    String type = contentBlock.get("type").getAsString();
+                    
+                    if ("tool_use".equals(type)) {
+                        // Convert Anthropic tool_use to OpenAI tool_calls format
+                        if (toolCalls == null) {
+                            toolCalls = new JsonArray();
+                            finishReason = "tool_calls";
+                        }
+                        
+                        JsonObject toolCall = new JsonObject();
+                        toolCall.addProperty("id", contentBlock.get("id").getAsString());
+                        toolCall.addProperty("type", "function");
+                        
+                        JsonObject function = new JsonObject();
+                        function.addProperty("name", contentBlock.get("name").getAsString());
+                        function.addProperty("arguments", gson.toJson(contentBlock.get("input")));
+                        toolCall.add("function", function);
+                        
+                        toolCalls.add(toolCall);
+                        
+                    } else if ("text".equals(type)) {
+                        // Collect text content
+                        if (contentBlock.has("text")) {
+                            textContent.append(contentBlock.get("text").getAsString());
+                        }
+                    }
                 }
             }
+            
+            // Set message content based on what we found
+            if (toolCalls != null) {
+                message.add("tool_calls", toolCalls);
+                // Include any text content alongside tool calls
+                if (textContent.length() > 0) {
+                    message.addProperty("content", textContent.toString());
+                }
+            } else {
+                message.addProperty("content", textContent.toString());
+            }
+            
+            // Check stop_reason from Anthropic response
+            if (responseObj.has("stop_reason")) {
+                String anthropicStopReason = responseObj.get("stop_reason").getAsString();
+                if ("tool_use".equals(anthropicStopReason)) {
+                    finishReason = "tool_calls";
+                } else {
+                    finishReason = "stop";
+                }
+            }
+            
+            choice.add("message", message);
+            choice.addProperty("finish_reason", finishReason);
+            choice.addProperty("index", 0);
+            choices.add(choice);
+            
+            fullResponse.add("choices", choices);
+            fullResponse.addProperty("id", "chatcmpl-anthropic-" + System.currentTimeMillis());
+            fullResponse.addProperty("object", "chat.completion");
+            fullResponse.addProperty("created", System.currentTimeMillis() / 1000);
+            fullResponse.addProperty("model", this.model);
+            
+            return gson.toJson(fullResponse);
+            
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctionsFullResponse");
         }
-        systemMessage.append("\nTo call a function, respond with JSON in this format:\n")
-                    .append("{\n  \"name\": \"function_name\",\n  \"arguments\": {\n    \"param1\": \"value1\"\n  }\n}\n");
+    }
+    
 
-        // Add system message to start of messages list
-        List<ChatMessage> augmentedMessages = new ArrayList<>();
-        augmentedMessages.add(new ChatMessage(ChatMessage.ChatMessageRole.SYSTEM, systemMessage.toString()));
-        augmentedMessages.addAll(messages);
-
-        // Request JSON response format
-        JsonObject payload = buildMessagesPayload(augmentedMessages, false);
-        //payload.addProperty("format", "json");
+    @Override
+    public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
+        // Build payload with native Anthropic tools support
+        JsonObject payload = buildMessagesPayload(messages, false);
+        
+        // Convert OpenAI function format to Anthropic tools format
+        JsonArray anthropicTools = new JsonArray();
+        for (Map<String, Object> tool : functions) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> function = (Map<String, Object>) tool.get("function");
+            
+            JsonObject anthropicTool = new JsonObject();
+            anthropicTool.addProperty("name", (String) function.get("name"));
+            anthropicTool.addProperty("description", (String) function.get("description"));
+            
+            // Convert parameters schema to input_schema
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parameters = (Map<String, Object>) function.get("parameters");
+            if (parameters != null) {
+                anthropicTool.add("input_schema", gson.toJsonTree(parameters));
+            }
+            
+            anthropicTools.add(anthropicTool);
+        }
+        
+        payload.add("tools", anthropicTools);
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
@@ -215,7 +325,49 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return responseObj.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString();
+            
+            // Extract content from Anthropic's response format
+            JsonArray toolCallsArray = new JsonArray();
+            StringBuilder textContent = new StringBuilder();
+            
+            if (responseObj.has("content")) {
+                JsonArray contentArray = responseObj.getAsJsonArray("content");
+                
+                for (JsonElement contentElement : contentArray) {
+                    JsonObject contentBlock = contentElement.getAsJsonObject();
+                    String type = contentBlock.get("type").getAsString();
+                    
+                    if ("tool_use".equals(type)) {
+                        // Convert tool_use to legacy OpenAI-style tool call format
+                        JsonObject toolCall = new JsonObject();
+                        toolCall.addProperty("id", contentBlock.get("id").getAsString());
+                        toolCall.addProperty("type", "function");
+                        
+                        JsonObject function = new JsonObject();
+                        function.addProperty("name", contentBlock.get("name").getAsString());
+                        function.addProperty("arguments", gson.toJson(contentBlock.get("input")));
+                        toolCall.add("function", function);
+                        
+                        toolCallsArray.add(toolCall);
+                        
+                    } else if ("text".equals(type)) {
+                        // Append text content
+                        if (contentBlock.has("text")) {
+                            textContent.append(contentBlock.get("text").getAsString());
+                        }
+                    }
+                }
+            }
+            
+            // Return format expected by ActionParser
+            if (toolCallsArray.size() > 0) {
+                JsonObject result = new JsonObject();
+                result.add("tool_calls", toolCallsArray);
+                return gson.toJson(result);
+            } else {
+                return textContent.toString();
+            }
+            
         } catch (IOException e) {
             throw handleNetworkError(e, "createChatCompletionWithFunctions");
         }
@@ -262,7 +414,59 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
             } else {
                 JsonObject messageObj = new JsonObject();
                 messageObj.addProperty("role", convertRole(message.getRole()));
-                messageObj.addProperty("content", message.getContent());
+                
+                // Handle different message types for Anthropic format
+                if (message.getRole().equals(ChatMessage.ChatMessageRole.TOOL)) {
+                    // Tool result message - use tool_result content block
+                    JsonArray contentArray = new JsonArray();
+                    JsonObject toolResultBlock = new JsonObject();
+                    toolResultBlock.addProperty("type", "tool_result");
+                    toolResultBlock.addProperty("tool_use_id", message.getToolCallId());
+                    toolResultBlock.addProperty("content", message.getContent());
+                    
+                    contentArray.add(toolResultBlock);
+                    messageObj.add("content", contentArray);
+                } else if (message.getToolCalls() != null) {
+                    // Assistant message with tool calls - need to convert to content blocks
+                    JsonArray contentArray = new JsonArray();
+                    
+                    // Add text content if present
+                    if (message.getContent() != null && !message.getContent().isEmpty()) {
+                        JsonObject textBlock = new JsonObject();
+                        textBlock.addProperty("type", "text");
+                        textBlock.addProperty("text", message.getContent());
+                        contentArray.add(textBlock);
+                    }
+                    
+                    // Convert tool_calls to tool_use blocks
+                    JsonArray toolCalls = message.getToolCalls();
+                    for (JsonElement toolCallElement : toolCalls) {
+                        JsonObject toolCall = toolCallElement.getAsJsonObject();
+                        JsonObject function = toolCall.getAsJsonObject("function");
+                        
+                        JsonObject toolUseBlock = new JsonObject();
+                        toolUseBlock.addProperty("type", "tool_use");
+                        toolUseBlock.addProperty("id", toolCall.get("id").getAsString());
+                        toolUseBlock.addProperty("name", function.get("name").getAsString());
+                        
+                        // Parse arguments JSON string back to object
+                        try {
+                            JsonElement arguments = gson.fromJson(function.get("arguments").getAsString(), JsonElement.class);
+                            toolUseBlock.add("input", arguments);
+                        } catch (Exception e) {
+                            // If parsing fails, use empty object
+                            toolUseBlock.add("input", new JsonObject());
+                        }
+                        
+                        contentArray.add(toolUseBlock);
+                    }
+                    
+                    messageObj.add("content", contentArray);
+                } else {
+                    // Regular text message
+                    messageObj.addProperty("content", message.getContent());
+                }
+                
                 messagesArray.add(messageObj);
             }
         }
@@ -279,6 +483,8 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 return "assistant";
             case ChatMessage.ChatMessageRole.FUNCTION:
                 return "assistant"; // Anthropic doesn't have function messages, treat as assistant
+            case ChatMessage.ChatMessageRole.TOOL:
+                return "user"; // Tool results are sent as user messages in Anthropic
             default:
                 return role;
         }

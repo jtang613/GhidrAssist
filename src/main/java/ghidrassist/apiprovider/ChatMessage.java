@@ -1,11 +1,14 @@
 package ghidrassist.apiprovider;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.google.gson.JsonArray;
 
 public class ChatMessage {
     private String role;
     private String content;
     private FunctionCall functionCall;
+    private JsonArray toolCalls;  // For assistant messages with tool calls
+    private String toolCallId;   // For tool response messages
 
     public ChatMessage(String role, String content) {
         this.role = role;
@@ -32,6 +35,22 @@ public class ChatMessage {
         this.functionCall = functionCall;
     }
 
+    public JsonArray getToolCalls() {
+        return toolCalls;
+    }
+
+    public void setToolCalls(JsonArray toolCalls) {
+        this.toolCalls = toolCalls;
+    }
+
+    public String getToolCallId() {
+        return toolCallId;
+    }
+
+    public void setToolCallId(String toolCallId) {
+        this.toolCallId = toolCallId;
+    }
+
     public static class FunctionCall {
         private String name;
         private JsonNode arguments;
@@ -50,5 +69,6 @@ public class ChatMessage {
         public static final String USER = "user";
         public static final String ASSISTANT = "assistant";
         public static final String FUNCTION = "function";
+        public static final String TOOL = "tool";
     }
 }

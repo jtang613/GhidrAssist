@@ -30,18 +30,6 @@ public class LlmApiClient {
             + "You format code blocks using back-tick code-fencing.\n";
             
     private final String FUNCTION_PROMPT = "USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.";
-    private final String FORMAT_PROMPT = 
-        "The output MUST strictly adhere to the following JSON format, do not include any other text.\n" +
-        "The example format is as follows. Please make sure the parameter type is correct. If no function call is needed, please make tool_calls an empty list '[]'.\n" +
-        "```\n" +
-        "{\n" +
-        "    \"tool_calls\": [\n" +
-        "    {\"name\": \"rename_function\", \"arguments\": {\"new_name\": \"new_name\"}},\n" +
-        "    ... (more tool calls as required)\n" +
-        "    ]\n" +
-        "}\n" +
-        "```\n" +
-        "REMEMBER, YOU MUST ALWAYS PRODUCE A JSON LIST OF TOOL_CALLS!";
 
     public LlmApiClient(APIProviderConfig config, GhidrAssistPlugin plugin) {
         this.provider = config.createProvider();
@@ -95,8 +83,6 @@ public class LlmApiClient {
         }
 
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage(systemUser, 
-            getCurrentContext() + "\n" + FUNCTION_PROMPT + "\n" + FORMAT_PROMPT));
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
         return messages;
     }
@@ -132,6 +118,17 @@ public class LlmApiClient {
             throw new IllegalStateException("LLM provider is not initialized.");
         }
         return provider.createChatCompletionWithFunctions(messages, functions);
+    }
+    
+    /**
+     * Create chat completion with functions - returns full response including finish_reason
+     */
+    public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) 
+            throws APIProviderException {
+        if (provider == null) {
+            throw new IllegalStateException("LLM provider is not initialized.");
+        }
+        return provider.createChatCompletionWithFunctionsFullResponse(messages, functions);
     }
     
     /**

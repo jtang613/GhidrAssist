@@ -304,21 +304,21 @@ public class SSETransport extends MCPTransport {
                     // Look for actual response data
                     else if (line.startsWith("data: ") && !line.equals("data: ")) {
                         String eventData = line.substring("data: ".length());
-                        Msg.info(this, "Received SSE event data: " + eventData);
+                        Msg.debug(this, "Received SSE event data: " + eventData);
                         
                         // Try to parse as JSON response
                         try {
                             com.google.gson.JsonObject responseObj = new com.google.gson.Gson().fromJson(eventData, com.google.gson.JsonObject.class);
                             if (responseObj.has("jsonrpc") && responseObj.has("id")) {
                                 String responseId = responseObj.get("id").getAsString();
-                                Msg.info(this, "Received JSON-RPC response via SSE for ID: " + responseId);
+                                Msg.debug(this, "Received JSON-RPC response via SSE for ID: " + responseId);
                                 
                                 // Find and complete the pending request
                                 CompletableFuture<MCPResponse> pendingRequest = pendingRequests.remove(responseId);
                                 if (pendingRequest != null) {
                                     MCPResponse mcpResponse = MCPResponse.fromJson(eventData);
                                     pendingRequest.complete(mcpResponse);
-                                    Msg.info(this, "Completed pending request for ID: " + responseId);
+                                    Msg.debug(this, "Completed pending request for ID: " + responseId);
                                 } else {
                                     Msg.warn(this, "No pending request found for response ID: " + responseId);
                                 }
@@ -362,7 +362,7 @@ public class SSETransport extends MCPTransport {
         
         // Send the MCP JSON-RPC 2.0 notification
         String jsonNotification = notification.toJson();
-        Msg.info(this, "Sending MCP notification (" + notification.getMethod() + "): " + jsonNotification);
+        Msg.debug(this, "Sending MCP notification (" + notification.getMethod() + "): " + jsonNotification);
         
         try (OutputStreamWriter writer = new OutputStreamWriter(
                 conn.getOutputStream(), StandardCharsets.UTF_8)) {
@@ -386,7 +386,7 @@ public class SSETransport extends MCPTransport {
             }
         }
         
-        Msg.info(this, "HTTP response for notification: " + httpResponse.toString());
+        Msg.debug(this, "HTTP response for notification: " + httpResponse.toString());
         // Note: We don't wait for any SSE response since notifications don't have responses
     }
     
@@ -416,7 +416,7 @@ public class SSETransport extends MCPTransport {
         
         // Send the MCP JSON-RPC 2.0 request directly
         String jsonRequest = request.toJson();
-        Msg.info(this, "Sending MCP request " + requestId + " (" + request.getMethod() + "): " + jsonRequest);
+        Msg.debug(this, "Sending MCP request " + requestId + " (" + request.getMethod() + "): " + jsonRequest);
         
         try (OutputStreamWriter writer = new OutputStreamWriter(
                 conn.getOutputStream(), StandardCharsets.UTF_8)) {
@@ -441,7 +441,7 @@ public class SSETransport extends MCPTransport {
             }
         }
         
-        Msg.info(this, "HTTP response for " + requestId + ": " + httpResponse.toString());
+        Msg.debug(this, "HTTP response for " + requestId + ": " + httpResponse.toString());
         
         // Wait for the actual response via SSE
         try {
