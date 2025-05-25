@@ -67,6 +67,7 @@ public abstract class APIProvider implements ChatProvider {
     public abstract String createChatCompletion(List<ChatMessage> messages) throws APIProviderException;
     public abstract void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler) throws APIProviderException;
     public abstract String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException;
+    public abstract String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException;
     public abstract List<String> getAvailableModels() throws APIProviderException;
     public abstract void getEmbeddingsAsync(String text, EmbeddingCallback callback);
 	public void setTimeout(Integer timeout2) { this.timeout = Duration.ofSeconds(timeout2); }

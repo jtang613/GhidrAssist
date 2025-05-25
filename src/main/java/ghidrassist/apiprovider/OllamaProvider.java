@@ -88,7 +88,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
         Request request = new Request.Builder()
-            .url(url + OLLAMA_CHAT_ENDPOINT)
+            .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -105,7 +105,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
         JsonObject payload = buildChatCompletionPayload(messages, true);
 
         Request request = new Request.Builder()
-            .url(url + OLLAMA_CHAT_ENDPOINT)
+            .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -159,6 +159,90 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
     }
 
     @Override
+    public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
+        JsonObject payload = buildChatCompletionPayload(messages, false);
+        
+        // Add tools (functions) to the payload
+        payload.add("tools", gson.toJsonTree(functions));
+
+        // Specify json output
+        payload.addProperty("format", "json");
+
+        Request request = new Request.Builder()
+            .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
+            JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
+            
+            // Parse the response to create OpenAI-compatible format
+            JsonObject fullResponse = new JsonObject();
+            JsonArray choices = new JsonArray();
+            JsonObject choice = new JsonObject();
+            JsonObject message = new JsonObject();
+            
+            message.addProperty("role", "assistant");
+            
+            String finishReason = "stop";
+            JsonArray toolCalls = null;
+            String content = "";
+            
+            // Extract message from response
+            if (responseObj.has("message")) {
+                JsonObject responseMessage = responseObj.getAsJsonObject("message");
+                
+                // Check for native tool_calls first
+                if (responseMessage.has("tool_calls")) {
+                    JsonArray nativeToolCalls = responseMessage.getAsJsonArray("tool_calls");
+                    toolCalls = convertNativeToolCallsToOpenAI(nativeToolCalls);
+                    finishReason = "tool_calls";
+                }
+                
+                // Extract content
+                if (responseMessage.has("content")) {
+                    content = responseMessage.get("content").getAsString();
+                }
+                
+                // If no native tool calls, try parsing from content
+                if (toolCalls == null || toolCalls.size() == 0) {
+                    toolCalls = parseToolCallsFromContent(content);
+                    if (toolCalls != null && toolCalls.size() > 0) {
+                        finishReason = "tool_calls";
+                    }
+                }
+            }
+            
+            // Set message content based on what we found
+            if (toolCalls != null && toolCalls.size() > 0) {
+                message.add("tool_calls", toolCalls);
+                // Include content if present
+                if (content != null && !content.trim().isEmpty()) {
+                    message.addProperty("content", content);
+                }
+            } else {
+                message.addProperty("content", content);
+            }
+            
+            choice.add("message", message);
+            choice.addProperty("finish_reason", finishReason);
+            choice.addProperty("index", 0);
+            choices.add(choice);
+            
+            fullResponse.add("choices", choices);
+            fullResponse.addProperty("id", "chatcmpl-ollama-" + System.currentTimeMillis());
+            fullResponse.addProperty("object", "chat.completion");
+            fullResponse.addProperty("created", System.currentTimeMillis() / 1000);
+            fullResponse.addProperty("model", this.model);
+            
+            return gson.toJson(fullResponse);
+            
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctionsFullResponse");
+        }
+    }
+
+    @Override
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
@@ -169,7 +253,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
         payload.add("format", gson.toJsonTree("json"));
         
         Request request = new Request.Builder()
-            .url(url + OLLAMA_CHAT_ENDPOINT)
+            .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -368,5 +452,133 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
 
     public void cancelRequest() {
         isCancelled = true;
+    }
+    
+    /**
+     * Parse tool calls from content and return in OpenAI format
+     */
+    private JsonArray parseToolCallsFromContent(String content) {
+        if (content == null || content.trim().isEmpty()) {
+            return null;
+        }
+        
+        content = content.trim();
+        
+        // Try to parse content as JSON if it looks like JSON
+        if (content.startsWith("{") || content.startsWith("[")) {
+            try {
+                JsonElement contentJson = JsonParser.parseString(content);
+                
+                // Case 1: Content is a single function call
+                if (contentJson.isJsonObject()) {
+                    JsonObject funcObj = contentJson.getAsJsonObject();
+                    if (funcObj.has("name") && funcObj.has("arguments")) {
+                        // Convert to tool_calls format
+                        JsonArray toolCalls = new JsonArray();
+                        JsonObject toolCall = new JsonObject();
+                        toolCall.addProperty("id", "call_" + System.currentTimeMillis());
+                        toolCall.addProperty("type", "function");
+                        
+                        JsonObject function = new JsonObject();
+                        function.addProperty("name", funcObj.get("name").getAsString());
+                        function.addProperty("arguments", gson.toJson(funcObj.get("arguments")));
+                        toolCall.add("function", function);
+                        
+                        toolCalls.add(toolCall);
+                        return toolCalls;
+                    }
+                }
+                
+                // Case 2: Content is array of function calls
+                if (contentJson.isJsonArray()) {
+                    JsonArray funcArray = contentJson.getAsJsonArray();
+                    JsonArray toolCalls = new JsonArray();
+                    
+                    for (JsonElement funcElement : funcArray) {
+                        if (funcElement.isJsonObject()) {
+                            JsonObject funcObj = funcElement.getAsJsonObject();
+                            if (funcObj.has("name") && funcObj.has("arguments")) {
+                                JsonObject toolCall = new JsonObject();
+                                toolCall.addProperty("id", "call_" + System.currentTimeMillis() + "_" + toolCalls.size());
+                                toolCall.addProperty("type", "function");
+                                
+                                JsonObject function = new JsonObject();
+                                function.addProperty("name", funcObj.get("name").getAsString());
+                                function.addProperty("arguments", gson.toJson(funcObj.get("arguments")));
+                                toolCall.add("function", function);
+                                
+                                toolCalls.add(toolCall);
+                            }
+                        }
+                    }
+                    
+                    return toolCalls.size() > 0 ? toolCalls : null;
+                }
+                
+                // Case 3: Content has tool_calls property
+                if (contentJson.isJsonObject()) {
+                    JsonObject obj = contentJson.getAsJsonObject();
+                    if (obj.has("tool_calls")) {
+                        JsonArray existingToolCalls = obj.getAsJsonArray("tool_calls");
+                        // Convert to OpenAI format if needed
+                        JsonArray toolCalls = new JsonArray();
+                        for (JsonElement tcElement : existingToolCalls) {
+                            if (tcElement.isJsonObject()) {
+                                JsonObject tc = tcElement.getAsJsonObject();
+                                if (!tc.has("id")) {
+                                    tc.addProperty("id", "call_" + System.currentTimeMillis() + "_" + toolCalls.size());
+                                }
+                                if (!tc.has("type")) {
+                                    tc.addProperty("type", "function");
+                                }
+                                toolCalls.add(tc);
+                            }
+                        }
+                        return toolCalls.size() > 0 ? toolCalls : null;
+                    }
+                }
+                
+            } catch (Exception e) {
+                // If parsing fails, return null
+                return null;
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Convert native Ollama tool calls to OpenAI format
+     */
+    private JsonArray convertNativeToolCallsToOpenAI(JsonArray nativeToolCalls) {
+        JsonArray toolCalls = new JsonArray();
+        
+        for (JsonElement tcElement : nativeToolCalls) {
+            if (tcElement.isJsonObject()) {
+                JsonObject nativeToolCall = tcElement.getAsJsonObject();
+                
+                JsonObject toolCall = new JsonObject();
+                toolCall.addProperty("id", "call_" + System.currentTimeMillis() + "_" + toolCalls.size());
+                toolCall.addProperty("type", "function");
+                
+                // Extract function information
+                if (nativeToolCall.has("function")) {
+                    JsonObject nativeFunction = nativeToolCall.getAsJsonObject("function");
+                    
+                    JsonObject function = new JsonObject();
+                    if (nativeFunction.has("name")) {
+                        function.addProperty("name", nativeFunction.get("name").getAsString());
+                    }
+                    if (nativeFunction.has("arguments")) {
+                        function.addProperty("arguments", gson.toJson(nativeFunction.get("arguments")));
+                    }
+                    
+                    toolCall.add("function", function);
+                    toolCalls.add(toolCall);
+                }
+            }
+        }
+        
+        return toolCalls;
     }
 }

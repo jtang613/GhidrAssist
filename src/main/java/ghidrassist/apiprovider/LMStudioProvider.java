@@ -71,7 +71,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
         Request request = new Request.Builder()
-            .url(url + LMSTUDIO_CHAT_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -88,7 +88,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         JsonObject payload = buildChatCompletionPayload(messages, true);
 
         Request request = new Request.Builder()
-            .url(url + LMSTUDIO_CHAT_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -145,13 +145,69 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
     }
 
     @Override
+    public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
+        JsonObject payload = buildChatCompletionPayload(messages, false);
+        
+        payload.add("functions", gson.toJsonTree(functions));
+        
+        Request request = new Request.Builder()
+            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
+            String responseBody = response.body().string();
+            JsonObject responseObj = gson.fromJson(responseBody, JsonObject.class);
+            
+            // LMStudio should return OpenAI-compatible response already
+            // But let's ensure finish_reason is set properly
+            if (responseObj.has("choices")) {
+                JsonArray choices = responseObj.getAsJsonArray("choices");
+                if (choices.size() > 0) {
+                    JsonObject choice = choices.get(0).getAsJsonObject();
+                    JsonObject message = choice.getAsJsonObject("message");
+                    
+                    // Check if there's a function_call and convert to tool_calls format
+                    if (message.has("function_call")) {
+                        JsonObject functionCall = message.getAsJsonObject("function_call");
+                        
+                        // Convert to tool_calls format
+                        JsonArray toolCalls = new JsonArray();
+                        JsonObject toolCall = new JsonObject();
+                        toolCall.addProperty("id", "call_" + System.currentTimeMillis());
+                        toolCall.addProperty("type", "function");
+                        
+                        JsonObject function = new JsonObject();
+                        function.addProperty("name", functionCall.get("name").getAsString());
+                        function.addProperty("arguments", functionCall.get("arguments").getAsString());
+                        toolCall.add("function", function);
+                        
+                        toolCalls.add(toolCall);
+                        message.add("tool_calls", toolCalls);
+                        message.remove("function_call");
+                        
+                        choice.addProperty("finish_reason", "tool_calls");
+                    } else if (!choice.has("finish_reason")) {
+                        choice.addProperty("finish_reason", "stop");
+                    }
+                }
+            }
+            
+            return gson.toJson(responseObj);
+            
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctionsFullResponse");
+        }
+    }
+
+    @Override
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
         payload.add("functions", gson.toJsonTree(functions));
         
         Request request = new Request.Builder()
-            .url(url + LMSTUDIO_CHAT_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 
@@ -177,7 +233,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
     @Override
     public List<String> getAvailableModels() throws APIProviderException {
         Request request = new Request.Builder()
-            .url(url + LMSTUDIO_MODELS_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_MODELS_ENDPOINT)
             .build();
 
         try (Response response = executeWithRetry(request, "getAvailableModels")) {
@@ -202,7 +258,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         payload.addProperty("input", text);
 
         Request request = new Request.Builder()
-            .url(url + LMSTUDIO_EMBEDDINGS_ENDPOINT)
+            .url(super.getUrl() + LMSTUDIO_EMBEDDINGS_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
             .build();
 

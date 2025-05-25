@@ -324,18 +324,14 @@ public class MCPToolManager {
         
         @Override
         public void onToolsDiscovered(MCPProtocolClient client, List<MCPTool> tools) {
-            Msg.info(this, "MCPToolManager received " + tools.size() + " tools from server: " + serverName);
             
             // Add tools from this server
             for (MCPTool tool : tools) {
                 allTools.put(tool.getName().toLowerCase(), tool);
-                Msg.info(this, "Added tool to manager: " + tool.getName());
             }
             
             // Notify on EDT for UI updates
             javax.swing.SwingUtilities.invokeLater(() -> notifyToolsUpdated());
-            
-            Msg.info(this, "MCPToolManager now has " + allTools.size() + " total tools");
         }
         
         @Override
