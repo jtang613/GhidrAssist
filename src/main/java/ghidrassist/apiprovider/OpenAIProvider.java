@@ -209,6 +209,29 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
     }
 
     @Override
+    public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
+        JsonObject payload = buildChatCompletionPayload(messages, false);
+        
+        // Add tools (functions) to the payload
+        payload.add("tools", gson.toJsonTree(functions));
+        
+        Request request = new Request.Builder()
+            .url(url + OPENAI_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
+            String responseBody = response.body().string();
+            
+            // Return the full response body as-is, including finish_reason
+            return responseBody;
+            
+        } catch (IOException e) {
+            throw new NetworkException(name, "createChatCompletionWithFunctionsFullResponse", NetworkException.NetworkErrorType.CONNECTION_FAILED);
+        }
+    }
+
+    @Override
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
         
@@ -458,7 +481,22 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         for (ChatMessage message : messages) {
             JsonObject messageObj = new JsonObject();
             messageObj.addProperty("role", message.getRole());
-            messageObj.addProperty("content", message.getContent());
+            
+            // Handle content (can be null for tool calling assistant messages)
+            if (message.getContent() != null) {
+                messageObj.addProperty("content", message.getContent());
+            }
+            
+            // Handle tool calls for assistant messages
+            if (message.getToolCalls() != null) {
+                messageObj.add("tool_calls", message.getToolCalls());
+            }
+            
+            // Handle tool call ID for tool response messages
+            if (message.getToolCallId() != null) {
+                messageObj.addProperty("tool_call_id", message.getToolCallId());
+            }
+            
             messagesArray.add(messageObj);
         }
         payload.add("messages", messagesArray);

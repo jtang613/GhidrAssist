@@ -202,7 +202,6 @@ public class QueryTab extends JPanel {
             useMCPCheckBox.setEnabled(currentlyAvailable);
             
             if (currentlyAvailable && !wasEnabled) {
-                Msg.info(this, "MCP tools available: " + toolManager.getStatusInfo());
             }
         });
         
@@ -219,14 +218,13 @@ public class QueryTab extends JPanel {
                         useMCPCheckBox.setEnabled(nowAvailable);
                         
                         if (nowAvailable && !wasEnabled) {
-                            Msg.info(this, "MCP tools available: " + toolManager.getStatusInfo());
                         }
                     });
                 })
                 .exceptionally(throwable -> {
                     // Log initialization failure but don't block UI
                     SwingUtilities.invokeLater(() -> {
-                        Msg.info(this, "MCP initialization failed: " + throwable.getMessage());
+                        Msg.error(this, "MCP initialization failed: " + throwable.getMessage());
                         useMCPCheckBox.setEnabled(false);
                     });
                     return null;

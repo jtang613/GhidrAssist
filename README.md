@@ -5,12 +5,13 @@ _A plugin that provides LLM helpers to explain code and assist in RE._
 
 ## Description:
 
-This is a LLM plugin aimed at enabling the use of local LLM's (ollama, text-generation-webui, lm-studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others such as DeepSeek and ChatGPT work as well.
+This is a LLM plugin aimed at enabling the use of local LLM's (Ollama, Open-WebUI, LM-Studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others such as DeepSeek and ChatGPT work as well.
 
 Current features include:
 * Explain the current function - Works for disassembly and pseudo-C.
 * Explain the current instruction - Works for disassembly and pseudo-C.
 * General query - Query the LLM directly from the UI.
+* MCP client - Leverage MCP tools like ![GhidraMCP](https://github.com/LaurieWired/GhidraMCP) from the interactive LLM chat.
 * Propose actions - Provide a list of proposed actions to apply.
 * Function calling - Allow agent to call functions to navigate the binary, rename functions and variables.
 * Retrieval Augmented Generation - Supports adding contextual documents to refine query effectiveness.
@@ -47,7 +48,7 @@ Here's a few resources that might get you started:
 - https://docs.anthropic.com/en/docs/initial-setup
 
 For local LLM's, I've found that the Llama3.3:70b, Llama3.1:8b and DeepSeek-r1 produce good results.
-From OpenAI, the gpt-4o-mini produces good results. 
+From OpenAI, the o4-mini produces good results. Anthropic's Claude Sonnet also produces good results.
 
 ## Homepage
 https://github.com/jtang613/GhidrAssist

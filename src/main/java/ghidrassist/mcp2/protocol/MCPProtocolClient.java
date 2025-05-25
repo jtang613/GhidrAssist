@@ -231,11 +231,9 @@ public class MCPProtocolClient {
     private CompletableFuture<Void> discoverTools() {
         return CompletableFuture.runAsync(() -> {
             try {
-                Msg.info(this, "Starting tool discovery for server: " + config.getName());
                 MCPRequest toolsRequest = MCPRequest.createToolsListRequest(generateRequestId());
                 
                 MCPResponse response = transport.sendRequest(toolsRequest).get();
-                Msg.info(this, "Received tools/list response from " + config.getName());
                 
                 if (response.isError()) {
                     Msg.error(this, "Tool discovery failed: " + response.getError().toString());
@@ -245,7 +243,6 @@ public class MCPProtocolClient {
                 
                 // Parse tools from response
                 JsonArray toolsArray = response.getToolsArray();
-                Msg.info(this, "Tools array from response: " + toolsArray.toString());
                 
                 List<MCPTool> tools = new ArrayList<>();
                 
@@ -255,7 +252,6 @@ public class MCPProtocolClient {
                             toolElement.getAsJsonObject(), config.getName());
                         if (tool.getName() != null) {
                             tools.add(tool);
-                            Msg.info(this, "Discovered tool: " + tool.getName() + " - " + tool.getDescription());
                         }
                     }
                 }

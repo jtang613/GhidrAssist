@@ -169,7 +169,24 @@ public class ActionParser {
             }
             
             String functionName = toolCallObject.get("name").getAsString();
-            JsonObject arguments = toolCallObject.getAsJsonObject("arguments");
+            JsonObject arguments;
+            
+            // Handle arguments field - can be either JsonObject or JSON string
+            JsonElement argumentsElement = toolCallObject.get("arguments");
+            if (argumentsElement.isJsonObject()) {
+                arguments = argumentsElement.getAsJsonObject();
+            } else if (argumentsElement.isJsonPrimitive()) {
+                // Parse JSON string (common in OpenAI responses)
+                try {
+                    arguments = gson.fromJson(argumentsElement.getAsString(), JsonObject.class);
+                } catch (JsonSyntaxException e) {
+                    // If parsing fails, skip this tool call
+                    continue;
+                }
+            } else {
+                // Skip if arguments is neither object nor string
+                continue;
+            }
             
             // Skip if function is not in our templates
             if (!validFunctions.contains(functionName)) {

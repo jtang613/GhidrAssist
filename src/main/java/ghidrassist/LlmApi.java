@@ -1,6 +1,7 @@
 package ghidrassist;
 
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.core.ConversationalToolHandler;
 import ghidrassist.core.LlmApiClient;
 import ghidrassist.core.LlmErrorHandler;
 import ghidrassist.core.LlmTaskExecutor;
@@ -84,7 +85,29 @@ public class LlmApi {
     }
 
     /**
-     * Send a function calling request with enhanced error handling
+     * Send a conversational tool calling request that handles multiple turns
+     * Monitors finish_reason to determine when to execute tools vs. complete
+     */
+    public void sendConversationalToolRequest(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
+        if (!apiClient.isProviderAvailable()) {
+            errorHandler.handleError(
+                new IllegalStateException("LLM provider is not initialized."), 
+                "send conversational tool request", 
+                null
+            );
+            return;
+        }
+
+        // Create enhanced response handler for conversational tool calling
+        ConversationalToolHandler toolHandler = new ConversationalToolHandler(
+            apiClient, functions, responseProcessor, responseHandler, errorHandler);
+        
+        // Start the conversation
+        toolHandler.startConversation(prompt);
+    }
+
+    /**
+     * Send a function calling request with enhanced error handling (legacy method)
      */
     public void sendRequestAsyncWithFunctions(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
         if (!apiClient.isProviderAvailable()) {
