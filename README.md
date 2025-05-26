@@ -50,6 +50,16 @@ Here's a few resources that might get you started:
 For local LLM's, I've found that the Llama3.3:70b, Llama3.1:8b and DeepSeek-r1 produce good results.
 From OpenAI, the o4-mini produces good results. Anthropic's Claude Sonnet also produces good results.
 
+## GhidraMCP
+
+To use with GhidraMCP, launch the bridge in SSE mode from a terminal:
+
+`python bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/`
+
+Then open Tools -> GhidrAssist and add `http://127.0.0.1:8081` as `GhidraMCP` with `SSE` as the type.
+
+Enable "Use MCP" in the Custom Query tab. Try a simple query like "What does the current function do?"
+
 ## Homepage
 https://github.com/jtang613/GhidrAssist
 
