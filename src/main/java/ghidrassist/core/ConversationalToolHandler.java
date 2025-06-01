@@ -364,8 +364,18 @@ public class ConversationalToolHandler {
                 return;
             }
             
+            // Display text response if present, before tool execution metadata
+            if (content != null && !content.trim().isEmpty()) {
+                String filteredContent = responseProcessor.filterThinkBlocks(content);
+                if (filteredContent != null && !filteredContent.trim().isEmpty()) {
+                    javax.swing.SwingUtilities.invokeLater(() -> {
+                        userHandler.onUpdate(filteredContent + "\n\n");
+                    });
+                }
+            }
+            
             // Update UI with tool calling status
-            String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
+            String toolExecutionHeader = "🔧 **Executing tools...**\n";
             javax.swing.SwingUtilities.invokeLater(() -> {
                 userHandler.onUpdate(toolExecutionHeader);
             });
@@ -397,11 +407,6 @@ public class ConversationalToolHandler {
         if (index >= toolCalls.size()) {
             // All tools executed, add results to conversation and continue
             addToolResultsToConversation(toolResults);
-            
-            // Show completion message
-            javax.swing.SwingUtilities.invokeLater(() -> {
-                userHandler.onUpdate("✅ All tools completed. Processing response...\n\n");
-            });
             
             // Add a small delay before making the next API call to avoid rapid sequential requests
             // that could trigger rate limits
