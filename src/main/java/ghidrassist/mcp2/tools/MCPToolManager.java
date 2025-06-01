@@ -3,6 +3,8 @@ package ghidrassist.mcp2.tools;
 import ghidrassist.mcp2.protocol.MCPProtocolClient;
 import ghidrassist.mcp2.server.MCPServerConfig;
 import ghidrassist.mcp2.server.MCPServerRegistry;
+import ghidra.program.model.listing.Program;
+import ghidra.framework.model.DomainObject;
 import ghidra.util.Msg;
 
 import com.google.gson.JsonObject;

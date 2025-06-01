@@ -369,7 +369,7 @@ public class ConversationalToolHandler {
                 String filteredContent = responseProcessor.filterThinkBlocks(content);
                 if (filteredContent != null && !filteredContent.trim().isEmpty()) {
                     javax.swing.SwingUtilities.invokeLater(() -> {
-                        userHandler.onUpdate(filteredContent + "\n\n");
+                        userHandler.onUpdate("\n" + filteredContent + "\n\n");
                     });
                 }
             }
@@ -471,15 +471,16 @@ public class ConversationalToolHandler {
             JsonObject arguments = extractToolArguments(toolCall);
             String toolCallId = extractToolCallId(toolCall);
             
-            // Update UI with current tool execution
-            String executingMessage = "🛠️ Tool call in progress: *" + toolName + "*\n";
+            // Update UI with current tool execution including parameters
+            String paramDisplay = formatToolParameters(arguments);
+            String executingMessage = "🛠️ Tool call in progress: *" + toolName + "(" + paramDisplay + ")*\n";
             javax.swing.SwingUtilities.invokeLater(() -> {
                 userHandler.onUpdate(executingMessage);
             });
             
-            // Execute via MCP
+            // Execute via MCP with proper transaction handling
             MCPToolManager toolManager = MCPToolManager.getInstance();
-            return toolManager.executeTool(toolName, arguments)
+            return executeToolWithTransaction(toolManager, toolName, arguments)
                 .thenApply(mcpResult -> {
                     // Check cancellation before processing result
                     if (isCancelled) {
@@ -492,7 +493,8 @@ public class ConversationalToolHandler {
                         mcpResult.getResultText() != null ? mcpResult.getResultText().length() : 0));
                     
                     // Don't show verbose tool results to user - they'll be included in LLM response
-                    String completionMessage = "✓ Completed: *" + toolName + "*\n";
+                    String paramDisplayComplete = formatToolParameters(arguments);
+                    String completionMessage = "✓ Completed: *" + toolName + "(" + paramDisplayComplete + ")*\n";
                     
                     javax.swing.SwingUtilities.invokeLater(() -> {
                         if (!isCancelled) {
@@ -577,8 +579,8 @@ public class ConversationalToolHandler {
             
             // Send only the final LLM response (tool execution messages were already sent individually)
             javax.swing.SwingUtilities.invokeLater(() -> {
-                userHandler.onUpdate(filteredContent);
-                userHandler.onComplete(filteredContent);
+                userHandler.onUpdate("\n" + filteredContent);
+                userHandler.onComplete("\n" + filteredContent);
             });
             
         } catch (Exception e) {
@@ -723,5 +725,83 @@ public class ConversationalToolHandler {
         }
         
         return true;
+    }
+    
+    /**
+     * Format tool parameters for display in execution logs
+     */
+    private String formatToolParameters(JsonObject arguments) {
+        if (arguments == null || arguments.size() == 0) {
+            return "";
+        }
+        
+        StringBuilder params = new StringBuilder();
+        boolean first = true;
+        
+        for (String key : arguments.keySet()) {
+            if (!first) {
+                params.append(", ");
+            }
+            first = false;
+            
+            JsonElement value = arguments.get(key);
+            if (value.isJsonPrimitive()) {
+                String strValue = value.getAsString();
+                // Add quotes around string values for clarity
+                if (value.getAsJsonPrimitive().isString()) {
+                    params.append("\"").append(strValue).append("\"");
+                } else {
+                    params.append(strValue);
+                }
+            } else {
+                // For complex objects, just show the key
+                params.append(key).append("=").append(value.toString());
+            }
+        }
+        
+        return params.toString();
+    }
+    
+    /**
+     * Execute MCP tool with proper Ghidra transaction handling
+     * Run transaction on Swing EDT to match how Actions tab works
+     */
+    private CompletableFuture<MCPToolResult> executeToolWithTransaction(MCPToolManager toolManager, String toolName, JsonObject arguments) {
+        CompletableFuture<MCPToolResult> future = new CompletableFuture<>();
+        
+        // Execute on Swing EDT like Actions tab does
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            ghidra.program.model.listing.Program program = apiClient.getPlugin().getCurrentProgram();
+            
+            if (program == null) {
+                // If no program is loaded, execute without transaction
+                toolManager.executeTool(toolName, arguments)
+                    .thenAccept(future::complete)
+                    .exceptionally(throwable -> {
+                        future.complete(MCPToolResult.error("Tool execution failed: " + throwable.getMessage()));
+                        return null;
+                    });
+                return;
+            }
+            
+            // Execute with transaction on EDT
+            int transaction = program.startTransaction("MCP Tool: " + toolName);
+            boolean success = false;
+            
+            try {
+                MCPToolResult result = toolManager.executeTool(toolName, arguments).get();
+                success = result.isSuccess();
+                future.complete(result);
+                
+            } catch (Exception e) {
+                Msg.error(this, "MCP tool execution failed: " + e.getMessage());
+                future.complete(MCPToolResult.error("Tool execution failed: " + e.getMessage()));
+                
+            } finally {
+                program.endTransaction(transaction, success);
+            }
+        });
+        
+        return future;
     }
 }

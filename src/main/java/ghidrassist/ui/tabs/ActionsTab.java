@@ -6,7 +6,7 @@ import java.awt.*;
 import java.util.Map;
 import java.util.HashMap;
 import ghidrassist.core.TabController;
-import ghidrassist.core.ToolCalling;
+import ghidrassist.core.ActionConstants;
 
 public class ActionsTab extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -57,7 +57,7 @@ public class ActionsTab extends JPanel {
 
     private Map<String, JCheckBox> createFilterCheckboxes() {
         Map<String, JCheckBox> checkboxes = new HashMap<>();
-        for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
+        for (Map<String, Object> fnTemplate : ActionConstants.FN_TEMPLATES) {
             if (fnTemplate.get("type").equals("function")) {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");

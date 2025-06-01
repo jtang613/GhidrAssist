@@ -1,5 +1,6 @@
 package ghidrassist.services;
 
+import ghidrassist.AnalysisDB;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
@@ -14,10 +15,13 @@ public class QueryService {
     
     private final GhidrAssistPlugin plugin;
     private final StringBuilder conversationHistory;
+    private final AnalysisDB analysisDB;
+    private int currentSessionId = -1;
     
     public QueryService(GhidrAssistPlugin plugin) {
         this.plugin = plugin;
         this.conversationHistory = new StringBuilder();
+        this.analysisDB = new AnalysisDB();
     }
     
     /**
@@ -43,6 +47,9 @@ public class QueryService {
         
         // Add to conversation history
         conversationHistory.append("**User**:\n").append(processedQuery).append("\n\n");
+        
+        // Ensure we have a session for this conversation
+        ensureSession();
         
         return new QueryRequest(processedQuery, conversationHistory.toString(), useMCP);
     }
@@ -146,6 +153,11 @@ public class QueryService {
      */
     public void addAssistantResponse(String response) {
         conversationHistory.append("**Assistant**:\n").append(response).append("\n\n");
+        
+        // Update current session in database if one exists
+        if (currentSessionId != -1) {
+            analysisDB.updateChatSession(currentSessionId, conversationHistory.toString());
+        }
     }
     
     /**
@@ -167,6 +179,90 @@ public class QueryService {
      */
     public void clearConversationHistory() {
         conversationHistory.setLength(0);
+    }
+    
+    // Chat Session Management
+    
+    /**
+     * Create a new chat session and make it current
+     */
+    public int createNewChatSession() {
+        if (plugin.getCurrentProgram() == null) {
+            return -1;
+        }
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        
+        // Get next session ID for auto-generated description
+        java.util.List<AnalysisDB.ChatSession> sessions = analysisDB.getChatSessions(programHash);
+        int nextId = sessions.size() + 1;
+        String description = "Chat " + nextId;
+        
+        // Create session with current conversation
+        currentSessionId = analysisDB.createChatSession(programHash, description, conversationHistory.toString());
+        return currentSessionId;
+    }
+    
+    /**
+     * Get all chat sessions for current program
+     */
+    public java.util.List<AnalysisDB.ChatSession> getChatSessions() {
+        if (plugin.getCurrentProgram() == null) {
+            return new java.util.ArrayList<>();
+        }
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        return analysisDB.getChatSessions(programHash);
+    }
+    
+    /**
+     * Switch to a specific chat session
+     */
+    public boolean switchToChatSession(int sessionId) {
+        String conversation = analysisDB.getChatConversation(sessionId);
+        if (conversation != null) {
+            currentSessionId = sessionId;
+            conversationHistory.setLength(0);
+            conversationHistory.append(conversation);
+            return true;
+        }
+        return false;
+    }
+    
+    /**
+     * Delete current chat session
+     */
+    public boolean deleteCurrentSession() {
+        if (currentSessionId != -1) {
+            boolean deleted = analysisDB.deleteChatSession(currentSessionId);
+            if (deleted) {
+                currentSessionId = -1;
+                clearConversationHistory();
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /**
+     * Update chat session description
+     */
+    public void updateChatDescription(int sessionId, String description) {
+        analysisDB.updateChatDescription(sessionId, description);
+    }
+    
+    /**
+     * Get current session ID
+     */
+    public int getCurrentSessionId() {
+        return currentSessionId;
+    }
+    
+    /**
+     * Create session if none exists and conversation has content
+     */
+    public void ensureSession() {
+        if (currentSessionId == -1 && conversationHistory.length() > 0) {
+            createNewChatSession();
+        }
     }
     
     /**
