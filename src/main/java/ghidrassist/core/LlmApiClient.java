@@ -47,6 +47,10 @@ public class LlmApiClient {
         return this.DEFAULT_SYSTEM_PROMPT;
     }
 
+    public GhidrAssistPlugin getPlugin() {
+        return plugin;
+    }
+
     public String getCurrentContext() {
         if (plugin.getCurrentProgram() != null) {
             String programHash = plugin.getCurrentProgram().getExecutableSHA256();

@@ -83,7 +83,9 @@ public class TabController {
     }
 
     public void setExplainTab(ExplainTab tab) { this.explainTab = tab; }
-    public void setQueryTab(QueryTab tab) { this.queryTab = tab; }
+    public void setQueryTab(QueryTab tab) { 
+        this.queryTab = tab; 
+    }
     public void setActionsTab(ActionsTab tab) { this.actionsTab = tab; }
     public void setRAGManagementTab(RAGManagementTab tab) { this.ragManagementTab = tab; }
     public void setAnalysisOptionsTab(AnalysisOptionsTab tab) { this.analysisOptionsTab = tab; }
@@ -436,6 +438,78 @@ public class TabController {
     public void clearConversationHistory() {
         queryService.clearConversationHistory();
     }
+    
+    // ==== Chat History Management ====
+    
+    public void handleNewChatSession() {
+        SwingUtilities.invokeLater(() -> {
+            // Clear current conversation and create new session immediately
+            queryService.clearConversationHistory();
+            queryTab.setResponseText("");
+            queryTab.clearChatSelection();
+            
+            // Create new session immediately instead of waiting for first query
+            int newSessionId = queryService.createNewChatSession();
+            if (newSessionId != -1) {
+                refreshChatHistory();
+                // Select the new session in the table
+                java.util.List<ghidrassist.AnalysisDB.ChatSession> sessions = queryService.getChatSessions();
+                for (int i = 0; i < sessions.size(); i++) {
+                    if (sessions.get(i).getId() == newSessionId) {
+                        queryTab.selectChatSession(i);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    
+    public void handleDeleteCurrentSession() {
+        boolean deleted = queryService.deleteCurrentSession();
+        SwingUtilities.invokeLater(() -> {
+            if (deleted) {
+                queryTab.setResponseText("");
+                queryTab.clearChatSelection();
+                refreshChatHistory();
+            } else {
+                // If no session to delete, just clear the UI
+                queryTab.setResponseText("");
+                queryService.clearConversationHistory();
+            }
+        });
+    }
+    
+    public void handleChatSessionSelection(int rowIndex) {
+        java.util.List<ghidrassist.AnalysisDB.ChatSession> sessions = queryService.getChatSessions();
+        if (rowIndex >= 0 && rowIndex < sessions.size()) {
+            ghidrassist.AnalysisDB.ChatSession selectedSession = sessions.get(rowIndex);
+            boolean success = queryService.switchToChatSession(selectedSession.getId());
+            
+            if (success) {
+                SwingUtilities.invokeLater(() -> {
+                    String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                    queryTab.setResponseText(html);
+                });
+            }
+        }
+    }
+    
+    public void handleChatDescriptionUpdate(int rowIndex, String newDescription) {
+        java.util.List<ghidrassist.AnalysisDB.ChatSession> sessions = queryService.getChatSessions();
+        if (rowIndex >= 0 && rowIndex < sessions.size()) {
+            ghidrassist.AnalysisDB.ChatSession session = sessions.get(rowIndex);
+            queryService.updateChatDescription(session.getId(), newDescription);
+        }
+    }
+    
+    public void refreshChatHistory() {
+        if (queryTab != null) {
+            java.util.List<ghidrassist.AnalysisDB.ChatSession> sessions = queryService.getChatSessions();
+            SwingUtilities.invokeLater(() -> {
+                queryTab.updateChatHistory(sessions);
+            });
+        }
+    }
 
     public boolean isQueryRunning() {
         return isQueryRunning;
@@ -598,6 +672,9 @@ public class TabController {
                     queryTab.setResponseText(html);
                     setUIState(false, "Submit", null);
                     currentLlmApi = null; // Clear after completion
+                    
+                    // Refresh chat history to show updated timestamp
+                    refreshChatHistory();
                 });
             }
 

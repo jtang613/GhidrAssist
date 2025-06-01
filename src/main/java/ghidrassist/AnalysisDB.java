@@ -178,6 +178,101 @@ public class AnalysisDB {
         return null;
     }
     
+    // Chat History Methods
+    
+    public int createChatSession(String programHash, String description, String conversation) {
+        String insertSQL = "INSERT INTO GHChatHistory (program_hash, description, conversation) VALUES (?, ?, ?)";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(insertSQL, Statement.RETURN_GENERATED_KEYS)) {
+            pstmt.setString(1, programHash);
+            pstmt.setString(2, description);
+            pstmt.setString(3, conversation);
+            pstmt.executeUpdate();
+            
+            ResultSet rs = pstmt.getGeneratedKeys();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to create chat session: " + e.getMessage());
+        }
+        return -1;
+    }
+    
+    public void updateChatSession(int sessionId, String conversation) {
+        String updateSQL = "UPDATE GHChatHistory SET conversation = ?, last_update = CURRENT_TIMESTAMP WHERE id = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(updateSQL)) {
+            pstmt.setString(1, conversation);
+            pstmt.setInt(2, sessionId);
+            pstmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to update chat session: " + e.getMessage());
+        }
+    }
+    
+    public void updateChatDescription(int sessionId, String description) {
+        String updateSQL = "UPDATE GHChatHistory SET description = ? WHERE id = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(updateSQL)) {
+            pstmt.setString(1, description);
+            pstmt.setInt(2, sessionId);
+            pstmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to update chat description: " + e.getMessage());
+        }
+    }
+    
+    public boolean deleteChatSession(int sessionId) {
+        String deleteSQL = "DELETE FROM GHChatHistory WHERE id = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(deleteSQL)) {
+            pstmt.setInt(1, sessionId);
+            int rowsAffected = pstmt.executeUpdate();
+            return rowsAffected > 0;
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to delete chat session: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    public java.util.List<ChatSession> getChatSessions(String programHash) {
+        java.util.List<ChatSession> sessions = new java.util.ArrayList<>();
+        String selectSQL = "SELECT id, description, last_update FROM GHChatHistory WHERE program_hash = ? ORDER BY last_update DESC";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setString(1, programHash);
+            
+            ResultSet rs = pstmt.executeQuery();
+            while (rs.next()) {
+                sessions.add(new ChatSession(
+                    rs.getInt("id"),
+                    rs.getString("description"),
+                    rs.getTimestamp("last_update")
+                ));
+            }
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to retrieve chat sessions: " + e.getMessage());
+        }
+        return sessions;
+    }
+    
+    public String getChatConversation(int sessionId) {
+        String selectSQL = "SELECT conversation FROM GHChatHistory WHERE id = ?";
+        
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setInt(1, sessionId);
+            
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                return rs.getString("conversation");
+            }
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to retrieve chat conversation: " + e.getMessage());
+        }
+        return null;
+    }
+    
     public void close() {
         try {
             if (connection != null && !connection.isClosed()) {
@@ -202,5 +297,21 @@ public class AnalysisDB {
         public String getQuery() { return query; }
         public String getResponse() { return response; }
         public Timestamp getTimestamp() { return timestamp; }
+    }
+    
+    public static class ChatSession {
+        private final int id;
+        private final String description;
+        private final Timestamp lastUpdate;
+
+        public ChatSession(int id, String description, Timestamp lastUpdate) {
+            this.id = id;
+            this.description = description;
+            this.lastUpdate = lastUpdate;
+        }
+
+        public int getId() { return id; }
+        public String getDescription() { return description; }
+        public Timestamp getLastUpdate() { return lastUpdate; }
     }
 }

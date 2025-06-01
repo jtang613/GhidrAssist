@@ -29,6 +29,7 @@ import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.HighVariable;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.util.Msg;
 import ghidra.util.data.DataTypeParser;
 import ghidra.util.exception.CancelledException;
 import ghidra.util.exception.DuplicateNameException;
@@ -153,7 +154,7 @@ public class ActionExecutor {
     private static Variable findVariable(Function function, String varName) 
             throws InvalidInputException {
         // Commit local names to ensure all variables are available
-        ToolCalling.commitLocalNames(function.getProgram(), function);
+        commitLocalNames(function.getProgram(), function);
         
         // Search in all variables and parameters
         List<Variable> allVars = new ArrayList<>();
@@ -256,5 +257,27 @@ public class ActionExecutor {
             SourceType.USER_DEFINED,
             newParams
         );
+    }
+
+    /**
+     * Commits local variable names to the database for a function
+     */
+    public static void commitLocalNames(Program program, Function function) {
+        DecompInterface ifc = new DecompInterface();
+        ifc.openProgram(program);
+        
+        DecompileResults res = ifc.decompileFunction(function, 30, null);
+        if (res.decompileCompleted()) {
+            try {
+                function.setName(function.getName(), SourceType.USER_DEFINED); // Commit the function parameters
+                HighFunction hf = res.getHighFunction();
+                HighFunctionDBUtil.commitLocalNamesToDatabase(hf, SourceType.ANALYSIS);
+                HighFunctionDBUtil.commitParamsToDatabase(hf, true, null, SourceType.ANALYSIS);
+            } catch (Exception e) {
+                Msg.error(ActionExecutor.class, "Error committing local names: " + e.getMessage());
+            }
+        }
+        
+        ifc.closeProgram();
     }
 }

@@ -144,7 +144,7 @@ public class ActionParser {
     private static void processToolCalls(JsonArray toolCallsArray, DefaultTableModel model) {
         // Get list of valid function names
         List<String> validFunctions = new ArrayList<>();
-        for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
+        for (Map<String, Object> fnTemplate : ActionConstants.FN_TEMPLATES) {
             @SuppressWarnings("unchecked")
             Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
             validFunctions.add(functionMap.get("name").toString());

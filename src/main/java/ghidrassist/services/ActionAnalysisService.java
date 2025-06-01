@@ -10,7 +10,7 @@ import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.core.ActionExecutor;
 import ghidrassist.core.ActionParser;
 import ghidrassist.core.CodeUtils;
-import ghidrassist.core.ToolCalling;
+import ghidrassist.core.ActionConstants;
 
 import javax.swing.table.DefaultTableModel;
 import java.util.ArrayList;
@@ -71,7 +71,7 @@ public class ActionAnalysisService {
                 break;
             }
             
-            String actionPrompt = ToolCalling.ACTION_PROMPTS.get(action);
+            String actionPrompt = ActionConstants.ACTION_PROMPTS.get(action);
             if (actionPrompt != null) {
                 String prompt = actionPrompt.replace("{code}", request.getCode());
                 List<Map<String, Object>> functions = new ArrayList<>();
@@ -115,7 +115,7 @@ public class ActionAnalysisService {
      * Get the function template for a specific action
      */
     private Map<String, Object> getActionFunction(String actionName) {
-        for (Map<String, Object> fnTemplate : ToolCalling.FN_TEMPLATES) {
+        for (Map<String, Object> fnTemplate : ActionConstants.FN_TEMPLATES) {
             @SuppressWarnings("unchecked")
             Map<String, Object> functionMap = (Map<String, Object>) fnTemplate.get("function");
             if (functionMap.get("name").equals(actionName)) {
