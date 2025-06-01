@@ -592,7 +592,7 @@ public class TabController {
             public void onComplete(String fullResponse) {
                 SwingUtilities.invokeLater(() -> {
                     feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), fullResponse);
-                    queryService.addAssistantResponse(fullResponse);
+                    queryService.addAssistantResponse(responseBuffer.toString());
                     
                     String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
                     queryTab.setResponseText(html);

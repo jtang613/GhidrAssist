@@ -45,6 +45,17 @@ public class AnalysisDB {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createContextTableSQL);
         }
+        
+        String createChatHistoryTableSQL = "CREATE TABLE IF NOT EXISTS GHChatHistory ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "program_hash TEXT NOT NULL,"
+                + "description TEXT NOT NULL,"
+                + "conversation TEXT NOT NULL,"
+                + "last_update DATETIME DEFAULT CURRENT_TIMESTAMP"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createChatHistoryTableSQL);
+        }
     }
 
     public void upsertAnalysis(String programHash, Address functionAddress, String query, String response) {
