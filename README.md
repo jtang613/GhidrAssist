@@ -12,6 +12,7 @@ Current features include:
 * Explain the current instruction - Works for disassembly and pseudo-C.
 * General query - Query the LLM directly from the UI.
 * MCP client - Leverage MCP tools like [GhidraMCP](https://github.com/LaurieWired/GhidraMCP) from the interactive LLM chat.
+* Agentic RE using the MCP Client and GhidraMCP.
 * Propose actions - Provide a list of proposed actions to apply.
 * Function calling - Allow agent to call functions to navigate the binary, rename functions and variables.
 * Retrieval Augmented Generation - Supports adding contextual documents to refine query effectiveness.
@@ -19,7 +20,6 @@ Current features include:
 * Settings to modify API host, key, model name and max tokens.
 
 Future Roadmap:
-* Agentic assistant - Use Autogen or similar framework for self-guided binary RE.
 * Model fine tuning - Leverage the RLHF dataset to fine tune the model.
 
 ## Screenshots
