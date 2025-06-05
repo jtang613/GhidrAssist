@@ -24,7 +24,7 @@ Future Roadmap:
 
 ## Screenshots
 
-https://github.com/user-attachments/assets/29fcaa14-277c-4eb2-816a-dd1b8ef52259
+![Screenshot](https://github.com/user-attachments/assets/29fcaa14-277c-4eb2-816a-dd1b8ef52259)
 
 
 https://github.com/user-attachments/assets/bd79474a-c82f-4083-b432-96625fef1387
