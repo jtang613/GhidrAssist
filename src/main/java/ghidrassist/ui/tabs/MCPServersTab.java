@@ -187,18 +187,11 @@ public class MCPServersTab extends JPanel {
                     
                     if (success) {
                         message = "✅ Connection successful!\n\n" +
-                                 "Server is responding and supports GhidraMCP bridge protocol.";
+                                 "Server is responding and supports MCP protocol.";
                         messageType = JOptionPane.INFORMATION_MESSAGE;
                     } else {
                         message = "❌ Connection failed:\n\n" + 
                             (errorMessage.isEmpty() ? "Unknown error occurred" : errorMessage);
-                        
-                        // Add helpful hints for common issues
-                        if (errorMessage.contains("GhidraMCP bridge protocol")) {
-                            message += "\n\n💡 Tip: Make sure the GhidraMCP bridge is running and accessible.\n" +
-                                      "The server should have /sse and /messages/ endpoints available.";
-                        }
-                        
                         messageType = JOptionPane.ERROR_MESSAGE;
                     }
                     
