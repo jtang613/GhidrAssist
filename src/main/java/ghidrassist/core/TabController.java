@@ -637,29 +637,52 @@ public class TabController {
     private LlmApi.LlmResponseHandler createConversationHandler() {
         return new LlmApi.LlmResponseHandler() {
             private final StringBuilder responseBuffer = new StringBuilder();
+            private final Object bufferLock = new Object();
 
             @Override
             public void onStart() {
                 SwingUtilities.invokeLater(() -> {
-                    responseBuffer.setLength(0);
+                    synchronized (bufferLock) {
+                        responseBuffer.setLength(0);
+                    }
                     queryTab.setResponseText("Processing...");
                 });
             }
 
             @Override
             public void onUpdate(String partialResponse) {
-                SwingUtilities.invokeLater(() -> {
-                    // For conversational tool calling, partialResponse contains incremental messages
-                    // We need to accumulate them properly
-                    responseBuffer.append(partialResponse);
+                // Synchronize access to the buffer to prevent race conditions
+                synchronized (bufferLock) {
+                    // Skip empty or null responses
+                    if (partialResponse == null || partialResponse.isEmpty()) {
+                        return;
+                    }
                     
-                    // Show conversation history + current assistant response
-                    String fullConversation = queryService.getConversationHistory() + 
-                        "**Assistant**:\n" + responseBuffer.toString();
+                    // Check if this is cumulative content (contains what we already have)
+                    String currentBuffer = responseBuffer.toString();
+                    if (partialResponse.startsWith(currentBuffer)) {
+                        // This is cumulative content, extract only the new part
+                        String newContent = partialResponse.substring(currentBuffer.length());
+                        if (!newContent.isEmpty()) {
+                            responseBuffer.append(newContent);
+                        }
+                    } else {
+                        // This is a true delta, append it
+                        responseBuffer.append(partialResponse);
+                    }
                     
-                    String html = markdownHelper.markdownToHtml(fullConversation);
-                    queryTab.setResponseText(html);
-                });
+                    // Capture the current buffer state for display
+                    final String currentResponse = responseBuffer.toString();
+                    
+                    SwingUtilities.invokeLater(() -> {
+                        // Show conversation history + current assistant response
+                        String fullConversation = queryService.getConversationHistory() + 
+                            "**Assistant**:\n" + currentResponse;
+                        
+                        String html = markdownHelper.markdownToHtml(fullConversation);
+                        queryTab.setResponseText(html);
+                    });
+                }
             }
 
             @Override
