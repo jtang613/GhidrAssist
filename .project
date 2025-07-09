@@ -18,13 +18,12 @@
 	</buildSpec>
 	<natures>
 		<nature>org.eclipse.jdt.core.javanature</nature>
-		<nature>org.python.pydev.pythonNature</nature>
 	</natures>
 	<linkedResources>
 		<link>
 			<name>Ghidra</name>
 			<type>2</type>
-			<location>/home/jtang613/tools/ghidra_11.3.2_PUBLIC</location>
+			<location>/home/jtang613/tools/ghidra_11.4_PUBLIC</location>
 		</link>
 	</linkedResources>
 </projectDescription>

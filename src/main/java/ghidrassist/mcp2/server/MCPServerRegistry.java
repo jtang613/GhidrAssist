@@ -193,8 +193,8 @@ public class MCPServerRegistry {
      */
     public void initializeDefaults() {
         if (servers.isEmpty()) {
-            // Add default GhidraMCP server (disabled by default)
-            MCPServerConfig defaultServer = MCPServerConfig.createGhidraMCPDefault();
+            // Add default GhidrAssistMCP server (disabled by default)
+            MCPServerConfig defaultServer = MCPServerConfig.createGhidrAssistMCPDefault();
             defaultServer.setEnabled(false); // Disabled by default until user enables
             try {
                 servers.add(defaultServer); // Add directly to avoid validation during initialization

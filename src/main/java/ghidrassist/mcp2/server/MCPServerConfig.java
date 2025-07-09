@@ -210,11 +210,11 @@ public class MCPServerConfig {
     }
     
     /**
-     * Create default GhidraMCP configuration
+     * Create default MCP configuration
      */
-    public static MCPServerConfig createGhidraMCPDefault() {
-        MCPServerConfig config = new MCPServerConfig("GhidraMCP Local", "http://localhost:8081");
-        config.setDescription("Local GhidraMCP server instance");
+    public static MCPServerConfig createGhidrAssistMCPDefault() {
+        MCPServerConfig config = new MCPServerConfig("GhidrAssistMCP Local", "http://localhost:8081");
+        config.setDescription("Local GhidrAssistMCP server instance");
         config.setTransport(TransportType.SSE);
         return config;
     }

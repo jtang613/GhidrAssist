@@ -40,15 +40,19 @@ public class SSETransport extends MCPTransport {
     public CompletableFuture<Void> connect() {
         return CompletableFuture.supplyAsync(() -> {
             try {
+                Msg.debug(this, "Starting connection to MCP server: " + config.getName() + " at " + config.getUrl());
+                
                 // Test basic connectivity first
                 if (!testConnection()) {
                     throw new RuntimeException("Failed to connect to MCP server at " + config.getUrl());
                 }
+                Msg.debug(this, "Basic connectivity test passed for MCP server: " + config.getName());
                 
                 // Get session ID from SSE endpoint
                 if (!obtainSessionId()) {
-                    throw new RuntimeException("Failed to obtain session ID from GhidraMCP bridge at " + config.getUrl());
+                    throw new RuntimeException("Failed to obtain session ID from MCP server at " + config.getUrl());
                 }
+                Msg.debug(this, "Session ID obtained successfully for MCP server: " + config.getName());
                 
                 // Mark as connected
                 connected = true;
@@ -58,6 +62,7 @@ public class SSETransport extends MCPTransport {
                 return null;
                 
             } catch (Exception e) {
+                Msg.error(this, "Failed to connect to MCP server " + config.getName() + ": " + e.getMessage(), e);
                 notifyError(e);
                 throw new RuntimeException("Failed to connect to MCP server", e);
             }
@@ -182,7 +187,7 @@ public class SSETransport extends MCPTransport {
     }
     
     /**
-     * Test if server supports GhidraMCP bridge protocol
+     * Test if server supports MCP SSE protocol
      */
     private boolean testMCPProtocol() {
         try {
@@ -224,13 +229,13 @@ public class SSETransport extends MCPTransport {
             sseConn.disconnect();
             
             boolean protocolSupported = (testSessionId != null);
-            Msg.debug(this, "GhidraMCP protocol test - SSE: " + sseResponse + 
+            Msg.debug(this, "MCP protocol test - SSE: " + sseResponse + 
                      (protocolSupported ? " - Session ID obtained" : " - No session ID in response"));
             
             return protocolSupported;
             
         } catch (Exception e) {
-            Msg.debug(this, "GhidraMCP protocol test failed: " + e.getMessage());
+            Msg.debug(this, "MCP protocol test failed: " + e.getMessage());
             return false;
         }
     }
@@ -241,6 +246,8 @@ public class SSETransport extends MCPTransport {
     private boolean obtainSessionId() {
         try {
             URL sseUrl = new URL(config.getBaseUrl() + "/sse");
+            Msg.debug(this, "Attempting to connect to SSE endpoint: " + sseUrl);
+            
             sseConnection = (HttpURLConnection) sseUrl.openConnection();
             sseConnection.setRequestMethod("GET");
             sseConnection.setRequestProperty("Accept", "text/event-stream");
@@ -248,14 +255,23 @@ public class SSETransport extends MCPTransport {
             sseConnection.setReadTimeout(0); // No timeout for SSE connection
             
             int responseCode = sseConnection.getResponseCode();
+            Msg.debug(this, "SSE endpoint response code: " + responseCode);
+            
+            // Log response headers for debugging
+            Msg.debug(this, "SSE response headers:");
+            sseConnection.getHeaderFields().forEach((key, values) -> {
+                Msg.debug(this, "  " + key + ": " + String.join(", ", values));
+            });
+            
             if (responseCode != 200) {
-                Msg.debug(this, "SSE endpoint failed: HTTP " + responseCode);
+                Msg.error(this, "SSE endpoint failed: HTTP " + responseCode + " - " + sseConnection.getResponseMessage());
                 return false;
             }
             
             // Create reader but keep connection alive
             sseReader = new BufferedReader(new InputStreamReader(
                     sseConnection.getInputStream(), StandardCharsets.UTF_8));
+            Msg.debug(this, "SSE reader created successfully");
             
             // Start background thread to keep SSE connection alive and handle events
             startSSEReaderThread();
@@ -263,20 +279,31 @@ public class SSETransport extends MCPTransport {
             // Wait a bit for the session ID to be received
             int maxWait = 2000; // 2 seconds - reduced from 5 seconds
             int waited = 0;
+            Msg.debug(this, "Waiting for session ID (max " + maxWait + "ms)...");
+            
             while (sessionId == null && waited < maxWait) {
                 try {
                     Thread.sleep(50); // 50ms intervals - reduced from 100ms
                     waited += 50;
+                    if (waited % 500 == 0) { // Log every 500ms
+                        Msg.debug(this, "Still waiting for session ID... (" + waited + "ms elapsed)");
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
                 }
             }
             
-            return sessionId != null;
+            if (sessionId == null) {
+                Msg.error(this, "Timeout waiting for session ID after " + waited + "ms");
+                return false;
+            }
+            
+            Msg.debug(this, "Session ID obtained: " + sessionId);
+            return true;
             
         } catch (Exception e) {
-            Msg.debug(this, "Failed to obtain session ID: " + e.getMessage());
+            Msg.error(this, "Failed to obtain session ID: " + e.getMessage(), e);
             return false;
         }
     }
@@ -287,18 +314,32 @@ public class SSETransport extends MCPTransport {
     private void startSSEReaderThread() {
         sseThread = new Thread(() -> {
             try {
+                Msg.debug(this, "Starting SSE reader thread for MCP server: " + config.getName());
                 String line;
+                int lineCount = 0;
+                long startTime = System.currentTimeMillis();
+                
                 while (!shouldStop && (line = sseReader.readLine()) != null) {
-                    Msg.debug(this, "SSE line: " + line);
+                    lineCount++;
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    Msg.debug(this, "SSE line " + lineCount + " (after " + elapsed + "ms): " + line);
                     
-                    // Look for endpoint data with session ID
+                    // Look for endpoint data with session ID (handle both old and new formats)
                     if (line.startsWith("data: /messages/?session_id=")) {
+                        // Old format: data: /messages/?session_id=<id>
                         String endpoint = line.substring("data: ".length());
-                        // Extract session ID from endpoint
                         int sessionStart = endpoint.indexOf("session_id=") + "session_id=".length();
                         if (sessionStart > "session_id=".length() - 1) {
                             sessionId = endpoint.substring(sessionStart);
-                            Msg.debug(this, "Extracted session ID: " + sessionId);
+                            Msg.debug(this, "Successfully extracted session ID (old format): " + sessionId);
+                        }
+                    } else if (line.startsWith("data: message?sessionId=")) {
+                        // New format: data: message?sessionId=<id>
+                        String endpoint = line.substring("data: ".length());
+                        int sessionStart = endpoint.indexOf("sessionId=") + "sessionId=".length();
+                        if (sessionStart > "sessionId=".length() - 1) {
+                            sessionId = endpoint.substring(sessionStart);
+                            Msg.debug(this, "Successfully extracted session ID (new format): " + sessionId);
                         }
                     }
                     // Look for actual response data
@@ -330,9 +371,22 @@ public class SSETransport extends MCPTransport {
                     
                     // Handle other SSE events as needed
                 }
+                
+                // If we reach here, the SSE stream has ended
+                if (!shouldStop) {
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    Msg.warn(this, "SSE stream ended unexpectedly for MCP server: " + config.getName() + 
+                            " after " + elapsed + "ms, read " + lineCount + " lines");
+                    handleSSEDisconnection();
+                } else {
+                    Msg.debug(this, "SSE reader thread stopping normally");
+                }
             } catch (Exception e) {
                 if (!shouldStop) {
-                    Msg.debug(this, "SSE reader thread error: " + e.getMessage());
+                    Msg.error(this, "SSE reader thread error for MCP server " + config.getName() + ": " + e.getMessage(), e);
+                    handleSSEDisconnection();
+                } else {
+                    Msg.debug(this, "SSE reader thread stopping normally");
                 }
             }
         });
@@ -342,14 +396,30 @@ public class SSETransport extends MCPTransport {
     }
     
     /**
-     * Send MCP notification to GhidraMCP bridge (no response expected)
+     * Handle SSE disconnection by updating connection state and notifying listeners
+     */
+    private void handleSSEDisconnection() {
+        connected = false;
+        
+        // Complete any pending requests with error
+        pendingRequests.values().forEach(future -> 
+            future.completeExceptionally(new RuntimeException("SSE connection lost")));
+        pendingRequests.clear();
+        
+        // Notify listeners of disconnection
+        notifyError(new RuntimeException("SSE connection lost for MCP server: " + config.getName()));
+        notifyDisconnected();
+    }
+    
+    /**
+     * Send MCP notification to server (no response expected)
      */
     private void sendHttpNotification(MCPRequest notification) throws Exception {
         if (sessionId == null) {
             throw new RuntimeException("No session ID available - connection not properly established");
         }
         
-        URL url = new URL(config.getBaseUrl() + "/messages/?session_id=" + sessionId);
+        URL url = new URL(config.getBaseUrl() + "/message?sessionId=" + sessionId);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         
         // Configure connection for JSON-RPC 2.0 over HTTP
@@ -391,7 +461,7 @@ public class SSETransport extends MCPTransport {
     }
     
     /**
-     * Send MCP request to GhidraMCP bridge via SSE transport
+     * Send MCP request to MCP server via SSE transport
      */
     private String sendHttpRequest(MCPRequest request) throws Exception {
         if (sessionId == null) {
@@ -403,7 +473,7 @@ public class SSETransport extends MCPTransport {
         CompletableFuture<MCPResponse> responseFeature = new CompletableFuture<>();
         pendingRequests.put(requestId, responseFeature);
         
-        URL url = new URL(config.getBaseUrl() + "/messages/?session_id=" + sessionId);
+        URL url = new URL(config.getBaseUrl() + "/message?sessionId=" + sessionId);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         
         // Configure connection for JSON-RPC 2.0 over HTTP
@@ -466,7 +536,7 @@ public class SSETransport extends MCPTransport {
     }
     
     /**
-     * Convert GhidraMCP bridge response to MCP format
+     * Convert MCP server response to MCP format
      */
     private String convertBridgeResponseToMCPFormat(String bridgeResponse, MCPRequest originalRequest) {
         // If the bridge response is already valid JSON-RPC 2.0, return it as-is
