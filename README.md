@@ -11,7 +11,7 @@ Current features include:
 * Explain the current function - Works for disassembly and pseudo-C.
 * Explain the current instruction - Works for disassembly and pseudo-C.
 * General query - Query the LLM directly from the UI.
-* MCP client - Leverage MCP tools like [GhidraMCP](https://github.com/LaurieWired/GhidraMCP) from the interactive LLM chat.
+* MCP client - Leverage MCP tools like [GhidrAssistMCP](https://github.com/jtang613/GhidrAssistMCP) from the interactive LLM chat.
 * Agentic RE using the MCP Client and GhidraMCP.
 * Propose actions - Provide a list of proposed actions to apply.
 * Function calling - Allow agent to call functions to navigate the binary, rename functions and variables.
