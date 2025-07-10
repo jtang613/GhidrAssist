@@ -364,6 +364,16 @@ public class TabController {
         }
     }
 
+    public void handleContextLoad() {
+        try {
+            String currentContext = analysisDataService.getContext();
+            analysisOptionsTab.setContextText(currentContext);
+        } catch (Exception e) {
+            Msg.showError(this, analysisOptionsTab, "Error", 
+                "Failed to load context: " + e.getMessage());
+        }
+    }
+
     public void handleContextRevert() {
         try {
             String defaultContext = analysisDataService.revertToDefaultContext();

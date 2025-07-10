@@ -61,7 +61,7 @@ public class GhidrAssistUI extends JPanel {
         // Initialize tabs that need startup data
         SwingUtilities.invokeLater(() -> {
             // Load initial context
-            controller.handleContextRevert();
+            controller.handleContextLoad();
             
             // Load RAG file list
             controller.loadIndexedFiles(ragManagementTab.getDocumentList());
@@ -69,8 +69,8 @@ public class GhidrAssistUI extends JPanel {
         
         tabbedPane.addChangeListener(e -> {
             if (tabbedPane.getSelectedComponent() == analysisOptionsTab) {
-                // Refresh context when Analysis Options tab is selected
-                controller.handleContextRevert();
+                // Load current context when Analysis Options tab is selected
+                controller.handleContextLoad();
             }
         });
     }
