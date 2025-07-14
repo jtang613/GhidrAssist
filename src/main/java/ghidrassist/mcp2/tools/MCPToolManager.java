@@ -1,6 +1,6 @@
 package ghidrassist.mcp2.tools;
 
-import ghidrassist.mcp2.protocol.MCPProtocolClient;
+import ghidrassist.mcp2.protocol.MCPClientAdapter;
 import ghidrassist.mcp2.server.MCPServerConfig;
 import ghidrassist.mcp2.server.MCPServerRegistry;
 import ghidra.program.model.listing.Program;
@@ -25,7 +25,7 @@ public class MCPToolManager {
     
     private static MCPToolManager instance;
     
-    private final Map<String, MCPProtocolClient> clients = new ConcurrentHashMap<>();
+    private final Map<String, MCPClientAdapter> clients = new ConcurrentHashMap<>();
     private final Map<String, MCPTool> allTools = new ConcurrentHashMap<>();
     private MCPToolManagerHandler handler;
     private volatile boolean initialized = false;
@@ -106,7 +106,7 @@ public class MCPToolManager {
         }
         
         return CompletableFuture.runAsync(() -> {
-            MCPProtocolClient client = new MCPProtocolClient(config);
+            MCPClientAdapter client = new MCPClientAdapter(config);
             client.setHandler(new ClientHandler(config.getName()));
             
             try {
@@ -126,7 +126,7 @@ public class MCPToolManager {
      */
     public CompletableFuture<Void> disconnectFromServer(String serverName) {
         return CompletableFuture.runAsync(() -> {
-            MCPProtocolClient client = clients.remove(serverName);
+            MCPClientAdapter client = clients.remove(serverName);
             if (client != null) {
                 try {
                     // Disconnect and wait for completion
@@ -185,19 +185,23 @@ public class MCPToolManager {
                 new IllegalArgumentException("Tool not found: " + toolName));
         }
         
-        MCPProtocolClient client = clients.get(tool.getServerName());
+        MCPClientAdapter client = clients.get(tool.getServerName());
         if (client == null || !client.isReady()) {
             return CompletableFuture.failedFuture(
                 new IllegalStateException("Server not available: " + tool.getServerName()));
         }
         
+        Msg.debug(this, "MCPToolManager delegating to client: " + tool.getServerName() + " for tool: " + toolName);
         return client.executeTool(toolName, arguments)
             .thenApply(result -> {
+                Msg.debug(this, "MCPToolManager received result for tool: " + toolName);
                 String content = result != null ? result.toString() : "";
                 return MCPToolResult.success(content);
             })
-            .exceptionally(throwable -> 
-                MCPToolResult.error(throwable.getMessage()));
+            .exceptionally(throwable -> {
+                Msg.error(this, "MCPToolManager caught exception for tool " + toolName + ": " + throwable.getMessage());
+                return MCPToolResult.error(throwable.getMessage());
+            });
     }
     
     /**
@@ -234,7 +238,7 @@ public class MCPToolManager {
      * Check if any servers are connected
      */
     public boolean hasConnectedServers() {
-        return clients.values().stream().anyMatch(MCPProtocolClient::isReady);
+        return clients.values().stream().anyMatch(MCPClientAdapter::isReady);
     }
     
     /**
@@ -246,7 +250,7 @@ public class MCPToolManager {
         }
         
         long connectedCount = clients.values().stream()
-            .filter(MCPProtocolClient::isReady)
+            .filter(MCPClientAdapter::isReady)
             .count();
         
         return String.format("%d/%d servers connected (%d tools)", 
@@ -294,7 +298,7 @@ public class MCPToolManager {
     /**
      * Client event handler
      */
-    private class ClientHandler implements MCPProtocolClient.MCPClientHandler {
+    private class ClientHandler implements MCPClientAdapter.MCPClientHandler {
         private final String serverName;
         
         public ClientHandler(String serverName) {
@@ -302,14 +306,14 @@ public class MCPToolManager {
         }
         
         @Override
-        public void onConnected(MCPProtocolClient client) {
+        public void onConnected(MCPClientAdapter client) {
             if (handler != null) {
                 handler.onServerConnected(serverName);
             }
         }
         
         @Override
-        public void onDisconnected(MCPProtocolClient client) {
+        public void onDisconnected(MCPClientAdapter client) {
             // Remove tools from this server
             allTools.entrySet().removeIf(entry -> 
                 entry.getValue().getServerName().equals(serverName));
@@ -325,7 +329,7 @@ public class MCPToolManager {
         }
         
         @Override
-        public void onToolsDiscovered(MCPProtocolClient client, List<MCPTool> tools) {
+        public void onToolsDiscovered(MCPClientAdapter client, List<MCPTool> tools) {
             
             // Add tools from this server
             for (MCPTool tool : tools) {
@@ -337,7 +341,7 @@ public class MCPToolManager {
         }
         
         @Override
-        public void onError(MCPProtocolClient client, Throwable error) {
+        public void onError(MCPClientAdapter client, Throwable error) {
             if (handler != null) {
                 handler.onServerError(serverName, error);
             }

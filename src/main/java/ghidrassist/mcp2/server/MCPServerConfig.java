@@ -1,7 +1,6 @@
 package ghidrassist.mcp2.server;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
 
 /**
  * Configuration for an MCP server connection.
@@ -35,8 +34,8 @@ public class MCPServerConfig {
     // Default constructor for JSON deserialization
     public MCPServerConfig() {
         this.transport = TransportType.SSE;
-        this.connectionTimeout = 5; // Reduced from 10 seconds
-        this.requestTimeout = 15;   // Reduced from 30 seconds
+        this.connectionTimeout = 15;
+        this.requestTimeout = 30;
         this.enabled = true;
     }
     
