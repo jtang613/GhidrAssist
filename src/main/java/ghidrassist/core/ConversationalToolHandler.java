@@ -769,37 +769,49 @@ public class ConversationalToolHandler {
     private CompletableFuture<MCPToolResult> executeToolWithTransaction(MCPToolManager toolManager, String toolName, JsonObject arguments) {
         CompletableFuture<MCPToolResult> future = new CompletableFuture<>();
         
-        // Execute on Swing EDT like Actions tab does
-        javax.swing.SwingUtilities.invokeLater(() -> {
-            ghidra.program.model.listing.Program program = apiClient.getPlugin().getCurrentProgram();
-            
-            if (program == null) {
-                // If no program is loaded, execute without transaction
-                toolManager.executeTool(toolName, arguments)
-                    .thenAccept(future::complete)
-                    .exceptionally(throwable -> {
-                        future.complete(MCPToolResult.error("Tool execution failed: " + throwable.getMessage()));
-                        return null;
-                    });
-                return;
-            }
-            
-            // Execute with transaction on EDT
-            int transaction = program.startTransaction("MCP Tool: " + toolName);
-            boolean success = false;
-            
+        ghidra.program.model.listing.Program program = apiClient.getPlugin().getCurrentProgram();
+        
+        if (program == null) {
+            // If no program is loaded, execute without transaction off EDT
+            return toolManager.executeTool(toolName, arguments);
+        }
+        
+        // Execute MCP call on background thread to avoid blocking EDT
+        CompletableFuture.runAsync(() -> {
+            // Start transaction on EDT
+            final int[] transaction = new int[1];
             try {
-                MCPToolResult result = toolManager.executeTool(toolName, arguments).get();
-                success = result.isSuccess();
-                future.complete(result);
-                
+                javax.swing.SwingUtilities.invokeAndWait(() -> {
+                    transaction[0] = program.startTransaction("MCP Tool: " + toolName);
+                });
             } catch (Exception e) {
-                Msg.error(this, "MCP tool execution failed: " + e.getMessage());
-                future.complete(MCPToolResult.error("Tool execution failed: " + e.getMessage()));
-                
-            } finally {
-                program.endTransaction(transaction, success);
+                throw new RuntimeException("Failed to start transaction", e);
             }
+            
+            // Execute MCP call on background thread
+            toolManager.executeTool(toolName, arguments)
+                .thenAccept(result -> {
+                    // End transaction on EDT
+                    javax.swing.SwingUtilities.invokeLater(() -> {
+                        boolean success = result.isSuccess();
+                        program.endTransaction(transaction[0], success);
+                        future.complete(result);
+                    });
+                })
+                .exceptionally(throwable -> {
+                    // End transaction on EDT with failure
+                    javax.swing.SwingUtilities.invokeLater(() -> {
+                        program.endTransaction(transaction[0], false);
+                        Msg.error(this, "MCP tool execution failed: " + throwable.getMessage());
+                        future.complete(MCPToolResult.error("Tool execution failed: " + throwable.getMessage()));
+                    });
+                    return null;
+                });
+                
+        }).exceptionally(throwable -> {
+            Msg.error(this, "Failed to start transaction: " + throwable.getMessage());
+            future.complete(MCPToolResult.error("Failed to start transaction: " + throwable.getMessage()));
+            return null;
         });
         
         return future;

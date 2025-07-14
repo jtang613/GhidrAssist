@@ -159,15 +159,15 @@ public class MCPServersTab extends JPanel {
             @Override
             protected Boolean doInBackground() throws Exception {
                 try {
-                    // Create transport for testing
-                    ghidrassist.mcp2.transport.SSETransport transport = 
-                        new ghidrassist.mcp2.transport.SSETransport(server);
+                    // Create client adapter for testing using official SDK
+                    ghidrassist.mcp2.protocol.MCPClientAdapter client = 
+                        new ghidrassist.mcp2.protocol.MCPClientAdapter(server);
                     
                     // Try to connect (this will test both connectivity and MCP protocol)
-                    transport.connect().get(); // Wait for connection
+                    client.connect().get(); // Wait for connection
                     
                     // If we get here, both basic connectivity and MCP protocol tests passed
-                    transport.disconnect();
+                    client.disconnect();
                     return true;
                     
                 } catch (Exception e) {

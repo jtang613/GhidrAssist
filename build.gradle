@@ -61,6 +61,12 @@ dependencies {
 	implementation 'org.apache.lucene:lucene-queryparser:9.11.1'
 	implementation 'com.squareup.okio:okio:3.10.2'
 	implementation "com.squareup.okhttp3:okhttp:4.12.0"
+	
+	// MCP SDK core dependency
+	implementation 'io.modelcontextprotocol.sdk:mcp:0.10.0'
+	
+	// Project Reactor dependency for async MCP client
+	implementation 'io.projectreactor:reactor-core:3.6.0'
 }
 
 // Exclude additional files from the built extension

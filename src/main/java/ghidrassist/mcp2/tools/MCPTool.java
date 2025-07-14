@@ -11,10 +11,14 @@ import java.util.HashMap;
  */
 public class MCPTool {
     
-    private final String name;
-    private final String description;
-    private final JsonObject inputSchema;
-    private final String serverName;      // Which server provides this tool
+    private String name;
+    private String description;
+    private JsonObject inputSchema;
+    private String serverName;      // Which server provides this tool
+    
+    // Default constructor for adapter
+    public MCPTool() {
+    }
     
     public MCPTool(String name, String description, JsonObject inputSchema, String serverName) {
         this.name = name;
@@ -27,16 +31,32 @@ public class MCPTool {
         return name;
     }
     
+    public void setName(String name) {
+        this.name = name;
+    }
+    
     public String getDescription() {
         return description;
+    }
+    
+    public void setDescription(String description) {
+        this.description = description;
     }
     
     public JsonObject getInputSchema() {
         return inputSchema;
     }
     
+    public void setInputSchema(JsonObject inputSchema) {
+        this.inputSchema = inputSchema;
+    }
+    
     public String getServerName() {
         return serverName;
+    }
+    
+    public void setServerName(String serverName) {
+        this.serverName = serverName;
     }
     
     /**
@@ -136,7 +156,8 @@ public class MCPTool {
         if (obj == null || getClass() != obj.getClass()) return false;
         
         MCPTool mcpTool = (MCPTool) obj;
-        return name.equals(mcpTool.name) && serverName.equals(mcpTool.serverName);
+        return name != null && name.equals(mcpTool.name) && 
+               serverName != null && serverName.equals(mcpTool.serverName);
     }
     
     @Override
