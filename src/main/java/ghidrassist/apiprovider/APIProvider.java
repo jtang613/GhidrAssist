@@ -26,7 +26,8 @@ public abstract class APIProvider implements ChatProvider {
         ANTHROPIC,
         OLLAMA,
         OPENWEBUI,
-        LMSTUDIO
+        LMSTUDIO,
+        AZURE_OPENAI
     }
 
     protected String name;

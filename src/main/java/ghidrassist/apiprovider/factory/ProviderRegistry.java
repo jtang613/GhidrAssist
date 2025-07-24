@@ -126,6 +126,7 @@ public class ProviderRegistry {
     private void registerDefaultFactories() {
         registerFactory(new AnthropicProviderFactory());
         registerFactory(new OpenAIProviderFactory());
+        registerFactory(new AzureOpenAIProviderFactory());
         registerFactory(new OllamaProviderFactory());
         registerFactory(new LMStudioProviderFactory());
         registerFactory(new OpenWebUiProviderFactory());
