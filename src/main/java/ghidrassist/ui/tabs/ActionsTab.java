@@ -2,7 +2,11 @@ package ghidrassist.ui.tabs;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableCellRenderer;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.util.Map;
 import java.util.HashMap;
 import ghidrassist.core.TabController;
@@ -16,6 +20,7 @@ public class ActionsTab extends JPanel {
     private JButton analyzeFunctionButton;
     private JButton analyzeClearButton;
     private JButton applyActionsButton;
+    private JCheckBox selectAllCheckBox;
 
     public ActionsTab(TabController controller) {
         super(new BorderLayout());
@@ -26,12 +31,15 @@ public class ActionsTab extends JPanel {
     }
 
     private void initializeComponents() {
+        // Initialize select all checkbox
+        selectAllCheckBox = new JCheckBox();
+
         // Initialize table
         actionsTable = createActionsTable();
-        
+
         // Initialize filter checkboxes
         filterCheckBoxes = createFilterCheckboxes();
-        
+
         // Initialize buttons
         analyzeFunctionButton = new JButton("Analyze Function");
         analyzeClearButton = new JButton("Clear");
@@ -50,8 +58,20 @@ public class ActionsTab extends JPanel {
         };
         
         JTable table = new JTable(model);
-        int w = table.getColumnModel().getColumn(0).getWidth();
-        table.getColumnModel().getColumn(0).setMaxWidth((int)((double) (w*0.8)));
+        // Set a reasonable preferred width for the Select column while allowing it to be resizable
+        table.getColumnModel().getColumn(0).setPreferredWidth(60);
+
+        // Set up custom header renderer for the Select column
+        setupSelectAllHeader(table);
+
+        // Add table model listener to update header checkbox state when individual selections change
+        model.addTableModelListener(e -> {
+            // Only update for changes to the Select column (column 0)
+            if (e.getColumn() == 0 || e.getColumn() == javax.swing.event.TableModelEvent.ALL_COLUMNS) {
+                SwingUtilities.invokeLater(this::updateSelectAllCheckboxState);
+            }
+        });
+
         return table;
     }
 
@@ -68,6 +88,87 @@ public class ActionsTab extends JPanel {
             }
         }
         return checkboxes;
+    }
+
+    private void setupSelectAllHeader(JTable table) {
+        // Create custom header renderer for the Select column
+        TableCellRenderer headerRenderer = new TableCellRenderer() {
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value,
+                    boolean isSelected, boolean hasFocus, int row, int column) {
+                if (column == 0) {
+                    // Return checkbox for Select column header
+                    selectAllCheckBox.setText("Select");
+                    selectAllCheckBox.setHorizontalAlignment(SwingConstants.CENTER);
+                    return selectAllCheckBox;
+                } else {
+                    // Use default renderer for other columns
+                    return table.getTableHeader().getDefaultRenderer()
+                        .getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                }
+            }
+        };
+
+        // Set the custom renderer for the Select column
+        table.getColumnModel().getColumn(0).setHeaderRenderer(headerRenderer);
+
+        // Add mouse listener to handle header checkbox clicks
+        table.getTableHeader().addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                JTableHeader header = (JTableHeader) e.getSource();
+                int columnIndex = header.columnAtPoint(e.getPoint());
+
+                // Only handle clicks on the Select column
+                if (columnIndex == 0) {
+                    boolean currentState = selectAllCheckBox.isSelected();
+                    selectAllCheckBox.setSelected(!currentState);
+                    toggleAllRowSelections(!currentState);
+                    header.repaint();
+                }
+            }
+        });
+    }
+
+    private void toggleAllRowSelections(boolean selectAll) {
+        DefaultTableModel model = (DefaultTableModel) actionsTable.getModel();
+        for (int row = 0; row < model.getRowCount(); row++) {
+            model.setValueAt(selectAll, row, 0);
+        }
+        actionsTable.repaint();
+    }
+
+    public void updateSelectAllCheckboxState() {
+        DefaultTableModel model = (DefaultTableModel) actionsTable.getModel();
+        if (model.getRowCount() == 0) {
+            selectAllCheckBox.setSelected(false);
+            return;
+        }
+
+        boolean allSelected = true;
+        boolean noneSelected = true;
+
+        for (int row = 0; row < model.getRowCount(); row++) {
+            Boolean value = (Boolean) model.getValueAt(row, 0);
+            boolean isSelected = value != null && value;
+
+            if (!isSelected) {
+                allSelected = false;
+            } else {
+                noneSelected = false;
+            }
+        }
+
+        if (allSelected) {
+            selectAllCheckBox.setSelected(true);
+        } else if (noneSelected) {
+            selectAllCheckBox.setSelected(false);
+        } else {
+            // Mixed state - we'll show as unselected but could be enhanced to show indeterminate state
+            selectAllCheckBox.setSelected(false);
+        }
+
+        actionsTable.getTableHeader().repaint();
     }
 
     private void layoutComponents() {
@@ -93,11 +194,13 @@ public class ActionsTab extends JPanel {
     }
 
     private void setupListeners() {
-        analyzeFunctionButton.addActionListener(e -> 
+        analyzeFunctionButton.addActionListener(e ->
             controller.handleAnalyzeFunction(filterCheckBoxes));
-        analyzeClearButton.addActionListener(e -> 
-            ((DefaultTableModel)actionsTable.getModel()).setRowCount(0));
-        applyActionsButton.addActionListener(e -> 
+        analyzeClearButton.addActionListener(e -> {
+            ((DefaultTableModel)actionsTable.getModel()).setRowCount(0);
+            updateSelectAllCheckboxState();
+        });
+        applyActionsButton.addActionListener(e ->
             controller.handleApplyActions(actionsTable));
     }
 
