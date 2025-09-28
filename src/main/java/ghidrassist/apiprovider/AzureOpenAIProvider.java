@@ -421,7 +421,7 @@ public class AzureOpenAIProvider extends APIProvider
         // Handle different token field names based on model
         String modelName = super.getModel();
         if (modelName != null
-                && (modelName.startsWith("o1-") || modelName.startsWith("o3-") || modelName.startsWith("o4-"))) {
+                && (modelName.startsWith("o1-") || modelName.startsWith("o3-") || modelName.startsWith("o4-") || modelName.startsWith("gpt-5"))) {
             payload.addProperty("max_completion_tokens", super.getMaxTokens());
         } else {
             payload.addProperty("max_tokens", super.getMaxTokens());
