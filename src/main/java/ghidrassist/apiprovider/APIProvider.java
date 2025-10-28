@@ -51,7 +51,7 @@ public abstract class APIProvider implements ChatProvider {
         this.key = key;
         this.disableTlsVerification = disableTlsVerification;
         this.timeout = Duration.ofSeconds(timeout2);
-        this.retryHandler = new RetryHandler(3, this);
+        this.retryHandler = new RetryHandler(50, this);
         this.client = buildClient();
     }
 

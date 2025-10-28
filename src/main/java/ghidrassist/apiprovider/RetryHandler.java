@@ -10,9 +10,9 @@ import java.util.function.Supplier;
  * Handles retry logic for API provider operations
  */
 public class RetryHandler {
-    private static final int DEFAULT_MAX_RETRIES = 3;
-    private static final int BASE_BACKOFF_MS = 1000; // 1 second
-    private static final int MAX_BACKOFF_MS = 90000; // 90 seconds
+    private static final int DEFAULT_MAX_RETRIES = 50;
+    private static final int MIN_BACKOFF_MS = 10000; // 10 seconds
+    private static final int MAX_BACKOFF_MS = 30000; // 30 seconds
     
     private final int maxRetries;
     private final Object source; // For logging
@@ -123,20 +123,17 @@ public class RetryHandler {
     
     private int calculateWaitTime(APIProviderException e, int attempt) {
         // For rate limit errors, use the provided retry-after if available
-        if (e.getCategory() == APIProviderException.ErrorCategory.RATE_LIMIT && 
-            e.getRetryAfterSeconds() != null) {
-            return e.getRetryAfterSeconds() * 1000;
+        // Otherwise, use random backoff between 15-45 seconds
+        if (e.getCategory() == APIProviderException.ErrorCategory.RATE_LIMIT) {
+            if (e.getRetryAfterSeconds() != null) {
+                return e.getRetryAfterSeconds() * 1000;
+            }
+            // Random backoff between MIN_BACKOFF_MS and MAX_BACKOFF_MS
+            return MIN_BACKOFF_MS + (int) (Math.random() * (MAX_BACKOFF_MS - MIN_BACKOFF_MS));
         }
-        
-        // For other errors, use exponential backoff with jitter
-        int backoffMs = BASE_BACKOFF_MS * (int) Math.pow(2, attempt - 1);
-        
-        // Add jitter (±25%)
-        int jitter = (int) (backoffMs * 0.25 * (Math.random() - 0.5));
-        backoffMs += jitter;
-        
-        // Cap at maximum backoff
-        return Math.min(backoffMs, MAX_BACKOFF_MS);
+
+        // For other errors, also use random backoff between 15-45 seconds
+        return MIN_BACKOFF_MS + (int) (Math.random() * (MAX_BACKOFF_MS - MIN_BACKOFF_MS));
     }
     
     private void logRetryAttempt(String operationName, int attempt, APIProviderException e) {
