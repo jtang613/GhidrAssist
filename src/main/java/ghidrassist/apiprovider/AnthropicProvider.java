@@ -318,6 +318,11 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
         
         payload.add("tools", anthropicTools);
 
+        // Force tool use - "any" means model must use at least one tool
+        JsonObject toolChoice = new JsonObject();
+        toolChoice.addProperty("type", "any");
+        payload.add("tool_choice", toolChoice);
+
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
@@ -360,13 +365,9 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
             }
             
             // Return format expected by ActionParser
-            if (toolCallsArray.size() > 0) {
-                JsonObject result = new JsonObject();
-                result.add("tool_calls", toolCallsArray);
-                return gson.toJson(result);
-            } else {
-                return textContent.toString();
-            }
+            JsonObject result = new JsonObject();
+            result.add("tool_calls", toolCallsArray);
+            return gson.toJson(result);
             
         } catch (IOException e) {
             throw handleNetworkError(e, "createChatCompletionWithFunctions");
@@ -404,6 +405,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
         JsonObject payload = new JsonObject();
         payload.addProperty("model", super.getModel());
         payload.addProperty("max_tokens", super.getMaxTokens());
+        //payload.addProperty("max_tokens", 64000);
         payload.addProperty("stream", stream);
 
         // Convert the messages to Anthropic's format

@@ -238,9 +238,9 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         // Add tools (functions) to the payload
         payload.add("tools", gson.toJsonTree(functions));
 
-        // Specify json output
-        //payload.add("format", gson.toJsonTree("json"));
-        
+        // Force tool use - "required" means model must use at least one tool
+        payload.addProperty("tool_choice", "required");
+
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))

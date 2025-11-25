@@ -44,37 +44,25 @@ public class ActionConstants {
 
     static {
         ACTION_PROMPTS.put("rename_function",
-			"Use the 'rename_function' tool:\n```\n{code}\n```\n" +
-            "Examine the code functionality, strings and log parameters.\n" +
-            "If you detect C++ Super::Derived::Method or Class::Method style class names, recommend that name first, OTHERWISE USE PROCEDURAL NAMING.\n" +
-            "CREATE A JSON TOOL_CALL LIST WITH SUGGESTIONS FOR THREE POSSIBLE FUNCTION NAMES " +
-            "THAT ALIGN AS CLOSELY AS POSSIBLE TO WHAT THE CODE ABOVE DOES.\n" +
-            "RESPOND ONLY WITH THE RENAME_FUNCTION PARAMETER (new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +
-            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n"
+            "Analyze this decompiled function and suggest better names:\n```\n{code}\n```\n" +
+            "Consider the code functionality, strings, API calls, and log parameters.\n" +
+            "For C++ methods, prefer Class::Method naming. Otherwise use descriptive procedural names.\n" +
+            "Call the rename_function tool 3 times with your best name suggestions."
         );
         ACTION_PROMPTS.put("rename_variable",
-            "Use the 'rename_variable' tool:\n```\n{code}\n```\n" +
-            "Examine the code functionality, strings, and log parameters.\n" +
-            "SUGGEST VARIABLE NAMES THAT BETTER ALIGN WITH THE CODE FUNCTIONALITY.\n" +
-            "RESPOND ONLY WITH THE RENAME_VARIABLE PARAMETERS (func_name, var_name, new_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +
-            "ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES, e.g., \"0x1234abcd\".\n" +
-            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n"
+            "Analyze this decompiled function and suggest better variable names:\n```\n{code}\n```\n" +
+            "Consider the code functionality, how variables are used, and any contextual hints.\n" +
+            "Call the rename_variable tool for each variable that would benefit from a clearer name."
         );
         ACTION_PROMPTS.put("retype_variable",
-            "Use the 'retype_variable' tool:\n```\n{code}\n```\n" +
-            "Examine the code functionality, strings, and log parameters.\n" +
-            "SUGGEST VARIABLE TYPES THAT BETTER ALIGN WITH THE CODE FUNCTIONALITY.\n" +
-            "RESPOND ONLY WITH THE RETYPE_VARIABLE PARAMETERS (func_name, var_name, new_type). DO NOT INCLUDE ANY OTHER TEXT.\n" +
-            "ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES, e.g., \"0x1234abcd\".\n" +
-            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n"
+            "Analyze this decompiled function and suggest better variable types:\n```\n{code}\n```\n" +
+            "Consider how variables are used, pointer arithmetic, and common type patterns.\n" +
+            "Call the retype_variable tool for each variable that would benefit from a more accurate type."
         );
         ACTION_PROMPTS.put("auto_create_struct",
-            "Use the 'auto_create_struct' tool:\n```\n{code}\n```\n" +
-            "Examine the code functionality, parameters, and variables being used.\n" +
-            "IF YOU DETECT A VARIABLE THAT USES OFFSET ACCESS SUCH AS `*(arg1 + 0xc)` OR VARIABLES LIKELY TO BE STRUCTURES OR CLASSES,\n" +
-            "RESPOND ONLY WITH THE AUTO_CREATE_STRUCT PARAMETERS (func_name, var_name). DO NOT INCLUDE ANY OTHER TEXT.\n" +
-            "ALL JSON VALUES MUST BE TEXT STRINGS, INCLUDING NUMBERS AND ADDRESSES, e.g., \"0x1234abcd\".\n" +
-            "ALL JSON MUST BE PROPERLY FORMATTED WITH NO EMBEDDED COMMENTS.\n"
+            "Analyze this decompiled function for structure/class usage:\n```\n{code}\n```\n" +
+            "Look for variables with offset access patterns like `*(ptr + 0xc)` or field-like usage.\n" +
+            "Call the auto_create_struct tool for each variable that appears to be a structure or class instance."
         );
     }
 
