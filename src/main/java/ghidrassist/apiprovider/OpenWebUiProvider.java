@@ -250,9 +250,9 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
         // Add tools (functions) to the payload
         payload.add("tools", gson.toJsonTree(functions));
 
-        // Specify json output
-        // payload.add("format", gson.toJsonTree("json"));  // TODO: Enable once OpenWebUI fixes their API
-        
+        // Force tool use - "required" means model must use at least one tool
+        payload.addProperty("tool_choice", "required");
+
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))

@@ -249,9 +249,12 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
         // Add tools (functions) to the payload
         payload.add("tools", gson.toJsonTree(functions));
 
+        // Force tool use - "required" means model must use at least one tool
+        payload.addProperty("tool_choice", "required");
+
         // Specify json output
         payload.add("format", gson.toJsonTree("json"));
-        
+
         Request request = new Request.Builder()
             .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))

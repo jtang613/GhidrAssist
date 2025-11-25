@@ -203,9 +203,12 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
     @Override
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
-        
+
         payload.add("functions", gson.toJsonTree(functions));
-        
+
+        // Force function calling
+        payload.addProperty("function_call", "auto");
+
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
@@ -219,12 +222,23 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
             if (message.has("function_call")) {
                 JsonObject functionCall = message.getAsJsonObject("function_call");
-                return String.format("{\"name\": \"%s\", \"arguments\": %s}", 
-                    functionCall.get("name").getAsString(),
-                    functionCall.get("arguments").toString());
+                // Convert to tool_calls format for ActionParser compatibility
+                JsonArray toolCalls = new JsonArray();
+                JsonObject toolCall = new JsonObject();
+                toolCall.addProperty("id", "call_" + System.currentTimeMillis());
+                toolCall.addProperty("type", "function");
+
+                JsonObject function = new JsonObject();
+                function.addProperty("name", functionCall.get("name").getAsString());
+                function.add("arguments", functionCall.get("arguments"));
+                toolCall.add("function", function);
+
+                toolCalls.add(toolCall);
+                return "{\"tool_calls\":" + toolCalls.toString() + "}";
             }
 
-            return message.get("content").getAsString();
+            // No function call - return empty tool_calls array
+            return "{\"tool_calls\":[]}";
         } catch (IOException e) {
             throw handleNetworkError(e, "createChatCompletionWithFunctions");
         }

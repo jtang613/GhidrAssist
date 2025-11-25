@@ -250,6 +250,9 @@ public class AzureOpenAIProvider extends APIProvider
         // Add tools (functions) to the payload
         payload.add("tools", gson.toJsonTree(functions));
 
+        // Force tool use - "required" means model must use at least one tool
+        payload.addProperty("tool_choice", "required");
+
         String endpoint = buildChatCompletionUrl();
         Request request = new Request.Builder()
                 .url(endpoint)

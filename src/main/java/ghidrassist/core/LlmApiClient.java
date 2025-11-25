@@ -29,7 +29,11 @@ public class LlmApiClient {
             + "You always respond to queries in a structured format using Markdown styling for headings and lists. \n"
             + "You format code blocks using back-tick code-fencing.\n";
             
-    private final String FUNCTION_PROMPT = "USE THE PROVIDED TOOLS WHEN NECESSARY. YOU ALWAYS RESPOND WITH TOOL CALLS WHEN POSSIBLE.";
+    private final String FUNCTION_SYSTEM_PROMPT =
+            "You are a professional software reverse engineer. "
+            + "You MUST use the provided tools to respond. "
+            + "Do not explain or provide text responses - only use tool calls. "
+            + "If multiple suggestions are appropriate, make multiple tool calls.";
 
     public LlmApiClient(APIProviderConfig config, GhidrAssistPlugin plugin) {
         this.provider = config.createProvider();
@@ -81,12 +85,13 @@ public class LlmApiClient {
      * Create messages for function calling
      */
     public List<ChatMessage> createFunctionMessages(String prompt) {
-        String systemUser = ChatMessage.ChatMessageRole.SYSTEM;
+        String systemRole = ChatMessage.ChatMessageRole.SYSTEM;
         if (isO1OrO3Model()) {
-            systemUser = ChatMessage.ChatMessageRole.USER;
+            systemRole = ChatMessage.ChatMessageRole.USER;
         }
 
         List<ChatMessage> messages = new ArrayList<>();
+        messages.add(new ChatMessage(systemRole, FUNCTION_SYSTEM_PROMPT));
         messages.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, prompt));
         return messages;
     }
