@@ -5,7 +5,10 @@ import com.vladsch.flexmark.html2md.converter.FlexmarkHtmlConverter;
 import com.vladsch.flexmark.parser.Parser;
 import com.vladsch.flexmark.util.ast.Document;
 import com.vladsch.flexmark.util.data.MutableDataSet;
+import com.vladsch.flexmark.ext.tables.TablesExtension;
+import com.vladsch.flexmark.util.misc.Extension;
 
+import java.util.Arrays;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -13,10 +16,16 @@ public class MarkdownHelper {
     private final Parser parser;
     private final HtmlRenderer renderer;
     private final FlexmarkHtmlConverter htmlToMdConverter;
-    
+
     public MarkdownHelper() {
         MutableDataSet options = new MutableDataSet();
+
+        // Enable table extension for proper table rendering
+        options.set(Parser.EXTENSIONS, Arrays.asList(TablesExtension.create()));
+
+        // Configure rendering options
         options.set(HtmlRenderer.SOFT_BREAK, "<br />\n");
+
         this.parser = Parser.builder(options).build();
         this.renderer = HtmlRenderer.builder(options).build();
         this.htmlToMdConverter = FlexmarkHtmlConverter.builder().build();

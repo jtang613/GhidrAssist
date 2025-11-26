@@ -149,17 +149,32 @@ public class QueryService {
     }
     
     /**
-     * Add assistant response to conversation history
+     * Add user query to conversation history
      */
-    public void addAssistantResponse(String response) {
-        conversationHistory.append("**Assistant**:\n").append(response).append("\n\n");
-        
+    public void addUserQuery(String query) {
+        conversationHistory.append("**User**:\n").append(query).append("\n\n");
+
+        // Ensure we have a session for this conversation
+        ensureSession();
+
         // Update current session in database if one exists
         if (currentSessionId != -1) {
             analysisDB.updateChatSession(currentSessionId, conversationHistory.toString());
         }
     }
-    
+
+    /**
+     * Add assistant response to conversation history
+     */
+    public void addAssistantResponse(String response) {
+        conversationHistory.append("**Assistant**:\n").append(response).append("\n\n");
+
+        // Update current session in database if one exists
+        if (currentSessionId != -1) {
+            analysisDB.updateChatSession(currentSessionId, conversationHistory.toString());
+        }
+    }
+
     /**
      * Add error to conversation history
      */

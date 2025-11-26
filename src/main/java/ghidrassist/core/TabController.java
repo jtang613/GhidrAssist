@@ -210,30 +210,46 @@ public class TabController {
     }
 
     // ==== Query Operations ====
-    
-    public void handleQuerySubmit(String query, boolean useRAG, boolean useMCP) {
+
+    public void handleQuerySubmit(String query, boolean useRAG, boolean useMCP, boolean useAgentic) {
         if (isQueryRunning) {
             cancelCurrentOperation();
             return;
         }
-        
+
+        // Agentic mode requires MCP tools
+        if (useAgentic && !useMCP) {
+            Msg.showInfo(getClass(), queryTab, "MCP Required",
+                "Agentic mode requires MCP tools to be enabled.");
+            return;
+        }
+
         setUIState(true, "Stop", null);
-        
+
+        // Route to appropriate handler
+        if (useAgentic) {
+            handleAgenticQuery(query);
+        } else {
+            handleRegularQuery(query, useRAG, useMCP);
+        }
+    }
+
+    private void handleRegularQuery(String query, boolean useRAG, boolean useMCP) {
         Task task = new Task("Custom Query", true, true, true) {
             @Override
             public void run(TaskMonitor monitor) {
                 try {
                     QueryService.QueryRequest request = queryService.createQueryRequest(query, useRAG, useMCP);
-                    
+
                     feedbackService.cacheLastInteraction(request.getProcessedQuery(), null);
-                    
+
                     // Use shared LlmApi instance for cancellation support
                     LlmApi llmApi = getCurrentLlmApi();
                     queryService.executeQuery(request, llmApi, createConversationHandler());
 
                 } catch (Exception e) {
                     SwingUtilities.invokeLater(() -> {
-                        Msg.showError(getClass(), queryTab, "Error", 
+                        Msg.showError(getClass(), queryTab, "Error",
                             "Failed to perform query: " + e.getMessage());
                         setUIState(false, "Submit", null);
                         currentLlmApi = null; // Clear on error
@@ -243,6 +259,93 @@ public class TabController {
         };
 
         new TaskLauncher(task, plugin.getTool().getToolFrame());
+    }
+
+    private void handleAgenticQuery(String query) {
+        // Add user query to conversation history and ensure we have a session
+        try {
+            String processedQuery = ghidrassist.core.QueryProcessor.processMacrosInQuery(query, plugin);
+            queryService.addUserQuery(processedQuery);
+        } catch (Exception e) {
+            Msg.error(this, "Failed to add query to conversation history: " + e.getMessage(), e);
+        }
+
+        // Get initial context (decompiled code if available)
+        final String initialContext;
+        ghidra.program.model.listing.Function currentFunction = plugin.getCurrentFunction();
+        if (currentFunction != null) {
+            initialContext = ghidrassist.core.CodeUtils.getFunctionCode(currentFunction, ghidra.util.task.TaskMonitor.DUMMY);
+        } else {
+            initialContext = "";
+        }
+
+        // Container to hold iteration history so it can be accessed in the final result handler
+        final StringBuilder[] historyContainer = new StringBuilder[]{new StringBuilder()};
+
+        // Initialize MCP servers if needed
+        ghidrassist.mcp2.tools.MCPToolManager toolManager =
+            ghidrassist.mcp2.tools.MCPToolManager.getInstance();
+
+        java.util.concurrent.CompletableFuture<Void> initFuture;
+        if (!toolManager.isInitialized()) {
+            Msg.info(this, "Initializing MCP servers for agentic analysis...");
+            SwingUtilities.invokeLater(() ->
+                queryTab.setResponseText("<html><body>Initializing MCP servers...</body></html>"));
+            initFuture = toolManager.initializeServers();
+        } else {
+            initFuture = java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
+        // Chain the analysis after MCP initialization
+        initFuture.thenCompose(v -> {
+            // Create ReAct orchestrator with new architecture
+            ghidrassist.agent.react.ReActOrchestrator orchestrator =
+                new ghidrassist.agent.react.ReActOrchestrator(
+                    ghidrassist.GhidrAssistPlugin.getCurrentProviderConfig(),
+                    plugin
+                );
+
+            // Create progress handler for UI updates with todos and findings support
+            ghidrassist.agent.react.ReActProgressHandler progressHandler =
+                createReActProgressHandler(historyContainer);
+
+            // Start analysis asynchronously
+            return orchestrator.analyze(
+                query,
+                initialContext,
+                "", // session ID - can be implemented later if needed
+                progressHandler
+            );
+        }).thenAccept(result -> {
+            // Display result on EDT - append to iteration history
+            SwingUtilities.invokeLater(() -> {
+                // Build final display: iteration history + final result
+                StringBuilder finalDisplay = new StringBuilder();
+                finalDisplay.append(historyContainer[0]);  // All the iteration history
+                finalDisplay.append("# Final Result\n\n");
+                finalDisplay.append(result.toMarkdown());
+
+                // Save the assistant response to conversation history
+                queryService.addAssistantResponse(finalDisplay.toString());
+
+                // Show in UI (using conversation history for consistency with regular queries)
+                String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                queryTab.setResponseText(html);
+                setUIState(false, "Submit", null);
+
+                // Refresh chat history to show updated timestamp
+                refreshChatHistory();
+            });
+        }).exceptionally(error -> {
+            // Handle errors on EDT
+            Msg.error(this, "Agentic analysis failed: " + error.getMessage(), error);
+            SwingUtilities.invokeLater(() -> {
+                Msg.showError(getClass(), queryTab, "Agentic Analysis Error",
+                    "Analysis failed: " + error.getMessage());
+                setUIState(false, "Submit", null);
+            });
+            return null;
+        });
     }
 
     // ==== Action Analysis Operations ====
@@ -729,6 +832,184 @@ public class TabController {
         };
     }
     
+    private ghidrassist.agent.react.ReActProgressHandler createReActProgressHandler(final StringBuilder[] historyContainer) {
+        return new ghidrassist.agent.react.ReActProgressHandler() {
+            private final StringBuilder progressLog = new StringBuilder();
+            private final StringBuilder iterationHistory = new StringBuilder();
+            private String currentTodos = "";
+            private String currentIterationOutput = "";
+            private int lastIterationSeen = 0;
+
+            @Override
+            public void onStart(String objective) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.setLength(0);
+                    iterationHistory.setLength(0);
+                    progressLog.append("# ReAct Investigation\n\n");
+                    progressLog.append("**Objective**: ").append(objective).append("\n\n");
+                    progressLog.append("---\n\n");
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onThought(String thought, int iteration) {
+                SwingUtilities.invokeLater(() -> {
+                    // If this is a new iteration, archive the previous iteration's output
+                    if (iteration > lastIterationSeen && !currentIterationOutput.isEmpty()) {
+                        iterationHistory.append("### Iteration ").append(lastIterationSeen).append("\n\n");
+                        iterationHistory.append(currentIterationOutput).append("\n\n");
+                        iterationHistory.append("---\n\n");
+                        lastIterationSeen = iteration;
+                        currentIterationOutput = "";
+                    }
+
+                    // Store the current iteration's streaming output
+                    currentIterationOutput = thought;
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onAction(String toolName, com.google.gson.JsonObject args) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.append("🔧 **Calling tool**: `").append(toolName).append("`");
+
+                    // Show tool arguments if present
+                    if (args != null && args.size() > 0) {
+                        progressLog.append(" with args:\n```json\n");
+                        progressLog.append(new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(args));
+                        progressLog.append("\n```\n\n");
+                    } else {
+                        progressLog.append("\n\n");
+                    }
+
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onObservation(String toolName, String result) {
+                SwingUtilities.invokeLater(() -> {
+                    // Show condensed result - up to 300 chars
+                    String truncated = result.length() > 300
+                        ? result.substring(0, 300) + "\n... [+" + (result.length() - 300) + " more chars]"
+                        : result;
+
+                    progressLog.append("**Result**:\n```\n");
+                    progressLog.append(truncated);
+                    progressLog.append("\n```\n\n");
+
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onFinding(String finding) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.append("💡 **Finding**: ").append(finding).append("\n\n");
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onComplete(ghidrassist.agent.react.ReActResult result) {
+                SwingUtilities.invokeLater(() -> {
+                    // Archive the last iteration's output before showing final result
+                    if (!currentIterationOutput.isEmpty()) {
+                        iterationHistory.append("### Iteration ").append(lastIterationSeen).append("\n\n");
+                        iterationHistory.append(currentIterationOutput).append("\n\n");
+                        iterationHistory.append("---\n\n");
+                        currentIterationOutput = "";
+                    }
+
+                    // Save the complete history for display with final result
+                    StringBuilder fullHistory = new StringBuilder();
+                    fullHistory.append(progressLog);
+                    fullHistory.append(iterationHistory);
+                    fullHistory.append("\n\n---\n\n");
+                    historyContainer[0] = fullHistory;
+
+                    // Final result will be displayed by handleAgenticQuery's thenAccept handler
+                });
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.append("\n\n❌ **ERROR**: ").append(error.getMessage()).append("\n");
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public boolean shouldContinue() {
+                return isQueryRunning;
+            }
+
+            @Override
+            public void onIterationWarning(int remaining) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.append("⚠️ *").append(remaining).append(" iteration(s) remaining*\n\n");
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onToolCallWarning(int remaining) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.append("⚠️ *").append(remaining).append(" tool call(s) remaining*\n\n");
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onTodosUpdated(String todosFormatted) {
+                SwingUtilities.invokeLater(() -> {
+                    currentTodos = todosFormatted;
+                    updateDisplay();
+                });
+            }
+
+            @Override
+            public void onSummarizing(String summary) {
+                SwingUtilities.invokeLater(() -> {
+                    progressLog.append("📝 **Summarizing context...**\n\n");
+                    progressLog.append("```\n").append(summary).append("\n```\n\n");
+                    updateDisplay();
+                });
+            }
+
+            private void updateDisplay() {
+                StringBuilder display = new StringBuilder();
+
+                // Show todos at the top if available
+                if (!currentTodos.isEmpty()) {
+                    display.append("## Investigation Progress\n\n");
+                    display.append(currentTodos).append("\n\n");
+                    display.append("---\n\n");
+                }
+
+                // Append activity log (objective, etc.)
+                display.append(progressLog);
+
+                // Show all previous iteration outputs (preserved history)
+                if (iterationHistory.length() > 0) {
+                    display.append(iterationHistory);
+                }
+
+                // Show current iteration output (streaming from ConversationalToolHandler)
+                if (!currentIterationOutput.isEmpty()) {
+                    display.append("### Current Activity\n\n");
+                    display.append(currentIterationOutput).append("\n\n");
+                }
+
+                String html = markdownHelper.markdownToHtml(display.toString());
+                queryTab.setResponseText(html);
+            }
+        };
+    }
+
     private ActionAnalysisService.ActionAnalysisHandler createActionAnalysisHandler() {
         return new ActionAnalysisService.ActionAnalysisHandler() {
             @Override
@@ -744,7 +1025,7 @@ public class TabController {
                     try {
                         actionAnalysisService.parseAndDisplayActions(response, actionsTab.getTableModel());
                     } catch (Exception e) {
-                        Msg.showError(this, actionsTab, "Error", 
+                        Msg.showError(this, actionsTab, "Error",
                             "Failed to parse actions: " + e.getMessage());
                     }
                 });
