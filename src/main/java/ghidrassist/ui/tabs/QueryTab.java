@@ -23,6 +23,7 @@ public class QueryTab extends JPanel {
     private JTextArea queryTextArea;
     private JCheckBox useRAGCheckBox;
     private JCheckBox useMCPCheckBox;
+    private JCheckBox useAgenticCheckBox;
     private JButton submitButton;
     private JButton newButton;
     private JButton deleteButton;
@@ -62,10 +63,15 @@ public class QueryTab extends JPanel {
     private void initializeComponents() {
         useRAGCheckBox = new JCheckBox("Use RAG");
         useRAGCheckBox.setSelected(false);
-        
+
         useMCPCheckBox = new JCheckBox("Use MCP Tools");
         useMCPCheckBox.setSelected(false);
         useMCPCheckBox.setEnabled(false); // Disabled by default, enabled when MCP is detected
+
+        useAgenticCheckBox = new JCheckBox("Agentic Mode (ReAct)");
+        useAgenticCheckBox.setSelected(false);
+        useAgenticCheckBox.setEnabled(false); // Enabled only when MCP is available
+        useAgenticCheckBox.setToolTipText("Enable autonomous ReAct-style analysis with systematic tool use");
 
         responseTextPane = new JEditorPane();
         responseTextPane.setEditable(false);
@@ -103,6 +109,7 @@ public class QueryTab extends JPanel {
         JPanel checkboxPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         checkboxPanel.add(useRAGCheckBox);
         checkboxPanel.add(useMCPCheckBox);
+        checkboxPanel.add(useAgenticCheckBox);
         add(checkboxPanel, BorderLayout.NORTH);
 
         // Create scroll panes
@@ -146,7 +153,8 @@ public class QueryTab extends JPanel {
         submitButton.addActionListener(e -> controller.handleQuerySubmit(
             queryTextArea.getText(),
             useRAGCheckBox.isSelected(),
-            useMCPCheckBox.isSelected()
+            useMCPCheckBox.isSelected(),
+            useAgenticCheckBox.isSelected()
         ));
 
         newButton.addActionListener(e -> controller.handleNewChatSession());
@@ -240,14 +248,20 @@ public class QueryTab extends JPanel {
     
     public void setMCPEnabled(boolean enabled) {
         useMCPCheckBox.setEnabled(enabled);
+        // Agentic mode requires MCP tools, so enable/disable together
+        useAgenticCheckBox.setEnabled(enabled);
     }
-    
+
     public boolean isMCPEnabled() {
         return useMCPCheckBox.isEnabled();
     }
-    
+
     public boolean isMCPSelected() {
         return useMCPCheckBox.isSelected();
+    }
+
+    public boolean isAgenticSelected() {
+        return useAgenticCheckBox.isSelected();
     }
     
     /**
@@ -304,17 +318,21 @@ public class QueryTab extends JPanel {
             SwingUtilities.invokeLater(this::updateMCPCheckboxState);
             return;
         }
-        
+
         // Check if any MCP servers are enabled in configuration
         MCPServerRegistry registry = MCPServerRegistry.getInstance();
         boolean hasEnabledServers = !registry.getEnabledServers().isEmpty();
-        
+
         boolean wasEnabled = useMCPCheckBox.isEnabled();
         useMCPCheckBox.setEnabled(hasEnabledServers);
-        
-        // If no servers enabled, also uncheck the box
+
+        // Agentic mode requires MCP, so enable/disable together
+        useAgenticCheckBox.setEnabled(hasEnabledServers);
+
+        // If no servers enabled, also uncheck both boxes
         if (!hasEnabledServers) {
             useMCPCheckBox.setSelected(false);
+            useAgenticCheckBox.setSelected(false);
         }
         
         // Log state change for debugging
