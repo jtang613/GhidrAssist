@@ -96,7 +96,7 @@ GhidrAssist works with any OpenAI v1-compatible API. Setup details are provider-
 
 **Note**: Agentic mode requires models with strong function calling and multi-step reasoning capabilities. Smaller models may struggle with complex investigations.
 
-## Using GhidraMCP for Tool-Based Analysis
+## Using GhidrAssistMCP for Tool-Based Analysis
 
 [GhidrAssistMCP](https://github.com/jtang613/GhidrAssistMCP) provides MCP tools that allow the LLM to interact directly with Ghidra's analysis capabilities.
 
