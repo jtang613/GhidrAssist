@@ -1,30 +1,63 @@
 # GhidrAssist
 Author: **Jason Tang**
 
-_A plugin that provides LLM helpers to explain code and assist in RE._
+_An advanced LLM-powered plugin for interactive reverse engineering assistance in Ghidra._
 
-## Description:
+## Description
 
-This is a LLM plugin aimed at enabling the use of local LLM's (Ollama, Open-WebUI, LM-Studio, etc) for assisting with binary exploration and reverse engineering. It supports any OpenAI v1-compatible API. Recommended models are LLaMA-based models such as llama3.1:8b, but others such as DeepSeek and ChatGPT work as well.
+GhidrAssist integrates Large Language Models (LLMs) into Ghidra to provide intelligent assistance for binary exploration and reverse engineering. It supports any OpenAI v1-compatible API, including local models (Ollama, LM-Studio, Open-WebUI) and cloud providers (OpenAI, Anthropic, Azure).
 
-Current features include:
-* Explain the current function - Works for disassembly and pseudo-C.
-* Explain the current instruction - Works for disassembly and pseudo-C.
-* General query - Query the LLM directly from the UI.
-* MCP client - Leverage MCP tools like [GhidrAssistMCP](https://github.com/jtang613/GhidrAssistMCP) from the interactive LLM chat.
-* Agentic RE using the MCP Client and GhidraMCP.
-* Propose actions - Provide a list of proposed actions to apply.
-* Function calling - Allow agent to call functions to navigate the binary, rename functions and variables.
-* Retrieval Augmented Generation - Supports adding contextual documents to refine query effectiveness.
-* RLHF dataset generation - To enable model fine tuning.
-* Settings to modify API host, key, model name and max tokens.
+### Key Features
+
+**Core Functionality:**
+* **Code Explanation** - Explain functions and instructions in both disassembly and decompiled pseudo-C
+* **Interactive Chat** - Multi-turn conversational queries with persistent chat history
+* **Custom Queries** - Direct LLM queries with optional context from current function/location
+
+**Advanced Capabilities:**
+* **ReAct Agentic Mode** - Autonomous investigation using structured reasoning (Think-Act-Observe)
+  - LLM proposes investigation steps based on your query
+  - Systematic tool execution with progress tracking via todo lists
+  - Iteration history preservation showing all investigation steps
+  - Final synthesis with comprehensive answer and key findings
+  - Accurate metrics (iterations, tool calls, duration)
+* **MCP Integration** - Model Context Protocol client for tool-based analysis
+  - Works with [GhidrAssistMCP](https://github.com/jtang613/GhidrAssistMCP) for Ghidra-specific tools
+  - Conversational tool calling with automatic function execution
+  - Support for SSE (Server-Sent Events) transport
+* **Function Calling** - LLM can autonomously navigate binaries and modify analysis
+  - Rename functions and variables
+  - Navigate to addresses and cross-references
+  - Execute Ghidra commands
+* **Actions Tab** - Propose and apply bulk analysis improvements
+  - Security vulnerability detection
+  - Code quality analysis
+  - Automated refactoring suggestions
+* **RAG (Retrieval Augmented Generation)** - Enhance queries with contextual documents
+  - Add custom documentation, exploit notes, architecture references
+  - Lucene-based full-text search
+  - Context injection into queries
+* **RLHF Dataset Generation** - Collect feedback for model fine-tuning
+
+
+### Architecture
+
+The plugin uses a modular architecture:
+- **Query Modes**: Regular queries, MCP-enhanced queries, or full agentic investigation
+- **ReAct Orchestrator**: Manages autonomous investigation loops with todo tracking and findings accumulation
+- **Conversational Tool Handler**: Manages multi-turn tool calling sessions
+- **MCPToolManager**: Interfaces with external MCP servers for specialized tools
+- **AnalysisDB**: SQLite database for chat history and RLHF feedback
+- **RAGEngine**: Lucene-powered document search and context retrieval
 
 Future Roadmap:
-* Model fine tuning - Leverage the RLHF dataset to fine tune the model.
+* Model fine-tuning using collected RLHF dataset
+* Additional MCP tool integrations
+* Enhanced agentic capabilities, multi-agent collaboration
 
 ## Screenshots
 
-![Screenshot](https://github.com/user-attachments/assets/29fcaa14-277c-4eb2-816a-dd1b8ef52259)
+![Screenshot](https://github.com/user-attachments/assets/f5476e0d-5e30-4855-90a9-e0dbf39e16c7)
 
 
 https://github.com/user-attachments/assets/bd79474a-c82f-4083-b432-96625fef1387
@@ -41,28 +74,65 @@ https://github.com/user-attachments/assets/bd79474a-c82f-4083-b432-96625fef1387
 * Point the API host to your preferred API provider and set the API key. 
 * Open GhidrAssist with the GhidrAssist option in the Windows menu and start exploring.
 
-## LLMs
+## LLM Setup
 
-General LLM setup is a bit outside the scope of this project since there's so many different options and there are plenty of sources that cover the topic much better than I could. It assumes one already has access to an OpenAI-compatible API provider.
-Here's a few resources that might get you started:
+GhidrAssist works with any OpenAI v1-compatible API. Setup details are provider-specific - here are some helpful resources:
 
-- https://lmstudio.ai/docs/basics
-- https://github.com/ollama/ollama#running-local-builds
-- https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key
-- https://docs.anthropic.com/en/docs/initial-setup
+**Local LLM Providers:**
+- [LM Studio](https://lmstudio.ai/docs/basics) - Easy local model hosting with GUI
+- [Ollama](https://github.com/ollama/ollama#running-local-builds) - Command-line local model management
+- Open-WebUI - Web interface for local models
 
-For local LLM's, I've found that the Llama3.3:70b, Llama3.1:8b and DeepSeek-r1 produce good results.
-From OpenAI, the o4-mini produces good results. Anthropic's Claude Sonnet also produces good results.
+**Cloud Providers:**
+- [OpenAI API](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key)
+- [Anthropic Claude](https://docs.anthropic.com/en/docs/initial-setup)
+- Azure OpenAI
 
-## GhidraMCP
+### Recommended Models
 
-To use with GhidraMCP, launch the bridge in SSE mode from a terminal:
+**For Agentic Mode (requires strong reasoning and tool use):**
+- **Cloud**: GPT-5.1, Claude Sonnet 4.5
+- **Local**: GPT-OSS, Llama 3.3 70B, DeepSeek-R1 70B, Qwen2.5 72B
 
-`python bridge_mcp_ghidra.py --transport sse --mcp-host 127.0.0.1 --mcp-port 8081 --ghidra-server http://127.0.0.1:8080/`
+**Note**: Agentic mode requires models with strong function calling and multi-step reasoning capabilities. Smaller models may struggle with complex investigations.
 
-Then open Tools -> GhidrAssist and add `http://127.0.0.1:8081` as `GhidraMCP` with `SSE` as the type.
+## Using GhidraMCP for Tool-Based Analysis
 
-Enable "Use MCP" in the Custom Query tab. Try a simple query like "What does the current function do?"
+[GhidrAssistMCP](https://github.com/jtang613/GhidrAssistMCP) provides MCP tools that allow the LLM to interact directly with Ghidra's analysis capabilities.
+
+### Setup
+
+1. **Start the MCP Server**
+
+2. **Configure GhidrAssist:**
+   - Open Tools → GhidrAssist Settings → MCP Servers tab
+   - Add server: `http://127.0.0.1:8081` as `GhidraMCP` with transport type `SSE`
+
+3. **Enable MCP in queries:**
+   - In the Custom Query tab, check "Use MCP"
+   - Optionally enable "Agentic" for autonomous investigation mode
+
+### Usage Modes
+
+**Regular MCP Queries:**
+- Enable "Use MCP" checkbox
+- Ask questions like "What does the current function do?"
+- LLM can call tools to get decompilation, cross-references, etc.
+
+**Agentic Mode (Recommended):**
+- Enable both "Use MCP" and "Agentic" checkboxes
+- Ask complex questions like "Find vulnerabilities in this function" or "Analyze the call graph"
+- The ReAct agent will:
+  1. Propose investigation steps as a todo list
+  2. Systematically execute tools to gather information
+  3. Track progress and accumulate findings
+  4. Synthesize a comprehensive answer with evidence
+
+**Example Queries:**
+- "What security vulnerabilities exist in this function?"
+- "Trace the data flow from user input to this call"
+- "Find all functions that modify global variable X"
+- "Analyze the error handling in the current function"
 
 ## Homepage
 https://github.com/jtang613/GhidrAssist
