@@ -31,8 +31,7 @@ public class LlmApiClient {
             
     private final String FUNCTION_SYSTEM_PROMPT =
             "You are a professional software reverse engineer. "
-            + "You MUST use the provided tools to respond. "
-            + "Do not explain or provide text responses - only use tool calls. "
+            + "You MUST use the provided tools to gather information, then present the results clearly to the user. "
             + "If multiple suggestions are appropriate, make multiple tool calls.";
 
     public LlmApiClient(APIProviderConfig config, GhidrAssistPlugin plugin) {
