@@ -106,7 +106,7 @@ GhidrAssist works with any OpenAI v1-compatible API. Setup details are provider-
 
 2. **Configure GhidrAssist:**
    - Open Tools → GhidrAssist Settings → MCP Servers tab
-   - Add server: `http://127.0.0.1:8081` as `GhidraMCP` with transport type `SSE`
+   - Add server: `http://127.0.0.1:8081` as `GhidrAssistMCP` with transport type `SSE`
 
 3. **Enable MCP in queries:**
    - In the Custom Query tab, check "Use MCP"
