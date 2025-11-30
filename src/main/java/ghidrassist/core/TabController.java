@@ -45,7 +45,10 @@ public class TabController {
     
     // Shared LLM API instance for cancellation
     private volatile LlmApi currentLlmApi;
-    
+
+    // ReAct orchestrator for cancellation
+    private volatile ghidrassist.agent.react.ReActOrchestrator currentOrchestrator;
+
     // UI state
     private volatile boolean isQueryRunning;
     
@@ -299,8 +302,7 @@ public class TabController {
         // Chain the analysis after MCP initialization
         initFuture.thenCompose(v -> {
             // Create ReAct orchestrator with new architecture
-            ghidrassist.agent.react.ReActOrchestrator orchestrator =
-                new ghidrassist.agent.react.ReActOrchestrator(
+            currentOrchestrator = new ghidrassist.agent.react.ReActOrchestrator(
                     ghidrassist.GhidrAssistPlugin.getCurrentProviderConfig(),
                     plugin
                 );
@@ -310,7 +312,7 @@ public class TabController {
                 createReActProgressHandler(historyContainer);
 
             // Start analysis asynchronously
-            return orchestrator.analyze(
+            return currentOrchestrator.analyze(
                 query,
                 initialContext,
                 "", // session ID - can be implemented later if needed
@@ -331,6 +333,9 @@ public class TabController {
                 // Show in UI (using conversation history for consistency with regular queries)
                 String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
                 queryTab.setResponseText(html);
+
+                // Clear the orchestrator reference
+                currentOrchestrator = null;
                 setUIState(false, "Submit", null);
 
                 // Refresh chat history to show updated timestamp
@@ -342,6 +347,9 @@ public class TabController {
             SwingUtilities.invokeLater(() -> {
                 Msg.showError(getClass(), queryTab, "Agentic Analysis Error",
                     "Analysis failed: " + error.getMessage());
+
+                // Clear the orchestrator reference
+                currentOrchestrator = null;
                 setUIState(false, "Submit", null);
             });
             return null;
@@ -646,15 +654,22 @@ public class TabController {
     }
     
     private void cancelCurrentOperation() {
-        setUIState(false, null, null);
-        
+        // Cancel the ReAct orchestrator if it exists
+        if (currentOrchestrator != null) {
+            currentOrchestrator.cancel();
+            currentOrchestrator = null;
+        }
+
         // Cancel the current LLM API instance if it exists
         if (currentLlmApi != null) {
             currentLlmApi.cancelCurrentRequest();
             currentLlmApi = null;
         }
-        
+
         actionAnalysisService.cancelAnalysis();
+
+        // Reset UI state
+        setUIState(false, "Submit", null);
     }
     
     private void setUIState(boolean running, String buttonText, String statusText) {

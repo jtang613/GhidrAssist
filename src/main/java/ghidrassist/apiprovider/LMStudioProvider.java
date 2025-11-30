@@ -146,7 +146,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
     @Override
     public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
-        JsonObject payload = buildChatCompletionPayload(messages, false);
+        JsonObject payload = buildChatCompletionPayload(messages, true); // Enable streaming
 
         // LMStudio uses the modern 'tools' format, not 'functions'
         payload.add("tools", gson.toJsonTree(functions));
@@ -157,49 +157,138 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
-            String responseBody = response.body().string();
-            JsonObject responseObj = gson.fromJson(responseBody, JsonObject.class);
+            // Handle streaming response - accumulate all chunks
+            StringBuilder contentBuilder = new StringBuilder();
+            java.util.Map<Integer, JsonObject> toolCallsMap = new java.util.HashMap<>();
+            String finishReason = "stop";
+            String responseId = null;
 
-            // LMStudio should return OpenAI-compatible response already
-            // But let's ensure finish_reason is set properly
-            if (responseObj.has("choices")) {
-                JsonArray choices = responseObj.getAsJsonArray("choices");
-                if (choices.size() > 0) {
-                    JsonObject choice = choices.get(0).getAsJsonObject();
-                    JsonObject message = choice.getAsJsonObject("message");
+            try (ResponseBody responseBody = response.body()) {
+                BufferedSource source = responseBody.source();
+                while (!source.exhausted()) {
+                    String line = source.readUtf8Line();
+                    if (line == null || line.isEmpty()) continue;
 
-                    // Check if tool_calls already exists (modern format)
-                    if (message.has("tool_calls")) {
-                        JsonArray toolCalls = message.getAsJsonArray("tool_calls");
-                        if (toolCalls.size() > 0) {
-                            choice.addProperty("finish_reason", "tool_calls");
+                    if (line.startsWith("data: ")) {
+                        String data = line.substring(6).trim();
+                        if (data.equals("[DONE]")) {
+                            break;
                         }
-                    }
-                    // Check if there's a function_call and convert to tool_calls format (legacy format)
-                    else if (message.has("function_call")) {
-                        JsonObject functionCall = message.getAsJsonObject("function_call");
 
-                        // Convert to tool_calls format
-                        JsonArray toolCalls = new JsonArray();
-                        JsonObject toolCall = new JsonObject();
-                        toolCall.addProperty("id", "call_" + System.currentTimeMillis());
-                        toolCall.addProperty("type", "function");
+                        JsonObject chunk = gson.fromJson(data, JsonObject.class);
 
-                        JsonObject function = new JsonObject();
-                        function.addProperty("name", functionCall.get("name").getAsString());
-                        function.addProperty("arguments", functionCall.get("arguments").getAsString());
-                        toolCall.add("function", function);
+                        // Capture response ID from first chunk
+                        if (responseId == null && chunk.has("id")) {
+                            responseId = chunk.get("id").getAsString();
+                        }
 
-                        toolCalls.add(toolCall);
-                        message.add("tool_calls", toolCalls);
-                        message.remove("function_call");
+                        // Accumulate content and tool_calls from deltas
+                        if (chunk.has("choices")) {
+                            JsonArray choices = chunk.getAsJsonArray("choices");
+                            if (choices.size() > 0) {
+                                JsonObject choice = choices.get(0).getAsJsonObject();
 
-                        choice.addProperty("finish_reason", "tool_calls");
-                    } else if (!choice.has("finish_reason")) {
-                        choice.addProperty("finish_reason", "stop");
+                                // Handle delta content
+                                if (choice.has("delta")) {
+                                    JsonObject delta = choice.getAsJsonObject("delta");
+
+                                    // Accumulate text content
+                                    if (delta.has("content") && !delta.get("content").isJsonNull()) {
+                                        contentBuilder.append(delta.get("content").getAsString());
+                                    }
+
+                                    // Accumulate tool_calls - they come as deltas that need to be merged
+                                    if (delta.has("tool_calls")) {
+                                        JsonArray toolCallDeltas = delta.getAsJsonArray("tool_calls");
+                                        for (JsonElement tcElement : toolCallDeltas) {
+                                            JsonObject toolCallDelta = tcElement.getAsJsonObject();
+
+                                            // Each delta has an index to identify which tool call it belongs to
+                                            int index = toolCallDelta.has("index") ? toolCallDelta.get("index").getAsInt() : 0;
+
+                                            // Get or create the accumulated tool call for this index
+                                            JsonObject accumulatedToolCall = toolCallsMap.computeIfAbsent(index, k -> new JsonObject());
+
+                                            // Merge fields from delta into accumulated tool call
+                                            if (toolCallDelta.has("id")) {
+                                                accumulatedToolCall.addProperty("id", toolCallDelta.get("id").getAsString());
+                                            }
+                                            if (toolCallDelta.has("type")) {
+                                                accumulatedToolCall.addProperty("type", toolCallDelta.get("type").getAsString());
+                                            }
+                                            if (toolCallDelta.has("index")) {
+                                                accumulatedToolCall.addProperty("index", index);
+                                            }
+
+                                            // Merge function object
+                                            if (toolCallDelta.has("function")) {
+                                                JsonObject functionDelta = toolCallDelta.getAsJsonObject("function");
+                                                JsonObject accumulatedFunction = accumulatedToolCall.has("function")
+                                                    ? accumulatedToolCall.getAsJsonObject("function")
+                                                    : new JsonObject();
+
+                                                // Accumulate function name
+                                                if (functionDelta.has("name")) {
+                                                    accumulatedFunction.addProperty("name", functionDelta.get("name").getAsString());
+                                                }
+
+                                                // Accumulate function arguments (they come in chunks)
+                                                if (functionDelta.has("arguments")) {
+                                                    String existingArgs = accumulatedFunction.has("arguments")
+                                                        ? accumulatedFunction.get("arguments").getAsString()
+                                                        : "";
+                                                    String newArgs = functionDelta.get("arguments").getAsString();
+                                                    accumulatedFunction.addProperty("arguments", existingArgs + newArgs);
+                                                }
+
+                                                accumulatedToolCall.add("function", accumulatedFunction);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Capture finish_reason from final chunk
+                                if (choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()) {
+                                    finishReason = choice.get("finish_reason").getAsString();
+                                }
+                            }
+                        }
                     }
                 }
             }
+
+            // Build a complete OpenAI-format response from accumulated data
+            JsonObject responseObj = new JsonObject();
+            responseObj.addProperty("id", responseId != null ? responseId : "chatcmpl-lmstudio-" + System.currentTimeMillis());
+            responseObj.addProperty("object", "chat.completion");
+            responseObj.addProperty("created", System.currentTimeMillis() / 1000);
+            responseObj.addProperty("model", this.model);
+
+            JsonArray choices = new JsonArray();
+            JsonObject choice = new JsonObject();
+            choice.addProperty("index", 0);
+
+            // Build the message object from accumulated content
+            JsonObject message = new JsonObject();
+            message.addProperty("role", "assistant");
+            message.addProperty("content", contentBuilder.toString());
+
+            // Convert accumulated tool_calls map to array
+            if (!toolCallsMap.isEmpty()) {
+                JsonArray toolCallsArray = new JsonArray();
+                // Sort by index to maintain order
+                toolCallsMap.entrySet().stream()
+                    .sorted(java.util.Map.Entry.comparingByKey())
+                    .forEach(entry -> toolCallsArray.add(entry.getValue()));
+
+                message.add("tool_calls", toolCallsArray);
+                finishReason = "tool_calls";
+            }
+
+            choice.add("message", message);
+            choice.addProperty("finish_reason", finishReason);
+            choices.add(choice);
+            responseObj.add("choices", choices);
 
             return gson.toJson(responseObj);
             

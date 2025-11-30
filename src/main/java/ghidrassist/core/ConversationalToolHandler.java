@@ -604,11 +604,15 @@ public class ConversationalToolHandler {
     private String extractToolName(JsonObject toolCall) {
         if (toolCall.has("function")) {
             JsonObject function = toolCall.getAsJsonObject("function");
-            return function.get("name").getAsString();
-        } else if (toolCall.has("name")) {
+            if (function != null && function.has("name") && !function.get("name").isJsonNull()) {
+                return function.get("name").getAsString();
+            }
+        } else if (toolCall.has("name") && !toolCall.get("name").isJsonNull()) {
             return toolCall.get("name").getAsString();
         }
-        throw new IllegalArgumentException("No tool name found in tool call");
+
+        Msg.error(this, "No tool name found in tool call: " + toolCall.toString());
+        throw new IllegalArgumentException("No tool name found in tool call: " + toolCall.toString());
     }
     
     /**
@@ -616,26 +620,38 @@ public class ConversationalToolHandler {
      */
     private JsonObject extractToolArguments(JsonObject toolCall) {
         JsonObject arguments = new JsonObject();
-        
-        if (toolCall.has("function")) {
-            JsonObject function = toolCall.getAsJsonObject("function");
-            if (function.has("arguments")) {
-                JsonElement argsElement = function.get("arguments");
+
+        try {
+            if (toolCall.has("function")) {
+                JsonObject function = toolCall.getAsJsonObject("function");
+                if (function != null && function.has("arguments") && !function.get("arguments").isJsonNull()) {
+                    JsonElement argsElement = function.get("arguments");
+                    if (argsElement.isJsonObject()) {
+                        arguments = argsElement.getAsJsonObject();
+                    } else if (argsElement.isJsonPrimitive()) {
+                        // Parse string arguments
+                        String argsStr = argsElement.getAsString();
+                        if (argsStr != null && !argsStr.trim().isEmpty()) {
+                            arguments = JsonParser.parseString(argsStr).getAsJsonObject();
+                        }
+                    }
+                }
+            } else if (toolCall.has("arguments") && !toolCall.get("arguments").isJsonNull()) {
+                JsonElement argsElement = toolCall.get("arguments");
                 if (argsElement.isJsonObject()) {
                     arguments = argsElement.getAsJsonObject();
                 } else if (argsElement.isJsonPrimitive()) {
-                    // Parse string arguments
                     String argsStr = argsElement.getAsString();
-                    arguments = JsonParser.parseString(argsStr).getAsJsonObject();
+                    if (argsStr != null && !argsStr.trim().isEmpty()) {
+                        arguments = JsonParser.parseString(argsStr).getAsJsonObject();
+                    }
                 }
             }
-        } else if (toolCall.has("arguments")) {
-            JsonElement argsElement = toolCall.get("arguments");
-            if (argsElement.isJsonObject()) {
-                arguments = argsElement.getAsJsonObject();
-            }
+        } catch (Exception e) {
+            Msg.error(this, "Failed to extract arguments from tool call: " + e.getMessage());
+            Msg.error(this, "Tool call JSON: " + toolCall.toString());
         }
-        
+
         return arguments;
     }
     
