@@ -80,6 +80,9 @@ public class QueryTab extends JPanel {
 
         queryTextArea = new JTextArea();
         queryTextArea.setRows(4);
+        queryTextArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        queryTextArea.setLineWrap(true);
+        queryTextArea.setWrapStyleWord(true);
         addHintTextToQueryTextArea();
 
         submitButton = new JButton("Submit");

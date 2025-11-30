@@ -5,6 +5,8 @@ import java.awt.*;
 import ghidrassist.core.TabController;
 
 public class AnalysisOptionsTab extends JPanel {
+    private static final String VERSION = "1.0.1";
+
     private final TabController controller;
     private JTextArea contextArea;
     private JButton saveButton;
@@ -38,11 +40,21 @@ public class AnalysisOptionsTab extends JPanel {
         JScrollPane scrollPane = new JScrollPane(contextArea);
         add(scrollPane, BorderLayout.CENTER);
 
-        // Add button panel
+        // Add bottom panel with version and buttons
+        JPanel bottomPanel = new JPanel(new BorderLayout());
+
+        // Version label on the left
+        JLabel versionLabel = new JLabel("GhidrAssist v" + VERSION);
+        versionLabel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 5));
+        bottomPanel.add(versionLabel, BorderLayout.WEST);
+
+        // Buttons on the right
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         buttonPanel.add(revertButton);
         buttonPanel.add(saveButton);
-        add(buttonPanel, BorderLayout.SOUTH);
+        bottomPanel.add(buttonPanel, BorderLayout.EAST);
+
+        add(bottomPanel, BorderLayout.SOUTH);
     }
 
     private void setupListeners() {
