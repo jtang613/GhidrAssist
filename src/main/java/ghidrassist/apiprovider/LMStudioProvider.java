@@ -147,9 +147,10 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
     @Override
     public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
-        
-        payload.add("functions", gson.toJsonTree(functions));
-        
+
+        // LMStudio uses the modern 'tools' format, not 'functions'
+        payload.add("tools", gson.toJsonTree(functions));
+
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
@@ -158,7 +159,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
             String responseBody = response.body().string();
             JsonObject responseObj = gson.fromJson(responseBody, JsonObject.class);
-            
+
             // LMStudio should return OpenAI-compatible response already
             // But let's ensure finish_reason is set properly
             if (responseObj.has("choices")) {
@@ -166,33 +167,40 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
                 if (choices.size() > 0) {
                     JsonObject choice = choices.get(0).getAsJsonObject();
                     JsonObject message = choice.getAsJsonObject("message");
-                    
-                    // Check if there's a function_call and convert to tool_calls format
-                    if (message.has("function_call")) {
+
+                    // Check if tool_calls already exists (modern format)
+                    if (message.has("tool_calls")) {
+                        JsonArray toolCalls = message.getAsJsonArray("tool_calls");
+                        if (toolCalls.size() > 0) {
+                            choice.addProperty("finish_reason", "tool_calls");
+                        }
+                    }
+                    // Check if there's a function_call and convert to tool_calls format (legacy format)
+                    else if (message.has("function_call")) {
                         JsonObject functionCall = message.getAsJsonObject("function_call");
-                        
+
                         // Convert to tool_calls format
                         JsonArray toolCalls = new JsonArray();
                         JsonObject toolCall = new JsonObject();
                         toolCall.addProperty("id", "call_" + System.currentTimeMillis());
                         toolCall.addProperty("type", "function");
-                        
+
                         JsonObject function = new JsonObject();
                         function.addProperty("name", functionCall.get("name").getAsString());
                         function.addProperty("arguments", functionCall.get("arguments").getAsString());
                         toolCall.add("function", function);
-                        
+
                         toolCalls.add(toolCall);
                         message.add("tool_calls", toolCalls);
                         message.remove("function_call");
-                        
+
                         choice.addProperty("finish_reason", "tool_calls");
                     } else if (!choice.has("finish_reason")) {
                         choice.addProperty("finish_reason", "stop");
                     }
                 }
             }
-            
+
             return gson.toJson(responseObj);
             
         } catch (IOException e) {
@@ -204,10 +212,11 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
     public String createChatCompletionWithFunctions(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, false);
 
-        payload.add("functions", gson.toJsonTree(functions));
+        // LMStudio uses the modern 'tools' format, not 'functions'
+        payload.add("tools", gson.toJsonTree(functions));
 
-        // Force function calling
-        payload.addProperty("function_call", "auto");
+        // Use tool_choice instead of function_call for modern tools API
+        payload.addProperty("tool_choice", "auto");
 
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
@@ -220,6 +229,13 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
                 .get(0).getAsJsonObject()
                 .getAsJsonObject("message");
 
+            // Check if tool_calls already exists (modern format)
+            if (message.has("tool_calls")) {
+                JsonArray toolCalls = message.getAsJsonArray("tool_calls");
+                return "{\"tool_calls\":" + toolCalls.toString() + "}";
+            }
+
+            // Check for legacy function_call format
             if (message.has("function_call")) {
                 JsonObject functionCall = message.getAsJsonObject("function_call");
                 // Convert to tool_calls format for ActionParser compatibility
