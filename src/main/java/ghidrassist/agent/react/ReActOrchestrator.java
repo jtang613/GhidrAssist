@@ -188,13 +188,13 @@ public class ReActOrchestrator {
 
         if (currentIteration > maxIterations) {
             // Max iterations reached - synthesize answer
-            synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get());
+            synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get(), ReActResult.Status.MAX_ITERATIONS);
             return;
         }
 
         if (todoManager.allComplete()) {
             // All todos done - synthesize answer
-            synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get());
+            synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get(), ReActResult.Status.SUCCESS);
             return;
         }
 
@@ -265,10 +265,10 @@ public class ReActOrchestrator {
                 // Check if we should continue or finish
                 if (todoManager.allComplete() || !hasCalledTools) {
                     // Either done or no more tools to call - synthesize
-                    synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get());
+                    synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get(), ReActResult.Status.SUCCESS);
                 } else {
-                    // Continue to next iteration
-                    runReActIteration(
+                    // Perform self-reflection to determine if we should continue
+                    performSelfReflection(
                         objective,
                         initialContext,
                         todoManager,
@@ -279,7 +279,8 @@ public class ReActOrchestrator {
                         toolCallCount,
                         handler,
                         startTime,
-                        resultFuture
+                        resultFuture,
+                        currentIteration
                     );
                 }
             }
@@ -315,7 +316,8 @@ public class ReActOrchestrator {
         Instant startTime,
         CompletableFuture<ReActResult> resultFuture,
         int iterationCount,
-        int toolCallCount
+        int toolCallCount,
+        ReActResult.Status completionStatus
     ) {
         String synthesisPrompt = ReActPrompts.getSynthesisPrompt(
             objective,
@@ -341,24 +343,18 @@ public class ReActOrchestrator {
             public void onComplete(String fullResponse) {
                 Duration duration = Duration.between(startTime, Instant.now());
 
-                // Build result
-                ReActResult.Builder resultBuilder = new ReActResult.Builder()
+                // Build result with the provided completion status
+                ReActResult result = new ReActResult.Builder()
+                    .status(completionStatus)
                     .answer(fullResponse)
                     .findings(findings.getAllFindings().stream()
                         .map(f -> f.getFact())
                         .toList())
                     .iterationCount(iterationCount)
                     .toolCallCount(toolCallCount)
-                    .duration(duration);
+                    .duration(duration)
+                    .build();
 
-                // Determine status
-                if (todoManager.allComplete()) {
-                    resultBuilder.status(ReActResult.Status.SUCCESS);
-                } else {
-                    resultBuilder.status(ReActResult.Status.MAX_ITERATIONS);
-                }
-
-                ReActResult result = resultBuilder.build();
                 handler.onComplete(result);
                 resultFuture.complete(result);
             }
@@ -376,6 +372,119 @@ public class ReActOrchestrator {
             public boolean shouldContinue() {
                 return true;
             }
+        });
+    }
+
+    /**
+     * Perform self-reflection to determine if investigation should continue.
+     */
+    private void performSelfReflection(
+        String objective,
+        String initialContext,
+        TodoListManager todoManager,
+        FindingsCache findings,
+        ContextSummarizer summarizer,
+        List<Map<String, Object>> tools,
+        AtomicInteger iteration,
+        AtomicInteger toolCallCount,
+        ReActProgressHandler handler,
+        Instant startTime,
+        CompletableFuture<ReActResult> resultFuture,
+        int currentIteration
+    ) {
+        String reflectionPrompt = ReActPrompts.getReflectionPrompt(
+            objective,
+            findings.formatForPrompt(),
+            todoManager.formatForPrompt()
+        );
+
+        // Ask the LLM to reflect
+        CompletableFuture<String> reflectionFuture = new CompletableFuture<>();
+        llmApi.sendRequestAsync(reflectionPrompt, new LlmApi.LlmResponseHandler() {
+            private final StringBuilder reflection = new StringBuilder();
+
+            @Override
+            public void onStart() {
+                reflection.setLength(0);
+            }
+
+            @Override
+            public void onUpdate(String partialResponse) {
+                reflection.append(partialResponse);
+            }
+
+            @Override
+            public void onComplete(String fullResponse) {
+                reflectionFuture.complete(fullResponse);
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                // On error, default to continuing
+                Msg.warn(ReActOrchestrator.this, "Reflection failed, continuing investigation: " + error.getMessage());
+                reflectionFuture.complete("CONTINUE: Reflection error, continuing investigation");
+            }
+
+            @Override
+            public boolean shouldContinue() {
+                return !cancelled.get() && handler.shouldContinue();
+            }
+        });
+
+        // Wait for reflection and decide next action
+        reflectionFuture.thenAccept(reflectionResponse -> {
+            String trimmedResponse = reflectionResponse.trim();
+
+            // Parse the reflection response - check if it indicates readiness
+            String upperResponse = trimmedResponse.toUpperCase();
+            boolean containsReady = upperResponse.contains("READY:");
+            boolean startsWithReady = upperResponse.startsWith("READY");
+            boolean containsNotReady = upperResponse.contains("NOT READY");
+
+            boolean shouldSynthesize = containsReady || (startsWithReady && !containsNotReady);
+
+            if (shouldSynthesize) {
+                // Log reflection and decision as findings, not thoughts (to avoid replacing iteration output)
+                handler.onFinding("Self-Reflection: " + trimmedResponse);
+                handler.onFinding("Decision: Sufficient information gathered - synthesizing final answer");
+                synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get(), ReActResult.Status.SUCCESS);
+            } else {
+                // Log reflection and decision as findings, not thoughts (to avoid replacing iteration output)
+                handler.onFinding("Self-Reflection: " + trimmedResponse);
+                handler.onFinding("Decision: More investigation needed - continuing");
+                // Continue to next iteration
+                runReActIteration(
+                    objective,
+                    initialContext,
+                    todoManager,
+                    findings,
+                    summarizer,
+                    tools,
+                    iteration,
+                    toolCallCount,
+                    handler,
+                    startTime,
+                    resultFuture
+                );
+            }
+        }).exceptionally(error -> {
+            Msg.error(this, "Reflection handling failed: " + error.getMessage(), error);
+            handler.onThought("⚠️ **Error in reflection**: " + error.getMessage() + ". Continuing investigation...\n\n", currentIteration);
+            // On error, continue investigation
+            runReActIteration(
+                objective,
+                initialContext,
+                todoManager,
+                findings,
+                summarizer,
+                tools,
+                iteration,
+                toolCallCount,
+                handler,
+                startTime,
+                resultFuture
+            );
+            return null;
         });
     }
 

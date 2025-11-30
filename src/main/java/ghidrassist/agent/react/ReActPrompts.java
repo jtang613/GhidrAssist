@@ -187,4 +187,38 @@ public class ReActPrompts {
             summary
         );
     }
+
+    /**
+     * Prompt for self-reflection after an iteration.
+     * Asks the agent if it has enough information to answer the question.
+     */
+    public static String getReflectionPrompt(String objective, String findings, String todos) {
+        return String.format("""
+            ## Self-Reflection
+
+            **Original Question**: %s
+
+            **Investigation Progress**:
+            %s
+
+            **Findings So Far**:
+            %s
+
+            **Reflection Task**: Based on what you've discovered so far, answer these questions:
+
+            1. Do you have sufficient information to answer the user's question comprehensively?
+            2. Are there critical gaps in your understanding that require more investigation?
+
+            Respond with **ONLY** one of these two options:
+            - "READY: [brief explanation of why you can answer now]"
+            - "CONTINUE: [brief explanation of what critical information is still needed]"
+
+            Be honest - if you can provide a good answer with what you know, say READY.
+            If you truly need more investigation, say CONTINUE.
+            """,
+            objective,
+            todos,
+            findings
+        );
+    }
 }

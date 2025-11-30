@@ -849,20 +849,17 @@ public class TabController {
     
     private ghidrassist.agent.react.ReActProgressHandler createReActProgressHandler(final StringBuilder[] historyContainer) {
         return new ghidrassist.agent.react.ReActProgressHandler() {
-            private final StringBuilder progressLog = new StringBuilder();
-            private final StringBuilder iterationHistory = new StringBuilder();
-            private String currentTodos = "";
+            private final StringBuilder chronologicalHistory = new StringBuilder();  // Single sequential history
             private String currentIterationOutput = "";
-            private int lastIterationSeen = 0;
+            private int lastIterationSeen = -1;  // Start at -1 so iteration 0 triggers header
 
             @Override
             public void onStart(String objective) {
                 SwingUtilities.invokeLater(() -> {
-                    progressLog.setLength(0);
-                    iterationHistory.setLength(0);
-                    progressLog.append("# ReAct Investigation\n\n");
-                    progressLog.append("**Objective**: ").append(objective).append("\n\n");
-                    progressLog.append("---\n\n");
+                    chronologicalHistory.setLength(0);
+                    chronologicalHistory.append("# ReAct Investigation\n\n");
+                    chronologicalHistory.append("**Objective**: ").append(objective).append("\n\n");
+                    chronologicalHistory.append("---\n\n");
                     updateDisplay();
                 });
             }
@@ -870,16 +867,21 @@ public class TabController {
             @Override
             public void onThought(String thought, int iteration) {
                 SwingUtilities.invokeLater(() -> {
-                    // If this is a new iteration, archive the previous iteration's output
-                    if (iteration > lastIterationSeen && !currentIterationOutput.isEmpty()) {
-                        iterationHistory.append("### Iteration ").append(lastIterationSeen).append("\n\n");
-                        iterationHistory.append(currentIterationOutput).append("\n\n");
-                        iterationHistory.append("---\n\n");
+                    // If this is a new iteration, archive the previous iteration and start the new one
+                    if (iteration > lastIterationSeen) {
+                        // Archive previous iteration content (without header, it was already added)
+                        if (!currentIterationOutput.isEmpty()) {
+                            chronologicalHistory.append(currentIterationOutput).append("\n\n");
+                            chronologicalHistory.append("---\n\n");
+                        }
+
+                        // Start new iteration with header
+                        chronologicalHistory.append("### Iteration ").append(iteration).append("\n\n");
                         lastIterationSeen = iteration;
                         currentIterationOutput = "";
                     }
 
-                    // Store the current iteration's streaming output
+                    // Append to current iteration's streaming output
                     currentIterationOutput = thought;
                     updateDisplay();
                 });
@@ -887,42 +889,27 @@ public class TabController {
 
             @Override
             public void onAction(String toolName, com.google.gson.JsonObject args) {
-                SwingUtilities.invokeLater(() -> {
-                    progressLog.append("🔧 **Calling tool**: `").append(toolName).append("`");
-
-                    // Show tool arguments if present
-                    if (args != null && args.size() > 0) {
-                        progressLog.append(" with args:\n```json\n");
-                        progressLog.append(new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(args));
-                        progressLog.append("\n```\n\n");
-                    } else {
-                        progressLog.append("\n\n");
-                    }
-
-                    updateDisplay();
-                });
+                // Actions are shown via the streaming thought output from ConversationalToolHandler
+                // No need to duplicate them here
             }
 
             @Override
             public void onObservation(String toolName, String result) {
-                SwingUtilities.invokeLater(() -> {
-                    // Show condensed result - up to 300 chars
-                    String truncated = result.length() > 300
-                        ? result.substring(0, 300) + "\n... [+" + (result.length() - 300) + " more chars]"
-                        : result;
-
-                    progressLog.append("**Result**:\n```\n");
-                    progressLog.append(truncated);
-                    progressLog.append("\n```\n\n");
-
-                    updateDisplay();
-                });
+                // Observations are shown via the streaming thought output from ConversationalToolHandler
+                // No need to duplicate them here
             }
 
             @Override
             public void onFinding(String finding) {
                 SwingUtilities.invokeLater(() -> {
-                    progressLog.append("💡 **Finding**: ").append(finding).append("\n\n");
+                    // Archive current iteration if needed before adding finding (without header)
+                    if (!currentIterationOutput.isEmpty()) {
+                        chronologicalHistory.append(currentIterationOutput).append("\n\n");
+                        currentIterationOutput = "";
+                    }
+
+                    // Append finding to chronological history
+                    chronologicalHistory.append("💡 **Finding**: ").append(finding).append("\n\n");
                     updateDisplay();
                 });
             }
@@ -930,20 +917,15 @@ public class TabController {
             @Override
             public void onComplete(ghidrassist.agent.react.ReActResult result) {
                 SwingUtilities.invokeLater(() -> {
-                    // Archive the last iteration's output before showing final result
+                    // Archive the last iteration's output before showing final result (without header)
                     if (!currentIterationOutput.isEmpty()) {
-                        iterationHistory.append("### Iteration ").append(lastIterationSeen).append("\n\n");
-                        iterationHistory.append(currentIterationOutput).append("\n\n");
-                        iterationHistory.append("---\n\n");
+                        chronologicalHistory.append(currentIterationOutput).append("\n\n");
+                        chronologicalHistory.append("---\n\n");
                         currentIterationOutput = "";
                     }
 
-                    // Save the complete history for display with final result
-                    StringBuilder fullHistory = new StringBuilder();
-                    fullHistory.append(progressLog);
-                    fullHistory.append(iterationHistory);
-                    fullHistory.append("\n\n---\n\n");
-                    historyContainer[0] = fullHistory;
+                    // Save the complete chronological history for display with final result
+                    historyContainer[0] = chronologicalHistory;
 
                     // Final result will be displayed by handleAgenticQuery's thenAccept handler
                 });
@@ -952,7 +934,7 @@ public class TabController {
             @Override
             public void onError(Throwable error) {
                 SwingUtilities.invokeLater(() -> {
-                    progressLog.append("\n\n❌ **ERROR**: ").append(error.getMessage()).append("\n");
+                    chronologicalHistory.append("\n\n❌ **ERROR**: ").append(error.getMessage()).append("\n");
                     updateDisplay();
                 });
             }
@@ -965,7 +947,7 @@ public class TabController {
             @Override
             public void onIterationWarning(int remaining) {
                 SwingUtilities.invokeLater(() -> {
-                    progressLog.append("⚠️ *").append(remaining).append(" iteration(s) remaining*\n\n");
+                    chronologicalHistory.append("⚠️ *").append(remaining).append(" iteration(s) remaining*\n\n");
                     updateDisplay();
                 });
             }
@@ -973,7 +955,7 @@ public class TabController {
             @Override
             public void onToolCallWarning(int remaining) {
                 SwingUtilities.invokeLater(() -> {
-                    progressLog.append("⚠️ *").append(remaining).append(" tool call(s) remaining*\n\n");
+                    chronologicalHistory.append("⚠️ *").append(remaining).append(" tool call(s) remaining*\n\n");
                     updateDisplay();
                 });
             }
@@ -981,7 +963,16 @@ public class TabController {
             @Override
             public void onTodosUpdated(String todosFormatted) {
                 SwingUtilities.invokeLater(() -> {
-                    currentTodos = todosFormatted;
+                    // Archive current iteration output before showing new todos (without header)
+                    if (!currentIterationOutput.isEmpty()) {
+                        chronologicalHistory.append(currentIterationOutput).append("\n\n");
+                        currentIterationOutput = "";
+                    }
+
+                    // Append todos to chronological history
+                    chronologicalHistory.append("## 📋 Investigation Progress\n\n");
+                    chronologicalHistory.append(todosFormatted).append("\n\n");
+                    chronologicalHistory.append("---\n\n");
                     updateDisplay();
                 });
             }
@@ -989,8 +980,8 @@ public class TabController {
             @Override
             public void onSummarizing(String summary) {
                 SwingUtilities.invokeLater(() -> {
-                    progressLog.append("📝 **Summarizing context...**\n\n");
-                    progressLog.append("```\n").append(summary).append("\n```\n\n");
+                    chronologicalHistory.append("📝 **Summarizing context...**\n\n");
+                    chronologicalHistory.append("```\n").append(summary).append("\n```\n\n");
                     updateDisplay();
                 });
             }
@@ -998,24 +989,12 @@ public class TabController {
             private void updateDisplay() {
                 StringBuilder display = new StringBuilder();
 
-                // Show todos at the top if available
-                if (!currentTodos.isEmpty()) {
-                    display.append("## Investigation Progress\n\n");
-                    display.append(currentTodos).append("\n\n");
-                    display.append("---\n\n");
-                }
-
-                // Append activity log (objective, etc.)
-                display.append(progressLog);
-
-                // Show all previous iteration outputs (preserved history)
-                if (iterationHistory.length() > 0) {
-                    display.append(iterationHistory);
-                }
+                // Show chronological history (includes iteration headers)
+                display.append(chronologicalHistory);
 
                 // Show current iteration output (streaming from ConversationalToolHandler)
+                // Header for current iteration is already in chronologicalHistory
                 if (!currentIterationOutput.isEmpty()) {
-                    display.append("### Current Activity\n\n");
                     display.append(currentIterationOutput).append("\n\n");
                 }
 
