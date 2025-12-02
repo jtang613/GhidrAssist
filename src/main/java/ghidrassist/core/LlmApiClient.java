@@ -54,6 +54,10 @@ public class LlmApiClient {
         return plugin;
     }
 
+    public APIProvider getProvider() {
+        return provider;
+    }
+
     public String getCurrentContext() {
         if (plugin.getCurrentProgram() != null) {
             String programHash = plugin.getCurrentProgram().getExecutableSHA256();
