@@ -2,6 +2,8 @@ package ghidrassist.core;
 
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.AnthropicProvider;
+import ghidrassist.apiprovider.OpenAIProvider;
+import ghidrassist.apiprovider.LMStudioProvider;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.apiprovider.exceptions.RateLimitException;
 import ghidrassist.mcp2.tools.MCPToolManager;
@@ -107,10 +109,12 @@ public class ConversationalToolHandler {
         try {
             // Trim conversation history to prevent token overflow
             trimConversationHistory();
-            
+
             // Call LLM with current conversation history
-            // Use streaming if provider supports it (Anthropic), otherwise blocking
-            if (apiClient.getProvider() instanceof AnthropicProvider) {
+            // Use streaming if provider supports it (Anthropic, OpenAI, LMStudio), otherwise blocking
+            if (apiClient.getProvider() instanceof AnthropicProvider ||
+                apiClient.getProvider() instanceof OpenAIProvider ||
+                apiClient.getProvider() instanceof LMStudioProvider) {
                 streamingConversationWithFunctions();
             } else {
                 CompletableFuture.runAsync(() -> {
@@ -193,10 +197,33 @@ public class ConversationalToolHandler {
     }
 
     /**
-     * Stream conversation with functions using Anthropic provider's streaming API.
+     * Stream conversation with functions using provider's streaming API.
+     * Supports Anthropic, OpenAI, and LMStudio providers.
      * Text content streams immediately; tool calls execute after streaming completes.
      */
     private void streamingConversationWithFunctions() {
+        try {
+            if (apiClient.getProvider() instanceof AnthropicProvider) {
+                streamWithAnthropicProvider();
+            } else if (apiClient.getProvider() instanceof OpenAIProvider) {
+                streamWithOpenAIProvider();
+            } else if (apiClient.getProvider() instanceof LMStudioProvider) {
+                streamWithLMStudioProvider();
+            }
+        } catch (Exception e) {
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Stream conversation using Anthropic provider.
+     */
+    private void streamWithAnthropicProvider() {
         try {
             AnthropicProvider provider = (AnthropicProvider) apiClient.getProvider();
 
@@ -314,6 +341,195 @@ public class ConversationalToolHandler {
     }
 
     /**
+     * Stream conversation using OpenAI provider.
+     */
+    private void streamWithOpenAIProvider() {
+        try {
+            OpenAIProvider provider = (OpenAIProvider) apiClient.getProvider();
+
+            provider.streamChatCompletionWithFunctions(
+                conversationHistory,
+                availableFunctions,
+                new OpenAIProvider.StreamingFunctionHandler() {
+                    @Override
+                    public void onTextUpdate(String textDelta) {
+                        javax.swing.SwingUtilities.invokeLater(() -> {
+                            if (!isCancelled) {
+                                userHandler.onUpdate(textDelta);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onStreamComplete(String stopReason, String fullText, List<OpenAIProvider.ToolCall> toolCalls) {
+                        ChatMessage assistantMsg = new ChatMessage(ChatMessage.ChatMessageRole.ASSISTANT, fullText);
+
+                        if (!toolCalls.isEmpty()) {
+                            JsonArray toolCallsArray = new JsonArray();
+                            for (OpenAIProvider.ToolCall toolCall : toolCalls) {
+                                JsonObject toolCallObj = new JsonObject();
+                                toolCallObj.addProperty("id", toolCall.id);
+                                toolCallObj.addProperty("type", "function");
+
+                                JsonObject function = new JsonObject();
+                                function.addProperty("name", toolCall.name);
+                                function.addProperty("arguments", toolCall.arguments);
+                                toolCallObj.add("function", function);
+
+                                toolCallsArray.add(toolCallObj);
+                            }
+                            assistantMsg.setToolCalls(toolCallsArray);
+                        }
+
+                        conversationHistory.add(assistantMsg);
+
+                        if ("tool_calls".equals(stopReason) && !toolCalls.isEmpty()) {
+                            handleToolCallsFromOpenAIStream(toolCalls);
+                        } else {
+                            handleConversationEndFromStream();
+                        }
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        handleStreamingError(error);
+                    }
+
+                    @Override
+                    public boolean shouldContinue() {
+                        return !isCancelled && isConversationActive;
+                    }
+                }
+            );
+
+        } catch (Exception e) {
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Stream conversation using LMStudio provider.
+     */
+    private void streamWithLMStudioProvider() {
+        try {
+            LMStudioProvider provider = (LMStudioProvider) apiClient.getProvider();
+
+            provider.streamChatCompletionWithFunctions(
+                conversationHistory,
+                availableFunctions,
+                new LMStudioProvider.StreamingFunctionHandler() {
+                    @Override
+                    public void onTextUpdate(String textDelta) {
+                        javax.swing.SwingUtilities.invokeLater(() -> {
+                            if (!isCancelled) {
+                                userHandler.onUpdate(textDelta);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onStreamComplete(String stopReason, String fullText, List<LMStudioProvider.ToolCall> toolCalls) {
+                        ChatMessage assistantMsg = new ChatMessage(ChatMessage.ChatMessageRole.ASSISTANT, fullText);
+
+                        if (!toolCalls.isEmpty()) {
+                            JsonArray toolCallsArray = new JsonArray();
+                            for (LMStudioProvider.ToolCall toolCall : toolCalls) {
+                                JsonObject toolCallObj = new JsonObject();
+                                toolCallObj.addProperty("id", toolCall.id);
+                                toolCallObj.addProperty("type", "function");
+
+                                JsonObject function = new JsonObject();
+                                function.addProperty("name", toolCall.name);
+                                function.addProperty("arguments", toolCall.arguments);
+                                toolCallObj.add("function", function);
+
+                                toolCallsArray.add(toolCallObj);
+                            }
+                            assistantMsg.setToolCalls(toolCallsArray);
+                        }
+
+                        conversationHistory.add(assistantMsg);
+
+                        if ("tool_calls".equals(stopReason) && !toolCalls.isEmpty()) {
+                            handleToolCallsFromLMStudioStream(toolCalls);
+                        } else {
+                            handleConversationEndFromStream();
+                        }
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        handleStreamingError(error);
+                    }
+
+                    @Override
+                    public boolean shouldContinue() {
+                        return !isCancelled && isConversationActive;
+                    }
+                }
+            );
+
+        } catch (Exception e) {
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Common error handling for streaming providers.
+     */
+    private void handleStreamingError(Throwable error) {
+        if (error instanceof RateLimitException ||
+            error.getMessage().contains("rate limit") ||
+            error.getMessage().contains("429")) {
+
+            rateLimitRetries++;
+
+            if (rateLimitRetries <= MAX_RATE_LIMIT_RETRIES) {
+                Msg.warn(ConversationalToolHandler.this,
+                    String.format("Rate limit exceeded during streaming (attempt %d/%d).",
+                        rateLimitRetries, MAX_RATE_LIMIT_RETRIES));
+
+                int backoffSeconds = 30 * rateLimitRetries;
+                userHandler.onUpdate(String.format("⏳ Rate limit exceeded. Pausing for %d seconds...\n",
+                    backoffSeconds));
+
+                CompletableFuture.delayedExecutor(backoffSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                    .execute(() -> {
+                        if (isConversationActive && !isCancelled) {
+                            userHandler.onUpdate("🔄 Resuming...\n");
+                            continueConversation();
+                        }
+                    });
+            } else {
+                isConversationActive = false;
+                userHandler.onUpdate("❌ Too many rate limit errors. Please try again later.\n");
+                userHandler.onError(new Exception("Rate limit exceeded maximum retry attempts."));
+
+                if (onCompletionCallback != null) {
+                    onCompletionCallback.run();
+                }
+            }
+        } else {
+            isConversationActive = false;
+            userHandler.onError(error);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
      * Handle tool calls from streaming response.
      * Simplified version of handleToolCalls for use with streaming.
      */
@@ -345,6 +561,80 @@ public class ConversationalToolHandler {
 
         } catch (Exception e) {
             Msg.error(this, "Error handling tool calls from stream: " + e.getMessage());
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Handle tool calls from OpenAI streaming response.
+     */
+    private void handleToolCallsFromOpenAIStream(List<OpenAIProvider.ToolCall> toolCalls) {
+        try {
+            String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                userHandler.onUpdate(toolExecutionHeader);
+            });
+
+            JsonArray toolCallsArray = new JsonArray();
+            for (OpenAIProvider.ToolCall toolCall : toolCalls) {
+                JsonObject toolCallObj = new JsonObject();
+                toolCallObj.addProperty("id", toolCall.id);
+                toolCallObj.addProperty("type", "function");
+
+                JsonObject function = new JsonObject();
+                function.addProperty("name", toolCall.name);
+                function.addProperty("arguments", toolCall.arguments);
+                toolCallObj.add("function", function);
+
+                toolCallsArray.add(toolCallObj);
+            }
+
+            executeToolsSequentially(toolCallsArray, 0, new ArrayList<>());
+
+        } catch (Exception e) {
+            Msg.error(this, "Error handling tool calls from OpenAI stream: " + e.getMessage());
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Handle tool calls from LMStudio streaming response.
+     */
+    private void handleToolCallsFromLMStudioStream(List<LMStudioProvider.ToolCall> toolCalls) {
+        try {
+            String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                userHandler.onUpdate(toolExecutionHeader);
+            });
+
+            JsonArray toolCallsArray = new JsonArray();
+            for (LMStudioProvider.ToolCall toolCall : toolCalls) {
+                JsonObject toolCallObj = new JsonObject();
+                toolCallObj.addProperty("id", toolCall.id);
+                toolCallObj.addProperty("type", "function");
+
+                JsonObject function = new JsonObject();
+                function.addProperty("name", toolCall.name);
+                function.addProperty("arguments", toolCall.arguments);
+                toolCallObj.add("function", function);
+
+                toolCallsArray.add(toolCallObj);
+            }
+
+            executeToolsSequentially(toolCallsArray, 0, new ArrayList<>());
+
+        } catch (Exception e) {
+            Msg.error(this, "Error handling tool calls from LMStudio stream: " + e.getMessage());
             isConversationActive = false;
             userHandler.onError(e);
 

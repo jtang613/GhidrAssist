@@ -2,6 +2,7 @@ package ghidrassist.ui.tabs;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
@@ -19,7 +20,8 @@ import ghidrassist.AnalysisDB;
 public class QueryTab extends JPanel {
     private static final long serialVersionUID = 1L;
 	private final TabController controller;
-    private JEditorPane responseTextPane;
+    private JTextPane responseTextPane;  // Changed from JEditorPane for better performance
+    private StyledDocument responseDocument;
     private JTextArea queryTextArea;
     private JCheckBox useRAGCheckBox;
     private JCheckBox useMCPCheckBox;
@@ -41,15 +43,12 @@ public class QueryTab extends JPanel {
         this.controller = controller;
         this.dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         this.dateFormat.setTimeZone(TimeZone.getDefault()); // Use local timezone
-        
-        // Initialize components with optimized settings
-        responseTextPane = new JEditorPane();
+
+        // Initialize JTextPane with StyledDocument for incremental updates
+        responseTextPane = new JTextPane();
         responseTextPane.setEditable(false);
-        responseTextPane.setContentType("text/html");
-        responseTextPane.addHyperlinkListener(controller::handleHyperlinkEvent);
-        responseTextPane.putClientProperty("JEditorPane.w3cLengthUnits", Boolean.TRUE);
-        responseTextPane.putClientProperty("JEditorPane.honorDisplayProperties", Boolean.TRUE);
-        
+        responseDocument = responseTextPane.getStyledDocument();
+
         // Enable double buffering for smoother updates
         responseTextPane.setDoubleBuffered(true);
         
@@ -73,10 +72,7 @@ public class QueryTab extends JPanel {
         useAgenticCheckBox.setEnabled(false); // Enabled only when MCP is available
         useAgenticCheckBox.setToolTipText("Enable autonomous ReAct-style analysis with systematic tool use");
 
-        responseTextPane = new JEditorPane();
-        responseTextPane.setEditable(false);
-        responseTextPane.setContentType("text/html");
-        responseTextPane.addHyperlinkListener(controller::handleHyperlinkEvent);
+        // responseTextPane already initialized in constructor
 
         queryTextArea = new JTextArea();
         queryTextArea.setRows(4);
@@ -224,25 +220,69 @@ public class QueryTab extends JPanel {
         });
     }
 
-    public void setResponseText(String text) {
-        responseTextPane.setText(text);
-        responseTextPane.setCaretPosition(responseTextPane.getDocument().getLength());
+    /**
+     * Set response text - switches to HTML mode and renders full content.
+     * PERFORMANCE: This is used at completion for full markdown rendering.
+     */
+    public void setResponseText(String htmlText) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                // Switch to HTML mode for final markdown rendering
+                responseTextPane.setContentType("text/html");
+                responseTextPane.setText(htmlText);
+
+                // Auto-scroll to end
+                SwingUtilities.invokeLater(() -> {
+                    responseTextPane.setCaretPosition(responseTextPane.getDocument().getLength());
+                });
+            } catch (Exception e) {
+                Msg.error(this, "Error setting response text", e);
+            }
+        });
+    }
+
+    /**
+     * Append text incrementally without full document replacement.
+     * PERFORMANCE: This is the key optimization - true incremental append in plain text mode.
+     */
+    public void appendStreamingText(String textDelta) {
+        if (textDelta == null || textDelta.isEmpty()) {
+            return;
+        }
+
+        SwingUtilities.invokeLater(() -> {
+            try {
+                int endPos = responseDocument.getLength();
+                responseDocument.insertString(endPos, textDelta, null);
+
+                // Auto-scroll to end
+                responseTextPane.setCaretPosition(responseDocument.getLength());
+            } catch (BadLocationException e) {
+                Msg.error(this, "Error appending streaming text", e);
+            }
+        });
+    }
+
+    /**
+     * Clear the response document and switch to plain text streaming mode.
+     * PERFORMANCE: Plain text mode is used during streaming for better performance.
+     */
+    public void clearResponse() {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                // Switch to plain text mode for fast streaming
+                responseTextPane.setContentType("text/plain");
+                responseDocument = responseTextPane.getStyledDocument();
+                responseDocument.remove(0, responseDocument.getLength());
+            } catch (BadLocationException e) {
+                Msg.error(this, "Error clearing response", e);
+            }
+        });
     }
 
     public void appendToResponse(String html) {
-        // Only scroll if we're already at the bottom
-        JScrollPane scrollPane = (JScrollPane) responseTextPane.getParent().getParent();
-        JScrollBar vertical = scrollPane.getVerticalScrollBar();
-        boolean shouldScroll = (vertical.getValue() + vertical.getVisibleAmount() == vertical.getMaximum());
-        
-        responseTextPane.setText(html);
-        
-        // Maintain scroll position if we were at the bottom
-        if (shouldScroll) {
-            SwingUtilities.invokeLater(() -> {
-                vertical.setValue(vertical.getMaximum());
-            });
-        }
+        // For backward compatibility - now just sets text
+        setResponseText(html);
     }
     
     public void setSubmitButtonText(String text) {
