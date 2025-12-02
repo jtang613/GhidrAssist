@@ -56,7 +56,7 @@ public class MarkdownHelper {
     /**
      * Convert Markdown text to HTML without adding feedback buttons
      * Used for preview or when feedback isn't needed
-     * 
+     *
      * @param markdown The markdown text to convert
      * @return HTML representation of the markdown
      */
@@ -64,13 +64,45 @@ public class MarkdownHelper {
         if (markdown == null) {
             return "";
         }
-        
+
         Document document = parser.parse(markdown);
         String html = renderer.render(document);
-        
+
         return "<html><body>" + html + "</body></html>";
     }
-    
+
+    /**
+     * Convert plain text to HTML without markdown parsing.
+     * PERFORMANCE OPTIMIZATION: Used during streaming for better responsiveness.
+     * Full markdown rendering happens at completion.
+     *
+     * @param plainText The plain text to convert
+     * @return HTML representation with proper escaping
+     */
+    public String plainTextToHtml(String plainText) {
+        if (plainText == null || plainText.isEmpty()) {
+            return "<html><body></body></html>";
+        }
+
+        // Escape HTML entities to prevent rendering issues
+        String escaped = plainText
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("\n", "<br>");
+
+        // Wrap in HTML structure with monospace font for readability
+        StringBuilder html = new StringBuilder();
+        html.append("<html><body>");
+        html.append("<div style='font-family: monospace; padding: 10px; white-space: pre-wrap;'>");
+        html.append(escaped);
+        html.append("</div>");
+        html.append("</body></html>");
+
+        return html.toString();
+    }
+
     /**
      * Convert HTML to Markdown
      * 

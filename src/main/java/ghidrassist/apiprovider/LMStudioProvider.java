@@ -454,6 +454,221 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         return null;
     }
 
+    /**
+     * Interface for handling streaming responses with function calling support.
+     */
+    public interface StreamingFunctionHandler {
+        /**
+         * Called when a text delta is received.
+         * @param textDelta The incremental text content
+         */
+        void onTextUpdate(String textDelta);
+
+        /**
+         * Called when streaming is complete and all data is available.
+         * @param stopReason The reason streaming stopped (e.g., "stop", "tool_calls")
+         * @param fullText The complete text content
+         * @param toolCalls List of tool calls (empty if none)
+         */
+        void onStreamComplete(String stopReason, String fullText, List<ToolCall> toolCalls);
+
+        /**
+         * Called when an error occurs during streaming.
+         * @param error The error that occurred
+         */
+        void onError(Throwable error);
+
+        /**
+         * Called to check if streaming should continue.
+         * @return true if streaming should continue, false to cancel
+         */
+        boolean shouldContinue();
+    }
+
+    /**
+     * Represents a tool call from the LLM.
+     */
+    public static class ToolCall {
+        public final String id;
+        public final String name;
+        public final String arguments;
+
+        public ToolCall(String id, String name, String arguments) {
+            this.id = id;
+            this.name = name;
+            this.arguments = arguments;
+        }
+    }
+
+    /**
+     * Stream chat completion with function calling support.
+     * This method streams text content in real-time while buffering tool calls.
+     */
+    public void streamChatCompletionWithFunctions(
+        List<ChatMessage> messages,
+        List<Map<String, Object>> functions,
+        StreamingFunctionHandler handler
+    ) throws APIProviderException {
+        JsonObject payload = buildChatCompletionPayload(messages, true);
+        payload.add("tools", gson.toJsonTree(functions));
+
+        Request request = new Request.Builder()
+            .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                handler.onError(handleNetworkError(e, "streamChatCompletionWithFunctions"));
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try (ResponseBody responseBody = response.body()) {
+                    if (!response.isSuccessful()) {
+                        String errorBody = responseBody != null ? responseBody.string() : null;
+                        handler.onError(handleHttpError(response, errorBody, "streamChatCompletionWithFunctions"));
+                        return;
+                    }
+
+                    if (responseBody == null) {
+                        handler.onError(new APIProviderException(APIProviderException.ErrorCategory.RESPONSE_ERROR,
+                            name, "streamChatCompletionWithFunctions", "Empty response body"));
+                        return;
+                    }
+
+                    BufferedSource source = responseBody.source();
+                    StringBuilder textBuilder = new StringBuilder();
+                    java.util.Map<Integer, JsonObject> toolCallsMap = new java.util.HashMap<>();
+                    String finishReason = "stop";
+
+                    try {
+                        while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
+                            String line = source.readUtf8Line();
+                            if (line == null || line.isEmpty()) continue;
+
+                            if (line.startsWith("data: ")) {
+                                String data = line.substring(6).trim();
+                                if (data.equals("[DONE]")) {
+                                    // Process complete - convert accumulated tool calls
+                                    List<ToolCall> toolCalls = new java.util.ArrayList<>();
+                                    toolCallsMap.entrySet().stream()
+                                        .sorted(java.util.Map.Entry.comparingByKey())
+                                        .forEach(entry -> {
+                                            JsonObject toolCallObj = entry.getValue();
+                                            String id = toolCallObj.has("id") ? toolCallObj.get("id").getAsString() : "call_" + entry.getKey();
+                                            String name = "";
+                                            String arguments = "{}";
+
+                                            if (toolCallObj.has("function")) {
+                                                JsonObject function = toolCallObj.getAsJsonObject("function");
+                                                if (function.has("name")) {
+                                                    name = function.get("name").getAsString();
+                                                }
+                                                if (function.has("arguments")) {
+                                                    String args = function.get("arguments").getAsString().trim();
+                                                    arguments = args.isEmpty() ? "{}" : args;
+                                                }
+                                            }
+
+                                            toolCalls.add(new ToolCall(id, name, arguments));
+                                        });
+
+                                    handler.onStreamComplete(finishReason, textBuilder.toString(), toolCalls);
+                                    return;
+                                }
+
+                                try {
+                                    JsonObject chunk = gson.fromJson(data, JsonObject.class);
+
+                                    if (chunk.has("choices")) {
+                                        JsonArray choices = chunk.getAsJsonArray("choices");
+                                        if (choices.size() > 0) {
+                                            JsonObject choice = choices.get(0).getAsJsonObject();
+
+                                            if (choice.has("delta")) {
+                                                JsonObject delta = choice.getAsJsonObject("delta");
+
+                                                // Stream text content immediately
+                                                if (delta.has("content") && !delta.get("content").isJsonNull()) {
+                                                    String content = delta.get("content").getAsString();
+                                                    textBuilder.append(content);
+                                                    handler.onTextUpdate(content);
+                                                }
+
+                                                // Buffer tool calls - accumulate deltas
+                                                if (delta.has("tool_calls")) {
+                                                    JsonArray toolCallDeltas = delta.getAsJsonArray("tool_calls");
+                                                    for (JsonElement tcElement : toolCallDeltas) {
+                                                        JsonObject toolCallDelta = tcElement.getAsJsonObject();
+                                                        int index = toolCallDelta.has("index") ? toolCallDelta.get("index").getAsInt() : 0;
+
+                                                        JsonObject accumulatedToolCall = toolCallsMap.computeIfAbsent(index, k -> new JsonObject());
+
+                                                        // Merge fields from delta
+                                                        if (toolCallDelta.has("id")) {
+                                                            accumulatedToolCall.addProperty("id", toolCallDelta.get("id").getAsString());
+                                                        }
+                                                        if (toolCallDelta.has("type")) {
+                                                            accumulatedToolCall.addProperty("type", toolCallDelta.get("type").getAsString());
+                                                        }
+
+                                                        // Merge function object
+                                                        if (toolCallDelta.has("function")) {
+                                                            JsonObject functionDelta = toolCallDelta.getAsJsonObject("function");
+                                                            JsonObject accumulatedFunction = accumulatedToolCall.has("function")
+                                                                ? accumulatedToolCall.getAsJsonObject("function")
+                                                                : new JsonObject();
+
+                                                            if (functionDelta.has("name")) {
+                                                                accumulatedFunction.addProperty("name", functionDelta.get("name").getAsString());
+                                                            }
+
+                                                            if (functionDelta.has("arguments")) {
+                                                                String existingArgs = accumulatedFunction.has("arguments")
+                                                                    ? accumulatedFunction.get("arguments").getAsString()
+                                                                    : "";
+                                                                String newArgs = functionDelta.get("arguments").getAsString();
+                                                                accumulatedFunction.addProperty("arguments", existingArgs + newArgs);
+                                                            }
+
+                                                            accumulatedToolCall.add("function", accumulatedFunction);
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Capture finish_reason
+                                            if (choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()) {
+                                                finishReason = choice.get("finish_reason").getAsString();
+                                            }
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    handler.onError(new APIProviderException(APIProviderException.ErrorCategory.RESPONSE_ERROR,
+                                        name, "streamChatCompletionWithFunctions", "Failed to parse streaming chunk: " + e.getMessage()));
+                                    return;
+                                }
+                            }
+                        }
+
+                        if (isCancelled) {
+                            handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                                name, "streamChatCompletionWithFunctions", "Request cancelled"));
+                        } else if (!handler.shouldContinue()) {
+                            handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                                name, "streamChatCompletionWithFunctions", "Request cancelled"));
+                        }
+                    } catch (IOException e) {
+                        handler.onError(new APIProviderException(APIProviderException.ErrorCategory.RESPONSE_ERROR,
+                            name, "streamChatCompletionWithFunctions", "Stream interrupted: " + e.getMessage()));
+                    }
+                }
+            }
+        });
+    }
+
     public void cancelRequest() {
         isCancelled = true;
     }

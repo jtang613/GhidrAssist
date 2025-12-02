@@ -526,10 +526,216 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         return null;
     }
 
+    /**
+     * Interface for handling streaming responses with function calling support.
+     */
+    public interface StreamingFunctionHandler {
+        /**
+         * Called when a text delta is received.
+         * @param textDelta The incremental text content
+         */
+        void onTextUpdate(String textDelta);
+
+        /**
+         * Called when streaming is complete and all data is available.
+         * @param stopReason The reason streaming stopped (e.g., "stop", "tool_calls")
+         * @param fullText The complete text content
+         * @param toolCalls List of tool calls (empty if none)
+         */
+        void onStreamComplete(String stopReason, String fullText, List<ToolCall> toolCalls);
+
+        /**
+         * Called when an error occurs during streaming.
+         * @param error The error that occurred
+         */
+        void onError(Throwable error);
+
+        /**
+         * Called to check if streaming should continue.
+         * @return true if streaming should continue, false to cancel
+         */
+        boolean shouldContinue();
+    }
+
+    /**
+     * Represents a tool call from the LLM.
+     */
+    public static class ToolCall {
+        public final String id;
+        public final String name;
+        public final String arguments;
+
+        public ToolCall(String id, String name, String arguments) {
+            this.id = id;
+            this.name = name;
+            this.arguments = arguments;
+        }
+    }
+
+    /**
+     * Stream chat completion with function calling support.
+     * This method streams text content in real-time while buffering tool calls.
+     */
+    public void streamChatCompletionWithFunctions(
+        List<ChatMessage> messages,
+        List<Map<String, Object>> functions,
+        StreamingFunctionHandler handler
+    ) throws APIProviderException {
+        JsonObject payload = buildChatCompletionPayload(messages, true);
+        payload.add("tools", gson.toJsonTree(functions));
+
+        Request request = new Request.Builder()
+            .url(url + OPENAI_CHAT_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        client.newCall(request).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                APIProviderException apiException;
+                if (call.isCanceled()) {
+                    apiException = new StreamCancelledException(name, "stream_chat_completion_with_functions",
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e);
+                } else {
+                    apiException = handleNetworkError(e, "stream_chat_completion_with_functions");
+                }
+                handler.onError(apiException);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try (ResponseBody responseBody = response.body()) {
+                    if (!response.isSuccessful()) {
+                        APIProviderException apiException = handleHttpError(response, "stream_chat_completion_with_functions");
+                        handler.onError(apiException);
+                        return;
+                    }
+
+                    if (responseBody == null) {
+                        handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                            ResponseException.ResponseErrorType.EMPTY_RESPONSE));
+                        return;
+                    }
+
+                    BufferedSource source = responseBody.source();
+                    StringBuilder textBuilder = new StringBuilder();
+                    java.util.Map<Integer, ToolCallAccumulator> toolCallsMap = new java.util.HashMap<>();
+                    String finishReason = "stop";
+
+                    try {
+                        while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
+                            String line = source.readUtf8Line();
+                            if (line == null || line.isEmpty()) continue;
+
+                            if (line.startsWith("data: ")) {
+                                String data = line.substring(6).trim();
+                                if (data.equals("[DONE]")) {
+                                    // Process complete - convert accumulated tool calls
+                                    List<ToolCall> toolCalls = new java.util.ArrayList<>();
+                                    toolCallsMap.entrySet().stream()
+                                        .sorted(java.util.Map.Entry.comparingByKey())
+                                        .forEach(entry -> {
+                                            ToolCallAccumulator acc = entry.getValue();
+                                            // Validate arguments - default to {} if empty
+                                            String args = acc.argumentsBuffer.toString().trim();
+                                            if (args.isEmpty()) {
+                                                args = "{}";
+                                            }
+                                            toolCalls.add(new ToolCall(acc.id, acc.name, args));
+                                        });
+
+                                    handler.onStreamComplete(finishReason, textBuilder.toString(), toolCalls);
+                                    return;
+                                }
+
+                                try {
+                                    JsonObject chunk = gson.fromJson(data, JsonObject.class);
+
+                                    if (chunk.has("choices")) {
+                                        JsonArray choices = chunk.getAsJsonArray("choices");
+                                        if (choices.size() > 0) {
+                                            JsonObject choice = choices.get(0).getAsJsonObject();
+
+                                            // Handle delta
+                                            if (choice.has("delta")) {
+                                                JsonObject delta = choice.getAsJsonObject("delta");
+
+                                                // Stream text content immediately
+                                                if (delta.has("content") && !delta.get("content").isJsonNull()) {
+                                                    String content = delta.get("content").getAsString();
+                                                    textBuilder.append(content);
+                                                    handler.onTextUpdate(content);
+                                                }
+
+                                                // Buffer tool calls
+                                                if (delta.has("tool_calls")) {
+                                                    JsonArray toolCallDeltas = delta.getAsJsonArray("tool_calls");
+                                                    for (JsonElement tcElement : toolCallDeltas) {
+                                                        JsonObject toolCallDelta = tcElement.getAsJsonObject();
+                                                        int index = toolCallDelta.has("index") ? toolCallDelta.get("index").getAsInt() : 0;
+
+                                                        ToolCallAccumulator acc = toolCallsMap.computeIfAbsent(index, k -> new ToolCallAccumulator());
+
+                                                        if (toolCallDelta.has("id")) {
+                                                            acc.id = toolCallDelta.get("id").getAsString();
+                                                        }
+
+                                                        if (toolCallDelta.has("function")) {
+                                                            JsonObject functionDelta = toolCallDelta.getAsJsonObject("function");
+                                                            if (functionDelta.has("name")) {
+                                                                acc.name = functionDelta.get("name").getAsString();
+                                                            }
+                                                            if (functionDelta.has("arguments")) {
+                                                                acc.argumentsBuffer.append(functionDelta.get("arguments").getAsString());
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Capture finish_reason
+                                            if (choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()) {
+                                                finishReason = choice.get("finish_reason").getAsString();
+                                            }
+                                        }
+                                    }
+                                } catch (JsonSyntaxException e) {
+                                    handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                                        ResponseException.ResponseErrorType.MALFORMED_JSON, e));
+                                    return;
+                                }
+                            }
+                        }
+
+                        if (isCancelled) {
+                            handler.onError(new StreamCancelledException(name, "stream_chat_completion_with_functions",
+                                StreamCancelledException.CancellationReason.USER_REQUESTED));
+                        } else if (!handler.shouldContinue()) {
+                            handler.onError(new StreamCancelledException(name, "stream_chat_completion_with_functions",
+                                StreamCancelledException.CancellationReason.USER_REQUESTED));
+                        }
+                    } catch (IOException e) {
+                        handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                            ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Helper class to accumulate tool call deltas during streaming.
+     */
+    private static class ToolCallAccumulator {
+        String id;
+        String name;
+        final StringBuilder argumentsBuffer = new StringBuilder();
+    }
+
     public void cancelRequest() {
         isCancelled = true;
     }
-    
+
     @Override
     protected String extractApiErrorCode(String responseBody) {
         if (responseBody == null || responseBody.isEmpty()) {

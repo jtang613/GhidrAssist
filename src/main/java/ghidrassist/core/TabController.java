@@ -21,6 +21,10 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Responsibilities:
@@ -51,7 +55,13 @@ public class TabController {
 
     // UI state
     private volatile boolean isQueryRunning;
-    
+
+    // Update throttling for streaming performance
+    private static final int THROTTLE_MS = 100;  // Max 10 updates/sec
+    private final ScheduledExecutorService updateScheduler = Executors.newSingleThreadScheduledExecutor();
+    private volatile ScheduledFuture<?> pendingUpdate;
+    private final Object updateLock = new Object();
+
     // UI Component references
     private ExplainTab explainTab;
     private QueryTab queryTab;
@@ -766,67 +776,97 @@ public class TabController {
         return new LlmApi.LlmResponseHandler() {
             private final StringBuilder responseBuffer = new StringBuilder();
             private final Object bufferLock = new Object();
+            private volatile int lastRenderedLength = 0;
 
             @Override
             public void onStart() {
-                SwingUtilities.invokeLater(() -> {
-                    synchronized (bufferLock) {
-                        responseBuffer.setLength(0);
-                    }
-                    queryTab.setResponseText("Processing...");
-                });
+                synchronized (bufferLock) {
+                    responseBuffer.setLength(0);
+                    lastRenderedLength = 0;
+                }
+
+                // Clear and switch to plain text mode for streaming
+                queryTab.clearResponse();
+
+                // Show initial processing message
+                queryTab.appendStreamingText("Processing...\n\n");
+                lastRenderedLength = "Processing...\n\n".length();
             }
 
             @Override
             public void onUpdate(String partialResponse) {
-                // Synchronize access to the buffer to prevent race conditions
                 synchronized (bufferLock) {
-                    // Skip empty or null responses
                     if (partialResponse == null || partialResponse.isEmpty()) {
                         return;
                     }
-                    
-                    // Check if this is cumulative content (contains what we already have)
+
+                    // Handle cumulative vs delta responses
                     String currentBuffer = responseBuffer.toString();
                     if (partialResponse.startsWith(currentBuffer)) {
-                        // This is cumulative content, extract only the new part
                         String newContent = partialResponse.substring(currentBuffer.length());
                         if (!newContent.isEmpty()) {
                             responseBuffer.append(newContent);
                         }
                     } else {
-                        // This is a true delta, append it
                         responseBuffer.append(partialResponse);
                     }
-                    
-                    // Capture the current buffer state for display
-                    final String currentResponse = responseBuffer.toString();
-                    
-                    SwingUtilities.invokeLater(() -> {
-                        // Show conversation history + current assistant response
-                        String fullConversation = queryService.getConversationHistory() + 
-                            "**Assistant**:\n" + currentResponse;
-                        
-                        String html = markdownHelper.markdownToHtml(fullConversation);
-                        queryTab.setResponseText(html);
-                    });
+
+                    // Build full conversation text
+                    String fullConversation = queryService.getConversationHistory() +
+                        "**Assistant**:\n" + responseBuffer.toString();
+
+                    // Calculate delta to render
+                    final int currentLength = fullConversation.length();
+                    if (currentLength <= lastRenderedLength) {
+                        return; // No new content
+                    }
+
+                    final String textDelta = fullConversation.substring(lastRenderedLength);
+                    final int newLength = currentLength;
+
+                    // PERFORMANCE OPTIMIZATION: Throttle UI updates
+                    synchronized (updateLock) {
+                        if (pendingUpdate != null && !pendingUpdate.isDone()) {
+                            pendingUpdate.cancel(false);
+                        }
+
+                        pendingUpdate = updateScheduler.schedule(() -> {
+                            // Append only the new delta - TRUE incremental update!
+                            queryTab.appendStreamingText(textDelta);
+                            lastRenderedLength = newLength;
+                        }, THROTTLE_MS, TimeUnit.MILLISECONDS);
+                    }
                 }
             }
 
             @Override
             public void onComplete(String fullResponse) {
-                SwingUtilities.invokeLater(() -> {
-                    feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), fullResponse);
-                    queryService.addAssistantResponse(responseBuffer.toString());
-                    
-                    String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
-                    queryTab.setResponseText(html);
-                    setUIState(false, "Submit", null);
-                    currentLlmApi = null; // Clear after completion
-                    
-                    // Refresh chat history to show updated timestamp
-                    refreshChatHistory();
-                });
+                synchronized (bufferLock) {
+                    responseBuffer.setLength(0);
+                    responseBuffer.append(fullResponse);
+                    lastRenderedLength = 0; // Reset for next query
+
+                    // Cancel any pending throttled update
+                    synchronized (updateLock) {
+                        if (pendingUpdate != null) {
+                            pendingUpdate.cancel(false);
+                        }
+                    }
+
+                    SwingUtilities.invokeLater(() -> {
+                        feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), fullResponse);
+                        queryService.addAssistantResponse(responseBuffer.toString());
+
+                        // PERFORMANCE OPTIMIZATION: Full markdown rendering at completion
+                        // This switches to HTML mode and renders markdown
+                        String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                        queryTab.setResponseText(html);
+                        setUIState(false, "Submit", null);
+                        currentLlmApi = null;
+
+                        refreshChatHistory();
+                    });
+                }
             }
 
             @Override
@@ -856,6 +896,9 @@ public class TabController {
             @Override
             public void onStart(String objective) {
                 SwingUtilities.invokeLater(() -> {
+                    // Clear and switch to plain text streaming mode
+                    queryTab.clearResponse();
+
                     chronologicalHistory.setLength(0);
                     chronologicalHistory.append("# ReAct Investigation\n\n");
                     chronologicalHistory.append("**Objective**: ").append(objective).append("\n\n");
@@ -987,19 +1030,32 @@ public class TabController {
             }
 
             private void updateDisplay() {
+                // Build current display
                 StringBuilder display = new StringBuilder();
-
-                // Show chronological history (includes iteration headers)
                 display.append(chronologicalHistory);
-
-                // Show current iteration output (streaming from ConversationalToolHandler)
-                // Header for current iteration is already in chronologicalHistory
                 if (!currentIterationOutput.isEmpty()) {
                     display.append(currentIterationOutput).append("\n\n");
                 }
 
-                String html = markdownHelper.markdownToHtml(display.toString());
-                queryTab.setResponseText(html);
+                final String displayText = display.toString();
+
+                // PERFORMANCE OPTIMIZATION: Throttle updates to reduce EDT flooding
+                // During streaming, use plain text mode (no expensive markdown parsing)
+                // Full markdown rendering happens at completion via handleAgenticQuery
+                synchronized (updateLock) {
+                    if (pendingUpdate != null && !pendingUpdate.isDone()) {
+                        pendingUpdate.cancel(false);
+                    }
+
+                    pendingUpdate = updateScheduler.schedule(() -> {
+                        SwingUtilities.invokeLater(() -> {
+                            // Clear and re-render in plain text mode
+                            // This is MUCH faster than HTML DOM operations
+                            queryTab.clearResponse();
+                            queryTab.appendStreamingText(displayText);
+                        });
+                    }, THROTTLE_MS, TimeUnit.MILLISECONDS);
+                }
             }
         };
     }
@@ -1053,5 +1109,10 @@ public class TabController {
         codeAnalysisService.close();
         analysisDataService.close();
         feedbackService.close();
+
+        // Shutdown update scheduler
+        if (updateScheduler != null) {
+            updateScheduler.shutdown();
+        }
     }
 }
