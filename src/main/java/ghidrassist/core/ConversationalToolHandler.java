@@ -1,6 +1,7 @@
 package ghidrassist.core;
 
 import ghidrassist.LlmApi;
+import ghidrassist.apiprovider.AnthropicProvider;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.apiprovider.exceptions.RateLimitException;
 import ghidrassist.mcp2.tools.MCPToolManager;
@@ -108,27 +109,31 @@ public class ConversationalToolHandler {
             trimConversationHistory();
             
             // Call LLM with current conversation history
-            CompletableFuture.runAsync(() -> {
-                try {
-                    // Check cancellation before making API call
-                    if (isCancelled) {
-                        return;
-                    }
-                    
-                    String fullResponse = apiClient.createChatCompletionWithFunctionsFullResponse(
-                        conversationHistory, availableFunctions);
-                    
-                    // Check cancellation after API call
-                    if (isCancelled) {
-                        return;
-                    }
-                    
-                    // Parse the response to check for tool calls and finish_reason
-                    handleLLMResponse(fullResponse);
-                    
-                } catch (Exception e) {
-                    // Handle rate limit errors with additional backoff and retry
-                    if (e instanceof ghidrassist.apiprovider.exceptions.RateLimitException ||
+            // Use streaming if provider supports it (Anthropic), otherwise blocking
+            if (apiClient.getProvider() instanceof AnthropicProvider) {
+                streamingConversationWithFunctions();
+            } else {
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        // Check cancellation before making API call
+                        if (isCancelled) {
+                            return;
+                        }
+
+                        String fullResponse = apiClient.createChatCompletionWithFunctionsFullResponse(
+                            conversationHistory, availableFunctions);
+
+                        // Check cancellation after API call
+                        if (isCancelled) {
+                            return;
+                        }
+
+                        // Parse the response to check for tool calls and finish_reason
+                        handleLLMResponse(fullResponse);
+
+                    } catch (Exception e) {
+                        // Handle rate limit errors with additional backoff and retry
+                        if (e instanceof ghidrassist.apiprovider.exceptions.RateLimitException ||
                         e.getMessage().contains("rate limit") || 
                         e.getMessage().contains("429")) {
                         
@@ -174,18 +179,197 @@ public class ConversationalToolHandler {
                     }
                 }
             });
-            
+            }
+
         } catch (Exception e) {
             isConversationActive = false;
             userHandler.onError(e);
-            
+
             // Notify completion callback
             if (onCompletionCallback != null) {
                 onCompletionCallback.run();
             }
         }
     }
-    
+
+    /**
+     * Stream conversation with functions using Anthropic provider's streaming API.
+     * Text content streams immediately; tool calls execute after streaming completes.
+     */
+    private void streamingConversationWithFunctions() {
+        try {
+            AnthropicProvider provider = (AnthropicProvider) apiClient.getProvider();
+
+            provider.streamChatCompletionWithFunctions(
+                conversationHistory,
+                availableFunctions,
+                new AnthropicProvider.StreamingFunctionHandler() {
+                    @Override
+                    public void onTextUpdate(String textDelta) {
+                        // Stream text to UI immediately
+                        javax.swing.SwingUtilities.invokeLater(() -> {
+                            if (!isCancelled) {
+                                userHandler.onUpdate(textDelta);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onStreamComplete(String stopReason, String fullText, List<AnthropicProvider.ToolCall> toolCalls) {
+                        // Create assistant message with text content
+                        ChatMessage assistantMsg = new ChatMessage(ChatMessage.ChatMessageRole.ASSISTANT, fullText);
+
+                        // If we have tool calls, convert them to JsonArray and attach to assistant message
+                        if (!toolCalls.isEmpty()) {
+                            JsonArray toolCallsArray = new JsonArray();
+                            for (AnthropicProvider.ToolCall toolCall : toolCalls) {
+                                JsonObject toolCallObj = new JsonObject();
+                                toolCallObj.addProperty("id", toolCall.id);
+                                toolCallObj.addProperty("type", "function");
+
+                                JsonObject function = new JsonObject();
+                                function.addProperty("name", toolCall.name);
+                                function.addProperty("arguments", toolCall.arguments);
+                                toolCallObj.add("function", function);
+
+                                toolCallsArray.add(toolCallObj);
+                            }
+
+                            // Attach tool calls to assistant message
+                            assistantMsg.setToolCalls(toolCallsArray);
+                        }
+
+                        // Add assistant message to conversation history
+                        conversationHistory.add(assistantMsg);
+
+                        if ("tool_use".equals(stopReason) && !toolCalls.isEmpty()) {
+                            // Execute tools after text streaming completes
+                            handleToolCallsFromStream(toolCalls);
+                        } else {
+                            // Conversation complete
+                            handleConversationEndFromStream();
+                        }
+                    }
+
+                    @Override
+                    public void onError(Throwable error) {
+                        // Handle rate limit errors with retry logic
+                        if (error instanceof RateLimitException ||
+                            error.getMessage().contains("rate limit") ||
+                            error.getMessage().contains("429")) {
+
+                            rateLimitRetries++;
+
+                            if (rateLimitRetries <= MAX_RATE_LIMIT_RETRIES) {
+                                Msg.warn(ConversationalToolHandler.this,
+                                    String.format("Rate limit exceeded during streaming (attempt %d/%d).",
+                                        rateLimitRetries, MAX_RATE_LIMIT_RETRIES));
+
+                                int backoffSeconds = 30 * rateLimitRetries;
+                                userHandler.onUpdate(String.format("⏳ Rate limit exceeded. Pausing for %d seconds...\n",
+                                    backoffSeconds));
+
+                                CompletableFuture.delayedExecutor(backoffSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                                    .execute(() -> {
+                                        if (isConversationActive && !isCancelled) {
+                                            userHandler.onUpdate("🔄 Resuming...\n");
+                                            continueConversation();
+                                        }
+                                    });
+                            } else {
+                                isConversationActive = false;
+                                userHandler.onUpdate("❌ Too many rate limit errors. Please try again later.\n");
+                                userHandler.onError(new Exception("Rate limit exceeded maximum retry attempts."));
+
+                                if (onCompletionCallback != null) {
+                                    onCompletionCallback.run();
+                                }
+                            }
+                        } else {
+                            // Non-rate-limit errors stop the conversation
+                            isConversationActive = false;
+                            userHandler.onError(error);
+
+                            if (onCompletionCallback != null) {
+                                onCompletionCallback.run();
+                            }
+                        }
+                    }
+
+                    @Override
+                    public boolean shouldContinue() {
+                        return !isCancelled && isConversationActive;
+                    }
+                }
+            );
+
+        } catch (Exception e) {
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Handle tool calls from streaming response.
+     * Simplified version of handleToolCalls for use with streaming.
+     */
+    private void handleToolCallsFromStream(List<AnthropicProvider.ToolCall> toolCalls) {
+        try {
+            // Update UI with tool calling status
+            String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                userHandler.onUpdate(toolExecutionHeader);
+            });
+
+            // Convert AnthropicProvider.ToolCall to JsonArray format expected by existing methods
+            JsonArray toolCallsArray = new JsonArray();
+            for (AnthropicProvider.ToolCall toolCall : toolCalls) {
+                JsonObject toolCallObj = new JsonObject();
+                toolCallObj.addProperty("id", toolCall.id);
+                toolCallObj.addProperty("type", "function");
+
+                JsonObject function = new JsonObject();
+                function.addProperty("name", toolCall.name);
+                function.addProperty("arguments", toolCall.arguments);
+                toolCallObj.add("function", function);
+
+                toolCallsArray.add(toolCallObj);
+            }
+
+            // Execute tools sequentially using existing infrastructure
+            executeToolsSequentially(toolCallsArray, 0, new ArrayList<>());
+
+        } catch (Exception e) {
+            Msg.error(this, "Error handling tool calls from stream: " + e.getMessage());
+            isConversationActive = false;
+            userHandler.onError(e);
+
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+        }
+    }
+
+    /**
+     * Handle conversation end from streaming (no tool calls).
+     */
+    private void handleConversationEndFromStream() {
+        isConversationActive = false;
+
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            userHandler.onComplete("");
+        });
+
+        // Notify completion callback
+        if (onCompletionCallback != null) {
+            onCompletionCallback.run();
+        }
+    }
+
     /**
      * Handle the LLM response and determine next action based on finish_reason
      */

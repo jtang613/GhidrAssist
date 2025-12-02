@@ -374,6 +374,232 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
         }
     }
 
+    /**
+     * Stream chat completion with function calling support.
+     * Text blocks stream immediately; tool_use blocks are buffered until complete.
+     */
+    public void streamChatCompletionWithFunctions(
+        List<ChatMessage> messages,
+        List<Map<String, Object>> functions,
+        StreamingFunctionHandler handler
+    ) throws APIProviderException {
+        // Build payload with native Anthropic tools support
+        JsonObject payload = buildMessagesPayload(messages, true); // true for streaming
+
+        // Convert OpenAI function format to Anthropic tools format
+        JsonArray anthropicTools = new JsonArray();
+        for (Map<String, Object> tool : functions) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> function = (Map<String, Object>) tool.get("function");
+
+            JsonObject anthropicTool = new JsonObject();
+            anthropicTool.addProperty("name", (String) function.get("name"));
+            anthropicTool.addProperty("description", (String) function.get("description"));
+
+            // Convert parameters schema to input_schema
+            @SuppressWarnings("unchecked")
+            Map<String, Object> parameters = (Map<String, Object>) function.get("parameters");
+            if (parameters != null) {
+                anthropicTool.add("input_schema", gson.toJsonTree(parameters));
+            }
+
+            anthropicTools.add(anthropicTool);
+        }
+
+        payload.add("tools", anthropicTools);
+
+        Request request = new Request.Builder()
+            .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
+            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .build();
+
+        client.newCall(request).enqueue(new Callback() {
+            private final java.util.Map<Integer, ContentBlock> contentBlocks = new java.util.HashMap<>();
+            private String stopReason = null;
+
+            @Override
+            public void onFailure(Call call, IOException e) {
+                handler.onError(handleNetworkError(e, "streamChatCompletionWithFunctions"));
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try (ResponseBody responseBody = response.body()) {
+                    if (!response.isSuccessful()) {
+                        String errorBody = responseBody != null ? responseBody.string() : null;
+                        handler.onError(handleHttpError(response, errorBody, "streamChatCompletionWithFunctions"));
+                        return;
+                    }
+
+                    BufferedSource source = responseBody.source();
+                    while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
+                        String line = source.readUtf8Line();
+                        if (line == null || line.isEmpty()) continue;
+
+                        // Skip ping events
+                        if (line.equals("event: ping")) {
+                            source.readUtf8Line(); // Skip data line
+                            continue;
+                        }
+
+                        if (line.startsWith("data: ")) {
+                            String data = line.substring(6).trim();
+                            if (data.equals("[DONE]")) {
+                                processStreamComplete();
+                                return;
+                            }
+
+                            try {
+                                JsonObject event = gson.fromJson(data, JsonObject.class);
+
+                                // Check for error events
+                                if (event.has("type") && event.get("type").getAsString().equals("error")) {
+                                    String errorMsg = event.has("error") ?
+                                        event.getAsJsonObject("error").get("message").getAsString() :
+                                        "Unknown streaming error";
+                                    handler.onError(new APIProviderException(
+                                        APIProviderException.ErrorCategory.SERVICE_ERROR,
+                                        name, "streamChatCompletionWithFunctions", errorMsg));
+                                    return;
+                                }
+
+                                processEvent(event);
+
+                            } catch (Exception e) {
+                                handler.onError(new APIProviderException(
+                                    APIProviderException.ErrorCategory.RESPONSE_ERROR,
+                                    name, "streamChatCompletionWithFunctions",
+                                    "Failed to parse streaming event: " + e.getMessage()));
+                                return;
+                            }
+                        }
+                    }
+
+                    if (isCancelled) {
+                        handler.onError(new APIProviderException(
+                            APIProviderException.ErrorCategory.CANCELLED,
+                            name, "streamChatCompletionWithFunctions", "Request cancelled"));
+                    } else {
+                        processStreamComplete();
+                    }
+                }
+            }
+
+            private void processEvent(JsonObject event) {
+                String eventType = event.get("type").getAsString();
+
+                switch (eventType) {
+                    case "content_block_start":
+                        handleContentBlockStart(event);
+                        break;
+                    case "content_block_delta":
+                        handleContentBlockDelta(event);
+                        break;
+                    case "message_delta":
+                        handleMessageDelta(event);
+                        break;
+                    case "message_stop":
+                        // Final event - will be handled after loop exits
+                        break;
+                }
+            }
+
+            private void handleContentBlockStart(JsonObject event) {
+                int index = event.get("index").getAsInt();
+                JsonObject contentBlock = event.getAsJsonObject("content_block");
+                String type = contentBlock.get("type").getAsString();
+
+                ContentBlock block = new ContentBlock(index, type);
+
+                // If tool_use, extract id and name
+                if ("tool_use".equals(type)) {
+                    block.toolId = contentBlock.get("id").getAsString();
+                    block.toolName = contentBlock.get("name").getAsString();
+                }
+
+                contentBlocks.put(index, block);
+            }
+
+            private void handleContentBlockDelta(JsonObject event) {
+                int index = event.get("index").getAsInt();
+                ContentBlock block = contentBlocks.get(index);
+                if (block == null) return;
+
+                JsonObject delta = event.getAsJsonObject("delta");
+
+                if ("text".equals(block.type) && delta.has("text")) {
+                    // Stream text immediately
+                    String textDelta = delta.get("text").getAsString();
+                    block.textBuffer.append(textDelta);
+                    handler.onTextUpdate(textDelta);
+
+                } else if ("tool_use".equals(block.type) && delta.has("partial_json")) {
+                    // Buffer tool input deltas
+                    String inputDelta = delta.get("partial_json").getAsString();
+                    block.inputBuffer.append(inputDelta);
+                }
+            }
+
+            private void handleMessageDelta(JsonObject event) {
+                JsonObject delta = event.getAsJsonObject("delta");
+                if (delta.has("stop_reason")) {
+                    stopReason = delta.get("stop_reason").getAsString();
+                }
+            }
+
+            private void processStreamComplete() {
+                // Extract full text from text blocks
+                String fullText = contentBlocks.values().stream()
+                    .filter(b -> "text".equals(b.type))
+                    .sorted((a, b) -> Integer.compare(a.index, b.index))
+                    .map(b -> b.textBuffer.toString())
+                    .collect(java.util.stream.Collectors.joining());
+
+                // Parse tool calls from tool_use blocks
+                List<ToolCall> toolCalls = new ArrayList<>();
+                for (ContentBlock block : contentBlocks.values()) {
+                    if ("tool_use".equals(block.type)) {
+                        String arguments = block.inputBuffer.toString().trim();
+
+                        // Ensure we have valid arguments (not empty)
+                        // If empty, use empty object as default
+                        if (arguments.isEmpty()) {
+                            arguments = "{}";
+                        }
+
+                        toolCalls.add(new ToolCall(
+                            block.toolId,
+                            block.toolName,
+                            arguments
+                        ));
+                    }
+                }
+
+                // Sort tool calls by index
+                toolCalls.sort((a, b) -> {
+                    int indexA = contentBlocks.values().stream()
+                        .filter(cb -> cb.toolId != null && cb.toolId.equals(a.id))
+                        .findFirst()
+                        .map(cb -> cb.index)
+                        .orElse(0);
+                    int indexB = contentBlocks.values().stream()
+                        .filter(cb -> cb.toolId != null && cb.toolId.equals(b.id))
+                        .findFirst()
+                        .map(cb -> cb.index)
+                        .orElse(0);
+                    return Integer.compare(indexA, indexB);
+                });
+
+                // Callback with complete data
+                handler.onStreamComplete(
+                    stopReason != null ? stopReason : "end_turn",
+                    fullText,
+                    toolCalls
+                );
+            }
+        });
+    }
+
     @Override
     public List<String> getAvailableModels() throws APIProviderException {
         Request request = new Request.Builder()
@@ -450,13 +676,26 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                         toolUseBlock.addProperty("type", "tool_use");
                         toolUseBlock.addProperty("id", toolCall.get("id").getAsString());
                         toolUseBlock.addProperty("name", function.get("name").getAsString());
-                        
+
                         // Parse arguments JSON string back to object
                         try {
-                            JsonElement arguments = gson.fromJson(function.get("arguments").getAsString(), JsonElement.class);
-                            toolUseBlock.add("input", arguments);
+                            JsonElement argumentsElement = function.get("arguments");
+                            if (argumentsElement != null && !argumentsElement.isJsonNull()) {
+                                String argumentsStr = argumentsElement.getAsString();
+                                if (argumentsStr != null && !argumentsStr.trim().isEmpty()) {
+                                    JsonElement arguments = gson.fromJson(argumentsStr, JsonElement.class);
+                                    toolUseBlock.add("input", arguments);
+                                } else {
+                                    // Empty arguments string, use empty object
+                                    toolUseBlock.add("input", new JsonObject());
+                                }
+                            } else {
+                                // No arguments field, use empty object
+                                toolUseBlock.add("input", new JsonObject());
+                            }
                         } catch (Exception e) {
                             // If parsing fails, use empty object
+                            System.err.println("AnthropicProvider: Failed to parse tool arguments: " + e.getMessage());
                             toolUseBlock.add("input", new JsonObject());
                         }
                         
@@ -489,6 +728,72 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 return "user"; // Tool results are sent as user messages in Anthropic
             default:
                 return role;
+        }
+    }
+
+    /**
+     * Callback interface for streaming function calling responses.
+     * Allows text content to stream immediately while buffering tool calls.
+     */
+    public interface StreamingFunctionHandler {
+        /**
+         * Called when a text delta arrives during streaming.
+         * @param textDelta The incremental text content
+         */
+        void onTextUpdate(String textDelta);
+
+        /**
+         * Called when streaming completes with all content blocks processed.
+         * @param stopReason The reason streaming stopped ("end_turn" or "tool_use")
+         * @param fullText Complete text content from all text blocks
+         * @param toolCalls List of tool calls to execute (may be empty)
+         */
+        void onStreamComplete(String stopReason, String fullText, List<ToolCall> toolCalls);
+
+        /**
+         * Called if an error occurs during streaming.
+         * @param error The error that occurred
+         */
+        void onError(Throwable error);
+
+        /**
+         * Check if streaming should continue.
+         * @return true if streaming should continue, false to cancel
+         */
+        boolean shouldContinue();
+    }
+
+    /**
+     * Represents a tool call extracted from streaming response.
+     */
+    public static class ToolCall {
+        public final String id;
+        public final String name;
+        public final String arguments;
+
+        public ToolCall(String id, String name, String arguments) {
+            this.id = id;
+            this.name = name;
+            this.arguments = arguments;
+        }
+    }
+
+    /**
+     * Helper class to track content blocks during streaming.
+     */
+    private static class ContentBlock {
+        final int index;
+        final String type;
+        final StringBuilder textBuffer = new StringBuilder();
+
+        // For tool_use blocks
+        String toolId;
+        String toolName;
+        final StringBuilder inputBuffer = new StringBuilder();
+
+        ContentBlock(int index, String type) {
+            this.index = index;
+            this.type = type;
         }
     }
 
