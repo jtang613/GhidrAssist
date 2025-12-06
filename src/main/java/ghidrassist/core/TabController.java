@@ -842,8 +842,15 @@ public class TabController {
             @Override
             public void onComplete(String fullResponse) {
                 synchronized (bufferLock) {
-                    responseBuffer.setLength(0);
-                    responseBuffer.append(fullResponse);
+                    // IMPORTANT: Don't clear responseBuffer!
+                    // It contains all streaming content including tool calling details.
+                    // fullResponse might only contain the final text without tool call history.
+                    // Only replace if fullResponse is more complete than current buffer.
+                    if (fullResponse != null && fullResponse.length() > responseBuffer.length()) {
+                        responseBuffer.setLength(0);
+                        responseBuffer.append(fullResponse);
+                    }
+
                     lastRenderedLength = 0; // Reset for next query
 
                     // Cancel any pending throttled update
@@ -853,9 +860,11 @@ public class TabController {
                         }
                     }
 
+                    final String finalResponse = responseBuffer.toString();
+
                     SwingUtilities.invokeLater(() -> {
-                        feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), fullResponse);
-                        queryService.addAssistantResponse(responseBuffer.toString());
+                        feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), finalResponse);
+                        queryService.addAssistantResponse(finalResponse);
 
                         // PERFORMANCE OPTIMIZATION: Full markdown rendering at completion
                         // This switches to HTML mode and renders markdown
