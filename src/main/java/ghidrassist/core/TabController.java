@@ -56,11 +56,11 @@ public class TabController {
     // UI state
     private volatile boolean isQueryRunning;
 
-    // Update throttling for streaming performance
-    private static final int THROTTLE_MS = 100;  // Max 10 updates/sec
+    // Streaming performance: debounced HTML rendering
+    private static final int RENDER_INTERVAL_MS = 1000;  // Render markdown every 2 seconds
     private final ScheduledExecutorService updateScheduler = Executors.newSingleThreadScheduledExecutor();
-    private volatile ScheduledFuture<?> pendingUpdate;
-    private final Object updateLock = new Object();
+    private volatile ScheduledFuture<?> pendingRender;
+    private final Object renderLock = new Object();
 
     // UI Component references
     private ExplainTab explainTab;
@@ -776,21 +776,26 @@ public class TabController {
         return new LlmApi.LlmResponseHandler() {
             private final StringBuilder responseBuffer = new StringBuilder();
             private final Object bufferLock = new Object();
-            private volatile int lastRenderedLength = 0;
+            private volatile ScheduledFuture<?> renderTask;
 
             @Override
             public void onStart() {
                 synchronized (bufferLock) {
                     responseBuffer.setLength(0);
-                    lastRenderedLength = 0;
                 }
 
-                // Clear and switch to plain text mode for streaming
-                queryTab.clearResponse();
-
                 // Show initial processing message
-                queryTab.appendStreamingText("Processing...\n\n");
-                lastRenderedLength = "Processing...\n\n".length();
+                SwingUtilities.invokeLater(() -> {
+                    queryTab.setResponseText("<html><body><i>Processing...</i></body></html>");
+                });
+
+                // Start periodic markdown rendering (debounced every 2 seconds)
+                renderTask = updateScheduler.scheduleAtFixedRate(
+                    this::renderCurrentContent,
+                    RENDER_INTERVAL_MS,
+                    RENDER_INTERVAL_MS,
+                    TimeUnit.MILLISECONDS
+                );
             }
 
             @Override
@@ -800,7 +805,7 @@ public class TabController {
                         return;
                     }
 
-                    // Handle cumulative vs delta responses
+                    // Handle cumulative vs delta responses - just accumulate in buffer
                     String currentBuffer = responseBuffer.toString();
                     if (partialResponse.startsWith(currentBuffer)) {
                         String newContent = partialResponse.substring(currentBuffer.length());
@@ -811,36 +816,38 @@ public class TabController {
                         responseBuffer.append(partialResponse);
                     }
 
-                    // Build full conversation text
-                    String fullConversation = queryService.getConversationHistory() +
-                        "**Assistant**:\n" + responseBuffer.toString();
-
-                    // Calculate delta to render
-                    final int currentLength = fullConversation.length();
-                    if (currentLength <= lastRenderedLength) {
-                        return; // No new content
-                    }
-
-                    final String textDelta = fullConversation.substring(lastRenderedLength);
-                    final int newLength = currentLength;
-
-                    // PERFORMANCE OPTIMIZATION: Throttle UI updates
-                    synchronized (updateLock) {
-                        if (pendingUpdate != null && !pendingUpdate.isDone()) {
-                            pendingUpdate.cancel(false);
-                        }
-
-                        pendingUpdate = updateScheduler.schedule(() -> {
-                            // Append only the new delta - TRUE incremental update!
-                            queryTab.appendStreamingText(textDelta);
-                            lastRenderedLength = newLength;
-                        }, THROTTLE_MS, TimeUnit.MILLISECONDS);
-                    }
+                    // No immediate UI update - let the periodic render handle it
+                    // This prevents UI flooding while keeping content responsive
                 }
+            }
+
+            /**
+             * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
+             */
+            private void renderCurrentContent() {
+                final String content;
+                synchronized (bufferLock) {
+                    if (responseBuffer.length() == 0) {
+                        return;
+                    }
+                    content = queryService.getConversationHistory() +
+                        "**Assistant**:\n" + responseBuffer.toString();
+                }
+
+                SwingUtilities.invokeLater(() -> {
+                    String html = markdownHelper.markdownToHtml(content);
+                    queryTab.setResponseText(html);
+                });
             }
 
             @Override
             public void onComplete(String fullResponse) {
+                // Cancel periodic render task
+                if (renderTask != null) {
+                    renderTask.cancel(false);
+                    renderTask = null;
+                }
+
                 synchronized (bufferLock) {
                     // IMPORTANT: Don't clear responseBuffer!
                     // It contains all streaming content including tool calling details.
@@ -851,23 +858,13 @@ public class TabController {
                         responseBuffer.append(fullResponse);
                     }
 
-                    lastRenderedLength = 0; // Reset for next query
-
-                    // Cancel any pending throttled update
-                    synchronized (updateLock) {
-                        if (pendingUpdate != null) {
-                            pendingUpdate.cancel(false);
-                        }
-                    }
-
                     final String finalResponse = responseBuffer.toString();
 
                     SwingUtilities.invokeLater(() -> {
                         feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), finalResponse);
                         queryService.addAssistantResponse(finalResponse);
 
-                        // PERFORMANCE OPTIMIZATION: Full markdown rendering at completion
-                        // This switches to HTML mode and renders markdown
+                        // Final markdown rendering
                         String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
                         queryTab.setResponseText(html);
                         setUIState(false, "Submit", null);
@@ -880,12 +877,18 @@ public class TabController {
 
             @Override
             public void onError(Throwable error) {
+                // Cancel periodic render task
+                if (renderTask != null) {
+                    renderTask.cancel(false);
+                    renderTask = null;
+                }
+
                 SwingUtilities.invokeLater(() -> {
                     queryService.addError(error.getMessage());
                     String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
                     queryTab.setResponseText(html);
                     setUIState(false, "Submit", null);
-                    currentLlmApi = null; // Clear after error
+                    currentLlmApi = null;
                 });
             }
 
@@ -899,96 +902,108 @@ public class TabController {
     private ghidrassist.agent.react.ReActProgressHandler createReActProgressHandler(final StringBuilder[] historyContainer) {
         return new ghidrassist.agent.react.ReActProgressHandler() {
             private final StringBuilder chronologicalHistory = new StringBuilder();  // Single sequential history
+            private final Object historyLock = new Object();  // Protect concurrent access
             private String currentIterationOutput = "";
             private int lastIterationSeen = -1;  // Start at -1 so iteration 0 triggers header
+            private volatile ScheduledFuture<?> renderTask;
 
             @Override
             public void onStart(String objective) {
-                SwingUtilities.invokeLater(() -> {
-                    // Clear and switch to plain text streaming mode
-                    queryTab.clearResponse();
-
+                synchronized (historyLock) {
                     chronologicalHistory.setLength(0);
                     chronologicalHistory.append("# ReAct Investigation\n\n");
                     chronologicalHistory.append("**Objective**: ").append(objective).append("\n\n");
                     chronologicalHistory.append("---\n\n");
-                    updateDisplay();
+                    currentIterationOutput = "";
+                    lastIterationSeen = -1;
+                }
+
+                // Show initial message
+                SwingUtilities.invokeLater(() -> {
+                    queryTab.setResponseText("<html><body><i>Starting ReAct investigation...</i></body></html>");
                 });
+
+                // Start periodic markdown rendering (debounced every 2 seconds)
+                renderTask = updateScheduler.scheduleAtFixedRate(
+                    this::renderCurrentContent,
+                    RENDER_INTERVAL_MS,
+                    RENDER_INTERVAL_MS,
+                    TimeUnit.MILLISECONDS
+                );
             }
 
             @Override
             public void onThought(String thought, int iteration) {
-                SwingUtilities.invokeLater(() -> {
-                    // If this is a new iteration, archive the previous iteration and start the new one
+                synchronized (historyLock) {
+                    // If this is a new iteration, archive the previous iteration
                     if (iteration > lastIterationSeen) {
-                        // Archive previous iteration content (without header, it was already added)
                         if (!currentIterationOutput.isEmpty()) {
                             chronologicalHistory.append(currentIterationOutput).append("\n\n");
                             chronologicalHistory.append("---\n\n");
                         }
-
-                        // Start new iteration with header
                         chronologicalHistory.append("### Iteration ").append(iteration).append("\n\n");
                         lastIterationSeen = iteration;
                         currentIterationOutput = "";
                     }
-
-                    // Append to current iteration's streaming output
                     currentIterationOutput = thought;
-                    updateDisplay();
-                });
+                }
+                // No immediate render - let periodic task handle it
             }
 
             @Override
             public void onAction(String toolName, com.google.gson.JsonObject args) {
-                // Actions are shown via the streaming thought output from ConversationalToolHandler
-                // No need to duplicate them here
+                // Actions are shown via streaming thought output
             }
 
             @Override
             public void onObservation(String toolName, String result) {
-                // Observations are shown via the streaming thought output from ConversationalToolHandler
-                // No need to duplicate them here
+                // Observations are shown via streaming thought output
             }
 
             @Override
             public void onFinding(String finding) {
-                SwingUtilities.invokeLater(() -> {
-                    // Archive current iteration if needed before adding finding (without header)
+                synchronized (historyLock) {
                     if (!currentIterationOutput.isEmpty()) {
                         chronologicalHistory.append(currentIterationOutput).append("\n\n");
                         currentIterationOutput = "";
                     }
-
-                    // Append finding to chronological history
                     chronologicalHistory.append("💡 **Finding**: ").append(finding).append("\n\n");
-                    updateDisplay();
-                });
+                }
+                // No immediate render - let periodic task handle it
             }
 
             @Override
             public void onComplete(ghidrassist.agent.react.ReActResult result) {
-                SwingUtilities.invokeLater(() -> {
-                    // Archive the last iteration's output before showing final result (without header)
+                // Cancel periodic render task
+                if (renderTask != null) {
+                    renderTask.cancel(false);
+                    renderTask = null;
+                }
+
+                synchronized (historyLock) {
                     if (!currentIterationOutput.isEmpty()) {
                         chronologicalHistory.append(currentIterationOutput).append("\n\n");
                         chronologicalHistory.append("---\n\n");
                         currentIterationOutput = "";
                     }
-
-                    // Save the complete chronological history for display with final result
                     historyContainer[0] = chronologicalHistory;
-
-                    // Final result will be displayed by handleAgenticQuery's thenAccept handler
-                });
+                }
+                // Final render happens in handleAgenticQuery's thenAccept handler
             }
 
             @Override
             public void onError(Throwable error) {
-                SwingUtilities.invokeLater(() -> {
+                // Cancel periodic render task
+                if (renderTask != null) {
+                    renderTask.cancel(false);
+                    renderTask = null;
+                }
+
+                synchronized (historyLock) {
                     chronologicalHistory.append("\n\n❌ **ERROR**: ").append(error.getMessage()).append("\n");
-                    updateDisplay();
-                });
+                }
+                // Render error immediately
+                renderCurrentContent();
             }
 
             @Override
@@ -998,73 +1013,61 @@ public class TabController {
 
             @Override
             public void onIterationWarning(int remaining) {
-                SwingUtilities.invokeLater(() -> {
+                synchronized (historyLock) {
                     chronologicalHistory.append("⚠️ *").append(remaining).append(" iteration(s) remaining*\n\n");
-                    updateDisplay();
-                });
+                }
             }
 
             @Override
             public void onToolCallWarning(int remaining) {
-                SwingUtilities.invokeLater(() -> {
+                synchronized (historyLock) {
                     chronologicalHistory.append("⚠️ *").append(remaining).append(" tool call(s) remaining*\n\n");
-                    updateDisplay();
-                });
+                }
             }
 
             @Override
             public void onTodosUpdated(String todosFormatted) {
-                SwingUtilities.invokeLater(() -> {
-                    // Archive current iteration output before showing new todos (without header)
+                synchronized (historyLock) {
                     if (!currentIterationOutput.isEmpty()) {
                         chronologicalHistory.append(currentIterationOutput).append("\n\n");
                         currentIterationOutput = "";
                     }
-
-                    // Append todos to chronological history
                     chronologicalHistory.append("## 📋 Investigation Progress\n\n");
                     chronologicalHistory.append(todosFormatted).append("\n\n");
                     chronologicalHistory.append("---\n\n");
-                    updateDisplay();
-                });
+                }
             }
 
             @Override
             public void onSummarizing(String summary) {
-                SwingUtilities.invokeLater(() -> {
+                synchronized (historyLock) {
                     chronologicalHistory.append("📝 **Summarizing context...**\n\n");
                     chronologicalHistory.append("```\n").append(summary).append("\n```\n\n");
-                    updateDisplay();
-                });
+                }
             }
 
-            private void updateDisplay() {
-                // Build current display
-                StringBuilder display = new StringBuilder();
-                display.append(chronologicalHistory);
-                if (!currentIterationOutput.isEmpty()) {
-                    display.append(currentIterationOutput).append("\n\n");
-                }
-
-                final String displayText = display.toString();
-
-                // PERFORMANCE OPTIMIZATION: Throttle updates to reduce EDT flooding
-                // During streaming, use plain text mode (no expensive markdown parsing)
-                // Full markdown rendering happens at completion via handleAgenticQuery
-                synchronized (updateLock) {
-                    if (pendingUpdate != null && !pendingUpdate.isDone()) {
-                        pendingUpdate.cancel(false);
+            /**
+             * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
+             */
+            private void renderCurrentContent() {
+                final String content;
+                synchronized (historyLock) {
+                    StringBuilder display = new StringBuilder();
+                    display.append(chronologicalHistory);
+                    if (!currentIterationOutput.isEmpty()) {
+                        display.append(currentIterationOutput).append("\n\n");
                     }
-
-                    pendingUpdate = updateScheduler.schedule(() -> {
-                        SwingUtilities.invokeLater(() -> {
-                            // Clear and re-render in plain text mode
-                            // This is MUCH faster than HTML DOM operations
-                            queryTab.clearResponse();
-                            queryTab.appendStreamingText(displayText);
-                        });
-                    }, THROTTLE_MS, TimeUnit.MILLISECONDS);
+                    content = display.toString();
                 }
+
+                if (content.isEmpty()) {
+                    return;
+                }
+
+                SwingUtilities.invokeLater(() -> {
+                    String html = markdownHelper.markdownToHtml(content);
+                    queryTab.setResponseText(html);
+                });
             }
         };
     }
