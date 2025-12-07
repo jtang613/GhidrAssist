@@ -179,42 +179,114 @@ public class TabController {
                     feedbackService.cacheLastInteraction(request.getPrompt(), null);
                     
                     codeAnalysisService.executeAnalysis(request, new LlmApi.LlmResponseHandler() {
+                        private final StringBuilder responseBuffer = new StringBuilder();
+                        private final Object bufferLock = new Object();
+
                         @Override
                         public void onStart() {
-                            SwingUtilities.invokeLater(() -> 
-                                explainTab.setExplanationText("Processing..."));
+                            synchronized (bufferLock) {
+                                responseBuffer.setLength(0);
+                            }
+
+                            // Cancel any existing render task before starting new one
+                            cancelActiveRenderTask();
+
+                            // Show initial processing message
+                            SwingUtilities.invokeLater(() -> {
+                                explainTab.setExplanationText("<html><body><i>Processing...</i></body></html>");
+                            });
+
+                            // Start periodic markdown rendering using class-level tracking
+                            synchronized (renderLock) {
+                                activeRenderTask = updateScheduler.scheduleAtFixedRate(
+                                    this::renderCurrentContent,
+                                    RENDER_INTERVAL_MS,
+                                    RENDER_INTERVAL_MS,
+                                    TimeUnit.MILLISECONDS
+                                );
+                            }
                         }
 
                         @Override
                         public void onUpdate(String partialResponse) {
-                            SwingUtilities.invokeLater(() -> 
-                                explainTab.setExplanationText(
-                                    markdownHelper.markdownToHtml(partialResponse)));
+                            synchronized (bufferLock) {
+                                if (partialResponse == null || partialResponse.isEmpty()) {
+                                    return;
+                                }
+
+                                // Handle cumulative vs delta responses - just accumulate in buffer
+                                String currentBuffer = responseBuffer.toString();
+                                if (partialResponse.startsWith(currentBuffer)) {
+                                    String newContent = partialResponse.substring(currentBuffer.length());
+                                    if (!newContent.isEmpty()) {
+                                        responseBuffer.append(newContent);
+                                    }
+                                } else {
+                                    responseBuffer.append(partialResponse);
+                                }
+
+                                // No immediate UI update - let the periodic render handle it
+                                // This prevents UI flooding while keeping content responsive
+                            }
                         }
 
-                        @Override
-                        public void onComplete(String fullResponse) {
+                        /**
+                         * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
+                         */
+                        private void renderCurrentContent() {
+                            final String content;
+                            synchronized (bufferLock) {
+                                if (responseBuffer.length() == 0) {
+                                    return;
+                                }
+                                content = responseBuffer.toString();
+                            }
+
                             SwingUtilities.invokeLater(() -> {
-                                feedbackService.cacheLastInteraction(request.getPrompt(), fullResponse);
-                                explainTab.setExplanationText(
-                                    markdownHelper.markdownToHtml(fullResponse));
-                                
-                                // Store analysis result
-                                codeAnalysisService.storeAnalysisResult(
-                                    currentFunction, request.getPrompt(), fullResponse);
-                                
-                                setUIState(false, "Explain Function", null);
+                                String html = markdownHelper.markdownToHtml(content);
+                                explainTab.setExplanationText(html);
                             });
                         }
 
                         @Override
+                        public void onComplete(String fullResponse) {
+                            // Cancel periodic render task
+                            cancelActiveRenderTask();
+
+                            synchronized (bufferLock) {
+                                // Use fullResponse if it's more complete than current buffer
+                                if (fullResponse != null && fullResponse.length() > responseBuffer.length()) {
+                                    responseBuffer.setLength(0);
+                                    responseBuffer.append(fullResponse);
+                                }
+
+                                final String finalResponse = responseBuffer.toString();
+
+                                SwingUtilities.invokeLater(() -> {
+                                    feedbackService.cacheLastInteraction(request.getPrompt(), finalResponse);
+                                    explainTab.setExplanationText(
+                                        markdownHelper.markdownToHtml(finalResponse));
+
+                                    // Store analysis result
+                                    codeAnalysisService.storeAnalysisResult(
+                                        currentFunction, request.getPrompt(), finalResponse);
+
+                                    setUIState(false, "Explain Function", null);
+                                });
+                            }
+                        }
+
+                        @Override
                         public void onError(Throwable error) {
+                            // Cancel periodic render task on error
+                            cancelActiveRenderTask();
+
                             SwingUtilities.invokeLater(() -> {
                                 explainTab.setExplanationText("An error occurred: " + error.getMessage());
                                 setUIState(false, "Explain Function", null);
                             });
                         }
-                        
+
                         @Override
                         public boolean shouldContinue() {
                             return isQueryRunning;

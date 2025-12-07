@@ -39,28 +39,29 @@ public class AnalysisOptionsTab extends JPanel {
     }
 
     private void layoutComponents() {
-        // Create top panel with header and reasoning effort dropdown
-        JPanel topPanel = new JPanel(new BorderLayout());
-
-        // System Context label on the left
-        JLabel headerLabel = new JLabel("System Context");
-        headerLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
-        topPanel.add(headerLabel, BorderLayout.WEST);
-
-        // Reasoning effort dropdown on the right
-        JPanel reasoningPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 2));
+        // Reasoning effort panel at the top
+        JPanel reasoningPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 5));
         JLabel reasoningLabel = new JLabel("Reasoning Effort:");
         reasoningPanel.add(reasoningLabel);
         reasoningPanel.add(reasoningEffortCombo);
-        topPanel.add(reasoningPanel, BorderLayout.EAST);
+        reasoningPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        add(reasoningPanel, BorderLayout.NORTH);
 
-        add(topPanel, BorderLayout.NORTH);
+        // Center panel with System Context label and text area
+        JPanel centerPanel = new JPanel(new BorderLayout());
 
-        // Add text area with scroll pane
+        // System Context label
+        JLabel headerLabel = new JLabel("System Context");
+        headerLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        centerPanel.add(headerLabel, BorderLayout.NORTH);
+
+        // Text area with scroll pane
         JScrollPane scrollPane = new JScrollPane(contextArea);
-        add(scrollPane, BorderLayout.CENTER);
+        centerPanel.add(scrollPane, BorderLayout.CENTER);
 
-        // Add bottom panel with version and buttons
+        add(centerPanel, BorderLayout.CENTER);
+
+        // Bottom panel with version and buttons
         JPanel bottomPanel = new JPanel(new BorderLayout());
 
         // Version label on the left
