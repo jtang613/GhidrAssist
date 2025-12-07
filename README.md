@@ -15,6 +15,11 @@ GhidrAssist integrates Large Language Models (LLMs) into Ghidra to provide intel
 * **Custom Queries** - Direct LLM queries with optional context from current function/location
 
 **Advanced Capabilities:**
+* **Extended Thinking/Reasoning Control** - Adjust LLM reasoning depth for quality vs. speed trade-offs
+  - Support for OpenAI o1/o3/o4, Claude with extended thinking, and local reasoning models
+  - Configurable effort levels: Low (fast), Medium (balanced), High (thorough)
+  - Per-program persistence - different binaries can use different reasoning levels
+  - Provider-agnostic implementation (Anthropic, OpenAI, Azure, LMStudio, Ollama)
 * **ReAct Agentic Mode** - Autonomous investigation using structured reasoning (Think-Act-Observe)
   - LLM proposes investigation steps based on your query
   - Systematic tool execution with progress tracking via todo lists
@@ -71,7 +76,8 @@ https://github.com/user-attachments/assets/bd79474a-c82f-4083-b432-96625fef1387
 * CodeBrowser -> File -> Configure -> Miscellaneous -> Enable GhidrAssist.
 * CodeBrowser -> Tools -> GhidraAssist Settings.
 * Ensure the RLHF and RAG database paths are appropriate for your environment.
-* Point the API host to your preferred API provider and set the API key. 
+* Point the API host to your preferred API provider and set the API key.
+* (Optional) In the Analysis Options tab, set the Reasoning Effort level (None/Low/Medium/High) for models that support extended thinking.
 * Open GhidrAssist with the GhidrAssist option in the Windows menu and start exploring.
 
 ## LLM Setup
@@ -94,7 +100,17 @@ GhidrAssist works with any OpenAI v1-compatible API. Setup details are provider-
 - **Cloud**: GPT-5.1, Claude Sonnet 4.5
 - **Local**: GPT-OSS, Llama 3.3 70B, DeepSeek-R1 70B, Qwen2.5 72B
 
-**Note**: Agentic mode requires models with strong function calling and multi-step reasoning capabilities. Smaller models may struggle with complex investigations.
+**Models with Extended Thinking/Reasoning Support:**
+- **OpenAI**: o1-preview, o1-mini, o3-mini, o4-mini, gpt-5 (use `reasoning_effort` parameter)
+- **Anthropic**: Claude Sonnet 4.5, Claude Opus 4.5, Claude Haiku 4.5, Claude Opus 4.1/4, Claude Sonnet 4 (use `thinking.budget_tokens` parameter)
+- **Local**: openai/gpt-oss-20b via Ollama/LMStudio (supports effort levels)
+
+**Reasoning Effort Guidelines:**
+- **Low**: Quick analysis, minimal thinking tokens (~5-10s, lower cost)
+- **Medium**: Balanced reasoning depth (~15-30s, moderate cost)
+- **High**: Deep security analysis (~30-60s, 2x cost, recommended for vulnerability hunting)
+
+**Note**: Agentic mode requires models with strong function calling and multi-step reasoning capabilities. Smaller models may struggle with complex investigations. Extended thinking is optional but can significantly improve analysis quality for complex reverse engineering tasks.
 
 ## Using GhidrAssistMCP for Tool-Based Analysis
 
