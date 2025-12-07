@@ -265,9 +265,17 @@ public class ConversationalToolHandler {
                     }
 
                     @Override
-                    public void onStreamComplete(String stopReason, String fullText, List<AnthropicProvider.ToolCall> toolCalls) {
+                    public void onStreamComplete(String stopReason, String fullText, String thinkingContent, String thinkingSignature, List<AnthropicProvider.ToolCall> toolCalls) {
                         // Create assistant message with text content
                         ChatMessage assistantMsg = new ChatMessage(ChatMessage.ChatMessageRole.ASSISTANT, fullText);
+
+                        // Store thinking content and signature if present
+                        if (thinkingContent != null && !thinkingContent.isEmpty()) {
+                            assistantMsg.setThinkingContent(thinkingContent);
+                        }
+                        if (thinkingSignature != null && !thinkingSignature.isEmpty()) {
+                            assistantMsg.setThinkingSignature(thinkingSignature);
+                        }
 
                         // If we have tool calls, convert them to JsonArray and attach to assistant message
                         if (!toolCalls.isEmpty()) {
@@ -677,14 +685,6 @@ public class ConversationalToolHandler {
 
         // Pass the accumulated response text to onComplete
         String responseText = fullText != null ? fullText : "";
-
-        // Debug logging
-        Msg.info(this, String.format("🏁 Conversation end from stream. Response length: %d chars",
-            responseText.length()));
-        if (responseText.length() > 0) {
-            String preview = responseText.length() > 100 ? responseText.substring(0, 100) + "..." : responseText;
-            Msg.info(this, "🏁 Response preview: " + preview);
-        }
 
         javax.swing.SwingUtilities.invokeLater(() -> {
             userHandler.onComplete(responseText);

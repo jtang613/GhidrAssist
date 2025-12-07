@@ -6,11 +6,13 @@ import ghidrassist.core.TabController;
 
 public class AnalysisOptionsTab extends JPanel {
     private static final String VERSION = "1.3.0";
+    private static final String[] REASONING_EFFORT_OPTIONS = {"None", "Low", "Medium", "High"};
 
     private final TabController controller;
     private JTextArea contextArea;
     private JButton saveButton;
     private JButton revertButton;
+    private JComboBox<String> reasoningEffortCombo;
 
     public AnalysisOptionsTab(TabController controller) {
         super(new BorderLayout());
@@ -18,6 +20,7 @@ public class AnalysisOptionsTab extends JPanel {
         initializeComponents();
         layoutComponents();
         setupListeners();
+        loadReasoningEffort(); // Load saved reasoning effort
     }
 
     private void initializeComponents() {
@@ -25,16 +28,33 @@ public class AnalysisOptionsTab extends JPanel {
         contextArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
         contextArea.setLineWrap(true);
         contextArea.setWrapStyleWord(true);
-        
+
         saveButton = new JButton("Save");
         revertButton = new JButton("Revert");
+
+        // Reasoning effort dropdown
+        reasoningEffortCombo = new JComboBox<>(REASONING_EFFORT_OPTIONS);
+        reasoningEffortCombo.setSelectedItem("None");
+        reasoningEffortCombo.setToolTipText("Set reasoning/thinking effort level for supported models (o1, o3, gpt-oss, Claude with thinking, etc.)");
     }
 
     private void layoutComponents() {
-        // Add header label
+        // Create top panel with header and reasoning effort dropdown
+        JPanel topPanel = new JPanel(new BorderLayout());
+
+        // System Context label on the left
         JLabel headerLabel = new JLabel("System Context");
         headerLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
-        add(headerLabel, BorderLayout.NORTH);
+        topPanel.add(headerLabel, BorderLayout.WEST);
+
+        // Reasoning effort dropdown on the right
+        JPanel reasoningPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 2));
+        JLabel reasoningLabel = new JLabel("Reasoning Effort:");
+        reasoningPanel.add(reasoningLabel);
+        reasoningPanel.add(reasoningEffortCombo);
+        topPanel.add(reasoningPanel, BorderLayout.EAST);
+
+        add(topPanel, BorderLayout.NORTH);
 
         // Add text area with scroll pane
         JScrollPane scrollPane = new JScrollPane(contextArea);
@@ -60,9 +80,26 @@ public class AnalysisOptionsTab extends JPanel {
     private void setupListeners() {
         saveButton.addActionListener(e -> controller.handleContextSave(contextArea.getText()));
         revertButton.addActionListener(e -> controller.handleContextRevert());
+
+        // Reasoning effort selection listener
+        reasoningEffortCombo.addActionListener(e -> {
+            String selectedEffort = (String) reasoningEffortCombo.getSelectedItem();
+            controller.setReasoningEffort(selectedEffort);
+        });
     }
 
     public void setContextText(String text) {
         contextArea.setText(text);
+    }
+
+    /**
+     * Load the saved reasoning effort from the controller and update the dropdown.
+     * Called when the tab is initialized or when the program changes.
+     */
+    public void loadReasoningEffort() {
+        String savedEffort = controller.getReasoningEffort();
+        if (savedEffort != null) {
+            reasoningEffortCombo.setSelectedItem(savedEffort);
+        }
     }
 }

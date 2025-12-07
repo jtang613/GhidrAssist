@@ -7,9 +7,13 @@ import java.util.regex.Pattern;
  * Focused solely on text processing and filtering logic.
  */
 public class ResponseProcessor {
-    
+
     // Pattern for matching complete <think> blocks and opening/closing tags
     private static final Pattern COMPLETE_THINK_PATTERN = Pattern.compile("<think>.*?</think>", Pattern.DOTALL);
+
+    // Storage for thinking content (for potential future display)
+    private volatile String lastThinkingContent;
+    private final StringBuilder thinkingBuffer = new StringBuilder();
     
     /**
      * Create a new streaming filter for processing chunks
@@ -27,7 +31,39 @@ public class ResponseProcessor {
         }
         return COMPLETE_THINK_PATTERN.matcher(response).replaceAll("").trim();
     }
-    
+
+    /**
+     * Store thinking content from an LLM response.
+     * This is used to capture thinking from structured API responses (like Anthropic's thinking blocks).
+     */
+    public void storeThinkingContent(String thinking) {
+        if (thinking != null && !thinking.isEmpty()) {
+            synchronized (thinkingBuffer) {
+                thinkingBuffer.append(thinking);
+                lastThinkingContent = thinkingBuffer.toString();
+            }
+        }
+    }
+
+    /**
+     * Get the last stored thinking content.
+     * Returns null if no thinking content has been stored.
+     */
+    public String getLastThinkingContent() {
+        return lastThinkingContent;
+    }
+
+    /**
+     * Clear the stored thinking content.
+     * Called when starting a new query to reset state.
+     */
+    public void clearThinkingContent() {
+        synchronized (thinkingBuffer) {
+            thinkingBuffer.setLength(0);
+            lastThinkingContent = null;
+        }
+    }
+
     /**
      * Streaming filter that processes chunks of text and removes thinking blocks in real-time
      */

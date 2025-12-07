@@ -3,11 +3,13 @@ package ghidrassist.services;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Program;
+import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 import ghidrassist.AnalysisDB;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.ReasoningConfig;
 import ghidrassist.core.CodeUtils;
 
 /**
@@ -15,13 +17,15 @@ import ghidrassist.core.CodeUtils;
  * Responsible for explaining functions and lines of code.
  */
 public class CodeAnalysisService {
-    
+
     private final GhidrAssistPlugin plugin;
     private final AnalysisDB analysisDB;
-    
+    private final AnalysisDataService analysisDataService;
+
     public CodeAnalysisService(GhidrAssistPlugin plugin) {
         this.plugin = plugin;
         this.analysisDB = new AnalysisDB();
+        this.analysisDataService = new AnalysisDataService(plugin);
     }
     
     /**
@@ -84,8 +88,25 @@ public class CodeAnalysisService {
         if (config == null) {
             throw new Exception("No API provider configured.");
         }
-        
+
         LlmApi llmApi = new LlmApi(config, plugin);
+
+        // Load and apply reasoning configuration from database
+        try {
+            String savedEffort = analysisDataService.getReasoningEffort();
+            Msg.info(this, "DEBUG [CodeAnalysisService]: Loaded reasoning effort from DB: " + savedEffort);
+            if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                ReasoningConfig reasoningConfig = ReasoningConfig.fromString(savedEffort);
+                Msg.info(this, "DEBUG [CodeAnalysisService]: Applying reasoning config: " +
+                    reasoningConfig.getEffort() + ", enabled=" + reasoningConfig.isEnabled());
+                llmApi.setReasoningConfig(reasoningConfig);
+            } else {
+                Msg.info(this, "DEBUG [CodeAnalysisService]: No reasoning config to apply (savedEffort=" + savedEffort + ")");
+            }
+        } catch (Exception e) {
+            Msg.warn(this, "DEBUG [CodeAnalysisService]: Failed to load reasoning config: " + e.getMessage());
+        }
+
         llmApi.sendRequestAsync(request.getPrompt(), handler);
     }
     

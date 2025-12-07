@@ -9,6 +9,8 @@ public class ChatMessage {
     private FunctionCall functionCall;
     private JsonArray toolCalls;  // For assistant messages with tool calls
     private String toolCallId;   // For tool response messages
+    private String thinkingContent;  // For storing thinking/reasoning content
+    private String thinkingSignature;  // For storing thinking signature
 
     public ChatMessage(String role, String content) {
         this.role = role;
@@ -49,6 +51,22 @@ public class ChatMessage {
 
     public void setToolCallId(String toolCallId) {
         this.toolCallId = toolCallId;
+    }
+
+    public String getThinkingContent() {
+        return thinkingContent;
+    }
+
+    public void setThinkingContent(String thinkingContent) {
+        this.thinkingContent = thinkingContent;
+    }
+
+    public String getThinkingSignature() {
+        return thinkingSignature;
+    }
+
+    public void setThinkingSignature(String thinkingSignature) {
+        this.thinkingSignature = thinkingSignature;
     }
 
     public static class FunctionCall {

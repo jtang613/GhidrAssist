@@ -91,17 +91,42 @@ public class AnalysisDataService {
     }
     
     /**
+     * Save reasoning effort for the current program
+     */
+    public void saveReasoningEffort(String reasoningEffort) {
+        if (plugin.getCurrentProgram() == null) {
+            throw new IllegalStateException("No active program to save reasoning effort for.");
+        }
+
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        analysisDB.upsertReasoningEffort(programHash, reasoningEffort);
+    }
+
+    /**
+     * Get reasoning effort for the current program
+     */
+    public String getReasoningEffort() {
+        if (plugin.getCurrentProgram() == null) {
+            return "none"; // Default when no program loaded
+        }
+
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        String effort = analysisDB.getReasoningEffort(programHash);
+        return effort != null ? effort : "none";
+    }
+
+    /**
      * Get context statistics
      */
     public ContextStats getContextStats() {
         String currentContext = getContext();
         boolean isCustom = hasCustomContext();
-        String programName = plugin.getCurrentProgram() != null ? 
+        String programName = plugin.getCurrentProgram() != null ?
             plugin.getCurrentProgram().getName() : "No Program";
-        
+
         return new ContextStats(programName, currentContext.length(), isCustom);
     }
-    
+
     /**
      * Close database resources
      */

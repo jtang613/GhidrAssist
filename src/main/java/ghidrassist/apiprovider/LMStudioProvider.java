@@ -420,6 +420,12 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         payload.addProperty("max_tokens", super.getMaxTokens());
         payload.addProperty("stream", stream);
 
+        // Add reasoning_effort if configured (LMStudio Chat Completions API)
+        ReasoningConfig reasoning = getReasoningConfig();
+        if (reasoning != null && reasoning.isEnabled()) {
+            payload.addProperty("reasoning_effort", reasoning.getEffortString());
+        }
+
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {
             JsonObject messageObj = new JsonObject();

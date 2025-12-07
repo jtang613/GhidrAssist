@@ -418,6 +418,13 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
         payload.addProperty("model", super.getModel());
         payload.addProperty("stream", stream);
 
+        // Add think parameter if reasoning is configured
+        ReasoningConfig reasoning = getReasoningConfig();
+        if (reasoning != null && reasoning.isEnabled()) {
+            // Use effort level string - works for gpt-oss and most thinking models
+            payload.addProperty("think", reasoning.getEffortString());
+        }
+
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {
             JsonObject messageObj = new JsonObject();
