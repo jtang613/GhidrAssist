@@ -477,6 +477,12 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         
         payload.addProperty("stream", stream);
 
+        // Add reasoning_effort if configured
+        ReasoningConfig reasoning = getReasoningConfig();
+        if (reasoning != null && reasoning.isEnabled()) {
+            payload.addProperty("reasoning_effort", reasoning.getEffortString());
+        }
+
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {
             JsonObject messageObj = new JsonObject();

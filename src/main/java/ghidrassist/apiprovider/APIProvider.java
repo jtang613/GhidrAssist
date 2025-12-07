@@ -40,8 +40,9 @@ public abstract class APIProvider implements ChatProvider {
     protected OkHttpClient client;
     protected Duration timeout;
     protected RetryHandler retryHandler;
+    protected ReasoningConfig reasoningConfig;
 
-    public APIProvider(String name, ProviderType type, String model, Integer maxTokens, 
+    public APIProvider(String name, ProviderType type, String model, Integer maxTokens,
                       String url, String key, boolean disableTlsVerification, Integer timeout2) {
         this.name = name;
         this.type = type;
@@ -52,6 +53,7 @@ public abstract class APIProvider implements ChatProvider {
         this.disableTlsVerification = disableTlsVerification;
         this.timeout = Duration.ofSeconds(timeout2);
         this.retryHandler = new RetryHandler(50, this);
+        this.reasoningConfig = new ReasoningConfig(); // Default to NONE
         this.client = buildClient();
     }
 
@@ -63,6 +65,22 @@ public abstract class APIProvider implements ChatProvider {
     public String getUrl() { return url; }
     public String getKey() { return key; }
     public boolean isDisableTlsVerification() { return disableTlsVerification; }
+
+    // Reasoning configuration
+    public ReasoningConfig getReasoningConfig() {
+        ReasoningConfig result = reasoningConfig != null ? reasoningConfig : new ReasoningConfig();
+        ghidra.util.Msg.info(this, "DEBUG [APIProvider.getReasoningConfig]: Returning " +
+            result.getEffort() + ", enabled=" + result.isEnabled() +
+            " (field is " + (reasoningConfig != null ? "NOT NULL" : "NULL") + ")");
+        return result;
+    }
+
+    public void setReasoningConfig(ReasoningConfig config) {
+        this.reasoningConfig = config != null ? config : new ReasoningConfig();
+        ghidra.util.Msg.info(this, "DEBUG [APIProvider.setReasoningConfig]: Set to " +
+            this.reasoningConfig.getEffort() + ", enabled=" + this.reasoningConfig.isEnabled() +
+            " (input was " + (config != null ? config.getEffort().toString() : "NULL") + ")");
+    }
 
     protected abstract OkHttpClient buildClient();
     public abstract String createChatCompletion(List<ChatMessage> messages) throws APIProviderException;

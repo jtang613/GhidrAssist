@@ -1,6 +1,7 @@
 package ghidrassist;
 
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.ReasoningConfig;
 import ghidrassist.core.ConversationalToolHandler;
 import ghidrassist.core.LlmApiClient;
 import ghidrassist.core.LlmErrorHandler;
@@ -187,9 +188,38 @@ public class LlmApi {
      * Get provider information for debugging/logging
      */
     public String getProviderInfo() {
-        return String.format("Provider: %s, Model: %s", 
-            apiClient.getProviderName(), 
+        return String.format("Provider: %s, Model: %s",
+            apiClient.getProviderName(),
             apiClient.getProviderModel());
+    }
+
+    /**
+     * Set the reasoning configuration for this LLM instance.
+     * This affects how the provider constructs requests with thinking/reasoning parameters.
+     */
+    public void setReasoningConfig(ReasoningConfig config) {
+        ghidra.util.Msg.info(this, "DEBUG [LlmApi.setReasoningConfig]: Called with " +
+            (config != null ? config.getEffort() + ", enabled=" + config.isEnabled() : "NULL"));
+        ghidra.util.Msg.info(this, "DEBUG [LlmApi.setReasoningConfig]: apiClient=" +
+            (apiClient != null ? "NOT NULL" : "NULL") + ", provider=" +
+            (apiClient != null && apiClient.getProvider() != null ? "NOT NULL" : "NULL"));
+
+        if (apiClient != null && apiClient.getProvider() != null) {
+            apiClient.getProvider().setReasoningConfig(config);
+        } else {
+            ghidra.util.Msg.warn(this, "DEBUG [LlmApi.setReasoningConfig]: Cannot set - apiClient or provider is NULL!");
+        }
+    }
+
+    /**
+     * Get the current reasoning configuration.
+     */
+    public ReasoningConfig getReasoningConfig() {
+        if (apiClient != null && apiClient.getProvider() != null) {
+            return apiClient.getProvider().getReasoningConfig();
+        }
+        ghidra.util.Msg.warn(this, "DEBUG [LlmApi.getReasoningConfig]: Returning default - apiClient or provider is NULL!");
+        return new ReasoningConfig();
     }
 
     /**

@@ -36,14 +36,22 @@ public class AnalysisDB {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createTableSQL);
         }
-        
+
         String createContextTableSQL = "CREATE TABLE IF NOT EXISTS GHContext ("
                 + "program_hash TEXT PRIMARY KEY,"
                 + "system_context TEXT NOT NULL,"
+                + "reasoning_effort TEXT DEFAULT 'none',"
                 + "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
                 + ")";
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createContextTableSQL);
+        }
+
+        // Migration: Add reasoning_effort column if it doesn't exist
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE GHContext ADD COLUMN reasoning_effort TEXT DEFAULT 'none'");
+        } catch (SQLException e) {
+            // Column already exists, ignore
         }
         
         String createChatHistoryTableSQL = "CREATE TABLE IF NOT EXISTS GHChatHistory ("
@@ -164,10 +172,10 @@ public class AnalysisDB {
 
     public String getContext(String programHash) {
         String selectSQL = "SELECT system_context FROM GHContext WHERE program_hash = ?";
-        
+
         try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
             pstmt.setString(1, programHash);
-            
+
             ResultSet rs = pstmt.executeQuery();
             if (rs.next()) {
                 return rs.getString("system_context");
@@ -177,7 +185,64 @@ public class AnalysisDB {
         }
         return null;
     }
-    
+
+    public void upsertReasoningEffort(String programHash, String reasoningEffort) {
+        if (reasoningEffort == null || reasoningEffort.equalsIgnoreCase("none")) {
+            reasoningEffort = "none";
+        }
+
+        // Check if context entry exists
+        String selectSQL = "SELECT program_hash FROM GHContext WHERE program_hash = ?";
+        boolean exists = false;
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setString(1, programHash);
+            ResultSet rs = pstmt.executeQuery();
+            exists = rs.next();
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to check context: " + e.getMessage());
+            return;
+        }
+
+        if (!exists) {
+            // Create entry with default context
+            String insertSQL = "INSERT INTO GHContext (program_hash, system_context, reasoning_effort) VALUES (?, '', ?)";
+            try (PreparedStatement pstmt = connection.prepareStatement(insertSQL)) {
+                pstmt.setString(1, programHash);
+                pstmt.setString(2, reasoningEffort);
+                pstmt.executeUpdate();
+            } catch (SQLException e) {
+                Msg.showError(this, null, "Database Error", "Failed to insert reasoning effort: " + e.getMessage());
+            }
+        } else {
+            // Update existing entry
+            String updateSQL = "UPDATE GHContext SET reasoning_effort = ?, timestamp = CURRENT_TIMESTAMP WHERE program_hash = ?";
+            try (PreparedStatement pstmt = connection.prepareStatement(updateSQL)) {
+                pstmt.setString(1, reasoningEffort);
+                pstmt.setString(2, programHash);
+                pstmt.executeUpdate();
+            } catch (SQLException e) {
+                Msg.showError(this, null, "Database Error", "Failed to update reasoning effort: " + e.getMessage());
+            }
+        }
+    }
+
+    public String getReasoningEffort(String programHash) {
+        String selectSQL = "SELECT reasoning_effort FROM GHContext WHERE program_hash = ?";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setString(1, programHash);
+
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                String effort = rs.getString("reasoning_effort");
+                return effort != null ? effort : "none";
+            }
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to retrieve reasoning effort: " + e.getMessage());
+        }
+        return "none"; // Default to none if not found
+    }
+
     // Chat History Methods
     
     public int createChatSession(String programHash, String description, String conversation) {

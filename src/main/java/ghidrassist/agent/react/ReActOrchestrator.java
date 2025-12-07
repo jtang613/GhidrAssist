@@ -255,13 +255,6 @@ public class ReActOrchestrator {
 
             @Override
             public void onComplete(String fullResponse) {
-                // Debug logging: Show what we're receiving in iteration complete
-                String responsePreview = fullResponse != null && fullResponse.length() > 100
-                    ? fullResponse.substring(0, 100) + "..."
-                    : (fullResponse != null ? fullResponse : "NULL");
-                Msg.info(this, String.format("✅ Iteration %d complete. Response preview: %s",
-                    currentIteration, responsePreview));
-
                 // Extract findings from the response (keyword-based, for backwards compatibility)
                 findings.extractFromToolOutput("llm_response", fullResponse);
 
@@ -329,24 +322,12 @@ public class ReActOrchestrator {
         int toolCallCount,
         ReActResult.Status completionStatus
     ) {
-        Msg.info(this, "🎯 Starting synthesis after " + iterationCount + " iterations with status: " + completionStatus);
-
-        // Format iteration summaries (this will log what's being included)
-        String iterationSummaries = findings.formatIterationSummaries();
-
         String synthesisPrompt = ReActPrompts.getSynthesisPrompt(
             objective,
             findings.formatDetailed(),
             todoManager.getCompletedSummary(),
-            iterationSummaries
+            findings.formatIterationSummaries()
         );
-
-        // Debug logging: Show synthesis prompt preview
-        String promptPreview = synthesisPrompt.length() > 200
-            ? synthesisPrompt.substring(0, 200) + "..."
-            : synthesisPrompt;
-        Msg.info(this, "📋 Synthesis prompt preview: " + promptPreview);
-        Msg.info(this, "📋 Full synthesis prompt length: " + synthesisPrompt.length() + " characters");
 
         // Get final answer without tool calling
         llmApi.sendRequestAsync(synthesisPrompt, new LlmApi.LlmResponseHandler() {

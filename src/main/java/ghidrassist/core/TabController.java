@@ -11,6 +11,7 @@ import ghidrassist.AnalysisDB.Analysis;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.ReasoningConfig;
 import ghidrassist.services.*;
 import ghidrassist.ui.tabs.*;
 
@@ -56,6 +57,7 @@ public class TabController {
     // UI state
     private volatile boolean isQueryRunning;
     private volatile boolean isCancelling;  // Guard against concurrent operations during cancellation
+    private volatile ReasoningConfig currentReasoningConfig;  // Current reasoning/thinking effort setting
 
     // Streaming performance: debounced HTML rendering
     private static final int RENDER_INTERVAL_MS = 1000;  // Render markdown every 1 second
@@ -75,7 +77,8 @@ public class TabController {
         this.markdownHelper = new MarkdownHelper();
         this.isQueryRunning = false;
         this.isCancelling = false;
-        
+        this.currentReasoningConfig = new ReasoningConfig(); // Default to NONE
+
         // Initialize services
         this.codeAnalysisService = new CodeAnalysisService(plugin);
         this.queryService = new QueryService(plugin);
@@ -104,6 +107,51 @@ public class TabController {
     public void setActionsTab(ActionsTab tab) { this.actionsTab = tab; }
     public void setRAGManagementTab(RAGManagementTab tab) { this.ragManagementTab = tab; }
     public void setAnalysisOptionsTab(AnalysisOptionsTab tab) { this.analysisOptionsTab = tab; }
+
+    // ==== Reasoning Configuration ====
+
+    /**
+     * Set the reasoning/thinking effort level.
+     * Called by the UI when the user changes the dropdown selection.
+     */
+    public void setReasoningEffort(String level) {
+        this.currentReasoningConfig = ReasoningConfig.fromString(level);
+
+        // Save to database
+        try {
+            analysisDataService.saveReasoningEffort(level.toLowerCase());
+            Msg.info(this, "Reasoning effort set to: " + level);
+        } catch (IllegalStateException e) {
+            // No program loaded - just update in-memory config
+            Msg.info(this, "Reasoning effort set to: " + level + " (not saved - no program loaded)");
+        }
+    }
+
+    /**
+     * Get the current reasoning effort level as a string for UI display.
+     * Loads from database if available.
+     */
+    public String getReasoningEffort() {
+        // Try to load from database first
+        try {
+            String savedEffort = analysisDataService.getReasoningEffort();
+            if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                // Update in-memory config to match saved value
+                this.currentReasoningConfig = ReasoningConfig.fromString(savedEffort);
+                // Return with proper capitalization for UI
+                return savedEffort.substring(0, 1).toUpperCase() + savedEffort.substring(1);
+            }
+        } catch (Exception e) {
+            // Fall through to in-memory value
+        }
+
+        // Fall back to in-memory config
+        if (currentReasoningConfig == null || !currentReasoningConfig.isEnabled()) {
+            return "None";
+        }
+        String effort = currentReasoningConfig.getEffortString();
+        return effort != null ? effort.substring(0, 1).toUpperCase() + effort.substring(1) : "None";
+    }
 
     // ==== Code Analysis Operations ====
     
@@ -498,8 +546,10 @@ public class TabController {
         try {
             String currentContext = analysisDataService.getContext();
             analysisOptionsTab.setContextText(currentContext);
+            // Also reload reasoning effort when context is loaded
+            analysisOptionsTab.loadReasoningEffort();
         } catch (Exception e) {
-            Msg.showError(this, analysisOptionsTab, "Error", 
+            Msg.showError(this, analysisOptionsTab, "Error",
                 "Failed to load context: " + e.getMessage());
         }
     }
@@ -678,9 +728,50 @@ public class TabController {
         if (config == null) {
             throw new Exception("No API provider configured.");
         }
-        
+
+        // Debug: Log current in-memory config before creating API
+        if (currentReasoningConfig != null) {
+            Msg.info(this, "DEBUG: In-memory reasoning config before create: " +
+                currentReasoningConfig.getEffort() + ", enabled=" + currentReasoningConfig.isEnabled());
+        } else {
+            Msg.info(this, "DEBUG: In-memory reasoning config is NULL");
+        }
+
         // Create new instance for this operation
         currentLlmApi = new LlmApi(config, plugin);
+
+        // Load and apply reasoning configuration from database
+        try {
+            String savedEffort = analysisDataService.getReasoningEffort();
+            Msg.info(this, "DEBUG: Database returned reasoning effort: " + savedEffort);
+            // Only override in-memory config if we have a saved non-none value
+            // Otherwise keep the current in-memory setting (e.g., when no program is loaded)
+            if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                currentReasoningConfig = ReasoningConfig.fromString(savedEffort);
+                Msg.info(this, "DEBUG: Loaded from DB, new config: " + currentReasoningConfig.getEffort());
+            } else {
+                Msg.info(this, "DEBUG: Keeping in-memory config (DB returned none or null)");
+            }
+        } catch (Exception e) {
+            // Use current in-memory config if database load fails
+            Msg.info(this, "DEBUG: Database load failed: " + e.getMessage());
+        }
+
+        // Always set reasoning config (even if NONE) to ensure provider has correct state
+        if (currentReasoningConfig != null) {
+            Msg.info(this, "DEBUG: Setting reasoning config on LlmApi: " +
+                currentReasoningConfig.getEffort() + ", enabled=" + currentReasoningConfig.isEnabled());
+            currentLlmApi.setReasoningConfig(currentReasoningConfig);
+        } else {
+            Msg.info(this, "DEBUG: currentReasoningConfig is NULL, setting default NONE");
+            currentLlmApi.setReasoningConfig(new ReasoningConfig()); // Default to NONE
+        }
+
+        // Verify it was set
+        ReasoningConfig verifyConfig = currentLlmApi.getReasoningConfig();
+        Msg.info(this, "DEBUG: Verified LlmApi config after set: " +
+            verifyConfig.getEffort() + ", enabled=" + verifyConfig.isEnabled());
+
         return currentLlmApi;
     }
     

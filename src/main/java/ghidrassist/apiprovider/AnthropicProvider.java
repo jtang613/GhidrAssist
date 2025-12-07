@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import ghidra.util.Msg;
 import ghidrassist.LlmApi.LlmResponseHandler;
 import ghidrassist.apiprovider.exceptions.APIProviderException;
 import ghidrassist.apiprovider.capabilities.FunctionCallingProvider;
@@ -148,14 +149,19 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                             // Extract content from delta
                             if (event.has("type") && event.get("type").getAsString().equals("content_block_delta")) {
                                 JsonObject delta = event.getAsJsonObject("delta");
-                                String text = delta.get("text").getAsString();
-                                
-                                if (isFirst) {
-                                    handler.onStart();
-                                    isFirst = false;
+
+                                // Check if this is a text delta (skip thinking deltas)
+                                if (delta.has("text")) {
+                                    String text = delta.get("text").getAsString();
+
+                                    if (isFirst) {
+                                        handler.onStart();
+                                        isFirst = false;
+                                    }
+                                    contentBuilder.append(text);
+                                    handler.onUpdate(text);
                                 }
-                                contentBuilder.append(text);
-                                handler.onUpdate(text);
+                                // Thinking deltas are silently ignored (not displayed)
                             }
                         }
                     }
@@ -537,6 +543,18 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                     // Buffer tool input deltas
                     String inputDelta = delta.get("partial_json").getAsString();
                     block.inputBuffer.append(inputDelta);
+
+                } else if ("thinking".equals(block.type) && delta.has("thinking")) {
+                    // Buffer thinking content (don't stream to UI)
+                    // Store for potential future "Show Thinking" feature
+                    String thinkingDelta = delta.get("thinking").getAsString();
+                    block.textBuffer.append(thinkingDelta);
+                    // Note: We intentionally don't call handler.onTextUpdate() for thinking blocks
+
+                } else if ("thinking".equals(block.type) && delta.has("signature")) {
+                    // Buffer signature for thinking blocks
+                    String signatureDelta = delta.get("signature").getAsString();
+                    block.signatureBuffer.append(signatureDelta);
                 }
             }
 
@@ -553,6 +571,19 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                     .filter(b -> "text".equals(b.type))
                     .sorted((a, b) -> Integer.compare(a.index, b.index))
                     .map(b -> b.textBuffer.toString())
+                    .collect(java.util.stream.Collectors.joining());
+
+                // Extract thinking content and signature from thinking blocks
+                String thinkingContent = contentBlocks.values().stream()
+                    .filter(b -> "thinking".equals(b.type))
+                    .sorted((a, b) -> Integer.compare(a.index, b.index))
+                    .map(b -> b.textBuffer.toString())
+                    .collect(java.util.stream.Collectors.joining());
+
+                String thinkingSignature = contentBlocks.values().stream()
+                    .filter(b -> "thinking".equals(b.type))
+                    .sorted((a, b) -> Integer.compare(a.index, b.index))
+                    .map(b -> b.signatureBuffer.toString())
                     .collect(java.util.stream.Collectors.joining());
 
                 // Parse tool calls from tool_use blocks
@@ -590,10 +621,12 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                     return Integer.compare(indexA, indexB);
                 });
 
-                // Callback with complete data
+                // Callback with complete data including thinking content and signature
                 handler.onStreamComplete(
                     stopReason != null ? stopReason : "end_turn",
                     fullText,
+                    thinkingContent.isEmpty() ? null : thinkingContent,
+                    thinkingSignature.isEmpty() ? null : thinkingSignature,
                     toolCalls
                 );
             }
@@ -634,6 +667,29 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
         //payload.addProperty("max_tokens", 64000);
         payload.addProperty("stream", stream);
 
+        // Add thinking configuration if enabled
+        ReasoningConfig reasoning = getReasoningConfig();
+        Msg.info(this, "DEBUG [AnthropicProvider]: Retrieved reasoning config: " +
+            (reasoning != null ? reasoning.getEffort() + ", enabled=" + reasoning.isEnabled() : "NULL"));
+
+        if (reasoning != null && reasoning.isEnabled()) {
+            int budget = reasoning.getAnthropicBudget();
+            Msg.info(this, "DEBUG [AnthropicProvider]: Reasoning is enabled, budget=" + budget);
+            // Ensure budget_tokens is less than max_tokens
+            Integer maxTokens = super.getMaxTokens();
+            if (maxTokens != null && budget >= maxTokens) {
+                budget = Math.max(1024, maxTokens - 1000);
+                Msg.info(this, "DEBUG [AnthropicProvider]: Adjusted budget to " + budget + " (maxTokens=" + maxTokens + ")");
+            }
+            JsonObject thinking = new JsonObject();
+            thinking.addProperty("type", "enabled");
+            thinking.addProperty("budget_tokens", budget);
+            payload.add("thinking", thinking);
+            Msg.info(this, "DEBUG [AnthropicProvider]: Added thinking object to payload");
+        } else {
+            Msg.info(this, "DEBUG [AnthropicProvider]: Reasoning is NOT enabled, skipping thinking parameter");
+        }
+
         // Convert the messages to Anthropic's format
         JsonArray messagesArray = new JsonArray();
         for (ChatMessage message : messages) {
@@ -657,7 +713,31 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 } else if (message.getToolCalls() != null) {
                     // Assistant message with tool calls - need to convert to content blocks
                     JsonArray contentArray = new JsonArray();
-                    
+
+                    // When thinking is enabled, assistant messages must start with a thinking block
+                    if (reasoning != null && reasoning.isEnabled()) {
+                        JsonObject thinkingBlock = new JsonObject();
+                        thinkingBlock.addProperty("type", "thinking");
+                        // Use stored thinking content and signature if available, otherwise use placeholder
+                        String thinkingContent = message.getThinkingContent();
+                        String thinkingSignature = message.getThinkingSignature();
+
+                        if (thinkingContent != null && !thinkingContent.isEmpty()) {
+                            thinkingBlock.addProperty("thinking", thinkingContent);
+                            if (thinkingSignature != null && !thinkingSignature.isEmpty()) {
+                                thinkingBlock.addProperty("signature", thinkingSignature);
+                            } else {
+                                // If we have thinking but no signature, use empty signature
+                                thinkingBlock.addProperty("signature", "");
+                            }
+                        } else {
+                            // Placeholder thinking content to satisfy Anthropic's requirement
+                            thinkingBlock.addProperty("thinking", "Processing request and preparing tool calls.");
+                            thinkingBlock.addProperty("signature", "");
+                        }
+                        contentArray.add(thinkingBlock);
+                    }
+
                     // Add text content if present
                     if (message.getContent() != null && !message.getContent().isEmpty()) {
                         JsonObject textBlock = new JsonObject();
@@ -746,9 +826,11 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
          * Called when streaming completes with all content blocks processed.
          * @param stopReason The reason streaming stopped ("end_turn" or "tool_use")
          * @param fullText Complete text content from all text blocks
+         * @param thinkingContent Complete thinking/reasoning content (may be null)
+         * @param thinkingSignature Thinking signature for verification (may be null)
          * @param toolCalls List of tool calls to execute (may be empty)
          */
-        void onStreamComplete(String stopReason, String fullText, List<ToolCall> toolCalls);
+        void onStreamComplete(String stopReason, String fullText, String thinkingContent, String thinkingSignature, List<ToolCall> toolCalls);
 
         /**
          * Called if an error occurs during streaming.
@@ -785,6 +867,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
         final int index;
         final String type;
         final StringBuilder textBuffer = new StringBuilder();
+        final StringBuilder signatureBuffer = new StringBuilder();  // For thinking signatures
 
         // For tool_use blocks
         String toolId;
