@@ -122,27 +122,30 @@ public class ReActPrompts {
     /**
      * Prompt to encourage final synthesis when todos are complete.
      */
-    public static String getSynthesisPrompt(String objective, String findings, String todos) {
-        return String.format("""
-            ## Time to Synthesize
+    public static String getSynthesisPrompt(String objective, String findings, String todos, String iterationSummaries) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("## Time to Synthesize\n\n");
+        sb.append("**Goal**: ").append(objective).append("\n\n");
 
-            **Goal**: %s
+        sb.append("**Completed Investigation**:\n");
+        sb.append(todos).append("\n\n");
 
-            **Completed Investigation**:
-            %s
+        // Include iteration summaries for full context
+        if (iterationSummaries != null && !iterationSummaries.trim().isEmpty() &&
+            !iterationSummaries.equals("No iteration summaries available.")) {
+            sb.append("**Investigation History** (what you discovered in each iteration):\n");
+            sb.append(iterationSummaries).append("\n");
+        }
 
-            **Findings**:
-            %s
+        sb.append("**Key Findings**:\n");
+        sb.append(findings).append("\n\n");
 
-            You've completed your investigation todos. Based on all the information
-            you've gathered, provide a comprehensive answer to the user's question.
+        sb.append("You've completed your investigation todos. Based on all the information\n");
+        sb.append("you've gathered (shown in the investigation history above), provide a\n");
+        sb.append("comprehensive answer to the user's question.\n\n");
+        sb.append("Synthesize your findings into a clear, actionable response.\n");
 
-            Synthesize your findings into a clear, actionable response.
-            """,
-            objective,
-            todos,
-            findings
-        );
+        return sb.toString();
     }
 
     /**

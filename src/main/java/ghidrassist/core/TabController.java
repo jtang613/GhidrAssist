@@ -55,11 +55,12 @@ public class TabController {
 
     // UI state
     private volatile boolean isQueryRunning;
+    private volatile boolean isCancelling;  // Guard against concurrent operations during cancellation
 
     // Streaming performance: debounced HTML rendering
-    private static final int RENDER_INTERVAL_MS = 1000;  // Render markdown every 2 seconds
+    private static final int RENDER_INTERVAL_MS = 1000;  // Render markdown every 1 second
     private final ScheduledExecutorService updateScheduler = Executors.newSingleThreadScheduledExecutor();
-    private volatile ScheduledFuture<?> pendingRender;
+    private volatile ScheduledFuture<?> activeRenderTask;  // Tracked at class level for proper cancellation
     private final Object renderLock = new Object();
 
     // UI Component references
@@ -73,6 +74,7 @@ public class TabController {
         this.plugin = plugin;
         this.markdownHelper = new MarkdownHelper();
         this.isQueryRunning = false;
+        this.isCancelling = false;
         
         // Initialize services
         this.codeAnalysisService = new CodeAnalysisService(plugin);
@@ -225,6 +227,13 @@ public class TabController {
     // ==== Query Operations ====
 
     public void handleQuerySubmit(String query, boolean useRAG, boolean useMCP, boolean useAgentic) {
+        // If cancellation is in progress, ignore the click
+        if (isCancelling) {
+            Msg.info(this, "Cancellation in progress, please wait...");
+            return;
+        }
+
+        // If a query is running, cancel it
         if (isQueryRunning) {
             cancelCurrentOperation();
             return;
@@ -573,6 +582,12 @@ public class TabController {
     // ==== Chat History Management ====
     
     public void handleNewChatSession() {
+        // Cancel any running operation and render task first
+        if (isQueryRunning) {
+            cancelCurrentOperation();
+        }
+        cancelActiveRenderTask();
+
         SwingUtilities.invokeLater(() -> {
             // Clear current conversation and create new session immediately
             queryService.clearConversationHistory();
@@ -596,6 +611,12 @@ public class TabController {
     }
     
     public void handleDeleteCurrentSession() {
+        // Cancel any running operation and render task first
+        if (isQueryRunning) {
+            cancelCurrentOperation();
+        }
+        cancelActiveRenderTask();
+
         boolean deleted = queryService.deleteCurrentSession();
         SwingUtilities.invokeLater(() -> {
             if (deleted) {
@@ -664,27 +685,69 @@ public class TabController {
     }
     
     private void cancelCurrentOperation() {
+        // Mark that we're cancelling to prevent concurrent operations
+        isCancelling = true;
+
+        // Cancel active render task FIRST to stop stale UI updates
+        cancelActiveRenderTask();
+
         // Cancel the ReAct orchestrator if it exists
         if (currentOrchestrator != null) {
             currentOrchestrator.cancel();
-            currentOrchestrator = null;
+            // Don't set to null here - let the completion handler do it
         }
 
         // Cancel the current LLM API instance if it exists
         if (currentLlmApi != null) {
             currentLlmApi.cancelCurrentRequest();
-            currentLlmApi = null;
+            // Don't set to null here - let the completion handler do it
         }
 
         actionAnalysisService.cancelAnalysis();
 
-        // Reset UI state
-        setUIState(false, "Submit", null);
+        // Update button text immediately to show cancellation is in progress
+        SwingUtilities.invokeLater(() -> {
+            if (queryTab != null) {
+                queryTab.setSubmitButtonText("Cancelling...");
+            }
+        });
+
+        // Schedule a safety reset in case the completion handlers don't fire
+        // This prevents the UI from getting stuck if something goes wrong
+        updateScheduler.schedule(() -> {
+            if (isCancelling) {
+                Msg.warn(this, "Cancellation safety timeout - forcing UI reset");
+                SwingUtilities.invokeLater(() -> {
+                    isCancelling = false;
+                    isQueryRunning = false;
+                    currentOrchestrator = null;
+                    currentLlmApi = null;
+                    setUIState(false, "Submit", null);
+                });
+            }
+        }, 5, TimeUnit.SECONDS);
     }
     
+    /**
+     * Cancel the active render task to prevent stale UI updates.
+     * Should be called when cancelling, starting new queries, or clearing state.
+     */
+    private void cancelActiveRenderTask() {
+        synchronized (renderLock) {
+            if (activeRenderTask != null) {
+                activeRenderTask.cancel(false);
+                activeRenderTask = null;
+            }
+        }
+    }
+
     private void setUIState(boolean running, String buttonText, String statusText) {
         isQueryRunning = running;
-        
+        // Reset cancellation flag when transitioning to non-running state
+        if (!running) {
+            isCancelling = false;
+        }
+
         SwingUtilities.invokeLater(() -> {
             if (buttonText != null && explainTab != null) {
                 explainTab.setFunctionButtonText(buttonText);
@@ -776,7 +839,6 @@ public class TabController {
         return new LlmApi.LlmResponseHandler() {
             private final StringBuilder responseBuffer = new StringBuilder();
             private final Object bufferLock = new Object();
-            private volatile ScheduledFuture<?> renderTask;
 
             @Override
             public void onStart() {
@@ -784,18 +846,23 @@ public class TabController {
                     responseBuffer.setLength(0);
                 }
 
+                // Cancel any existing render task before starting new one
+                cancelActiveRenderTask();
+
                 // Show initial processing message
                 SwingUtilities.invokeLater(() -> {
                     queryTab.setResponseText("<html><body><i>Processing...</i></body></html>");
                 });
 
-                // Start periodic markdown rendering (debounced every 2 seconds)
-                renderTask = updateScheduler.scheduleAtFixedRate(
-                    this::renderCurrentContent,
-                    RENDER_INTERVAL_MS,
-                    RENDER_INTERVAL_MS,
-                    TimeUnit.MILLISECONDS
-                );
+                // Start periodic markdown rendering using class-level tracking
+                synchronized (renderLock) {
+                    activeRenderTask = updateScheduler.scheduleAtFixedRate(
+                        this::renderCurrentContent,
+                        RENDER_INTERVAL_MS,
+                        RENDER_INTERVAL_MS,
+                        TimeUnit.MILLISECONDS
+                    );
+                }
             }
 
             @Override
@@ -843,10 +910,7 @@ public class TabController {
             @Override
             public void onComplete(String fullResponse) {
                 // Cancel periodic render task
-                if (renderTask != null) {
-                    renderTask.cancel(false);
-                    renderTask = null;
-                }
+                cancelActiveRenderTask();
 
                 synchronized (bufferLock) {
                     // IMPORTANT: Don't clear responseBuffer!
@@ -878,10 +942,7 @@ public class TabController {
             @Override
             public void onError(Throwable error) {
                 // Cancel periodic render task
-                if (renderTask != null) {
-                    renderTask.cancel(false);
-                    renderTask = null;
-                }
+                cancelActiveRenderTask();
 
                 SwingUtilities.invokeLater(() -> {
                     queryService.addError(error.getMessage());
@@ -905,7 +966,6 @@ public class TabController {
             private final Object historyLock = new Object();  // Protect concurrent access
             private String currentIterationOutput = "";
             private int lastIterationSeen = -1;  // Start at -1 so iteration 0 triggers header
-            private volatile ScheduledFuture<?> renderTask;
 
             @Override
             public void onStart(String objective) {
@@ -918,18 +978,23 @@ public class TabController {
                     lastIterationSeen = -1;
                 }
 
+                // Cancel any existing render task before starting new one
+                cancelActiveRenderTask();
+
                 // Show initial message
                 SwingUtilities.invokeLater(() -> {
                     queryTab.setResponseText("<html><body><i>Starting ReAct investigation...</i></body></html>");
                 });
 
-                // Start periodic markdown rendering (debounced every 2 seconds)
-                renderTask = updateScheduler.scheduleAtFixedRate(
-                    this::renderCurrentContent,
-                    RENDER_INTERVAL_MS,
-                    RENDER_INTERVAL_MS,
-                    TimeUnit.MILLISECONDS
-                );
+                // Start periodic markdown rendering using class-level tracking
+                synchronized (renderLock) {
+                    activeRenderTask = updateScheduler.scheduleAtFixedRate(
+                        this::renderCurrentContent,
+                        RENDER_INTERVAL_MS,
+                        RENDER_INTERVAL_MS,
+                        TimeUnit.MILLISECONDS
+                    );
+                }
             }
 
             @Override
@@ -975,10 +1040,7 @@ public class TabController {
             @Override
             public void onComplete(ghidrassist.agent.react.ReActResult result) {
                 // Cancel periodic render task
-                if (renderTask != null) {
-                    renderTask.cancel(false);
-                    renderTask = null;
-                }
+                cancelActiveRenderTask();
 
                 synchronized (historyLock) {
                     if (!currentIterationOutput.isEmpty()) {
@@ -994,10 +1056,7 @@ public class TabController {
             @Override
             public void onError(Throwable error) {
                 // Cancel periodic render task
-                if (renderTask != null) {
-                    renderTask.cancel(false);
-                    renderTask = null;
-                }
+                cancelActiveRenderTask();
 
                 synchronized (historyLock) {
                     chronologicalHistory.append("\n\n❌ **ERROR**: ").append(error.getMessage()).append("\n");

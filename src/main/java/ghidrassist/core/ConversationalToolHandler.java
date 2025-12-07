@@ -39,6 +39,7 @@ public class ConversationalToolHandler {
     private int rateLimitRetries = 0;
     private static final int MAX_RATE_LIMIT_RETRIES = 3;
     private static final int MAX_CONVERSATION_HISTORY = 20; // Keep last 20 messages to prevent token overflow
+    private static final int API_TIMEOUT_SECONDS = 120; // Timeout for blocking API calls
     
     public ConversationalToolHandler(
             LlmApiClient apiClient,
@@ -117,72 +118,94 @@ public class ConversationalToolHandler {
                 apiClient.getProvider() instanceof LMStudioProvider) {
                 streamingConversationWithFunctions();
             } else {
-                CompletableFuture.runAsync(() -> {
+                // Non-streaming providers (OpenWebUI, Ollama, etc.) - use timeout protection
+                CompletableFuture<String> apiFuture = CompletableFuture.supplyAsync(() -> {
                     try {
                         // Check cancellation before making API call
                         if (isCancelled) {
-                            return;
+                            return null;
                         }
 
-                        String fullResponse = apiClient.createChatCompletionWithFunctionsFullResponse(
+                        return apiClient.createChatCompletionWithFunctionsFullResponse(
                             conversationHistory, availableFunctions);
 
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+                // Apply timeout to prevent indefinite hangs
+                apiFuture
+                    .orTimeout(API_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                    .thenAccept(fullResponse -> {
                         // Check cancellation after API call
-                        if (isCancelled) {
+                        if (isCancelled || fullResponse == null) {
                             return;
                         }
 
                         // Parse the response to check for tool calls and finish_reason
                         handleLLMResponse(fullResponse);
+                    })
+                    .exceptionally(e -> {
+                        Throwable cause = e.getCause() != null ? e.getCause() : e;
 
-                    } catch (Exception e) {
-                        // Handle rate limit errors with additional backoff and retry
-                        if (e instanceof ghidrassist.apiprovider.exceptions.RateLimitException ||
-                        e.getMessage().contains("rate limit") || 
-                        e.getMessage().contains("429")) {
-                        
-                        rateLimitRetries++;
-                        
-                        if (rateLimitRetries <= MAX_RATE_LIMIT_RETRIES) {
-                            Msg.warn(this, String.format("Rate limit exceeded during conversational tool calling (attempt %d/%d). Implementing additional backoff...", 
-                                rateLimitRetries, MAX_RATE_LIMIT_RETRIES));
-                            
-                            // Implement progressively longer backoff
-                            int backoffSeconds = 30 * rateLimitRetries; // 30s, 60s, 90s
-                            userHandler.onUpdate(String.format("⏳ Rate limit exceeded. Pausing for %d seconds...\n", 
-                                backoffSeconds));
-                            
-                            // Schedule retry after progressively longer delay
-                            CompletableFuture.delayedExecutor(backoffSeconds, java.util.concurrent.TimeUnit.SECONDS)
-                                .execute(() -> {
-                                    if (isConversationActive && !isCancelled) {
-                                        userHandler.onUpdate("🔄 Resuming...\n");
-                                        continueConversation();
-                                    }
-                                });
-                        } else {
-                            // Too many rate limit retries - give up
+                        // Handle timeout specifically
+                        if (e instanceof java.util.concurrent.TimeoutException ||
+                            cause instanceof java.util.concurrent.TimeoutException) {
+                            Msg.warn(this, "API call timed out after " + API_TIMEOUT_SECONDS + " seconds");
                             isConversationActive = false;
-                            userHandler.onUpdate("❌ Too many rate limit errors. Please try again later.\n");
-                            userHandler.onError(new Exception("Rate limit exceeded maximum retry attempts. Please try again later or reduce query complexity."));
-                            
-                            // Notify completion callback
+                            userHandler.onUpdate("❌ **Request timed out** - The model stopped responding. Please try again.\n");
+                            userHandler.onError(new Exception("API request timed out after " + API_TIMEOUT_SECONDS + " seconds. The model may be overloaded."));
+
+                            if (onCompletionCallback != null) {
+                                onCompletionCallback.run();
+                            }
+                            return null;
+                        }
+
+                        // Handle rate limit errors with additional backoff and retry
+                        String errorMsg = cause.getMessage() != null ? cause.getMessage() : "";
+                        if (cause instanceof ghidrassist.apiprovider.exceptions.RateLimitException ||
+                            errorMsg.contains("rate limit") ||
+                            errorMsg.contains("429")) {
+
+                            rateLimitRetries++;
+
+                            if (rateLimitRetries <= MAX_RATE_LIMIT_RETRIES) {
+                                Msg.warn(this, String.format("Rate limit exceeded during conversational tool calling (attempt %d/%d). Implementing additional backoff...",
+                                    rateLimitRetries, MAX_RATE_LIMIT_RETRIES));
+
+                                int backoffSeconds = 30 * rateLimitRetries;
+                                userHandler.onUpdate(String.format("⏳ Rate limit exceeded. Pausing for %d seconds...\n",
+                                    backoffSeconds));
+
+                                CompletableFuture.delayedExecutor(backoffSeconds, java.util.concurrent.TimeUnit.SECONDS)
+                                    .execute(() -> {
+                                        if (isConversationActive && !isCancelled) {
+                                            userHandler.onUpdate("🔄 Resuming...\n");
+                                            continueConversation();
+                                        }
+                                    });
+                            } else {
+                                isConversationActive = false;
+                                userHandler.onUpdate("❌ Too many rate limit errors. Please try again later.\n");
+                                userHandler.onError(new Exception("Rate limit exceeded maximum retry attempts. Please try again later or reduce query complexity."));
+
+                                if (onCompletionCallback != null) {
+                                    onCompletionCallback.run();
+                                }
+                            }
+                        } else {
+                            // Non-rate-limit errors stop the conversation
+                            isConversationActive = false;
+                            userHandler.onError(cause instanceof Exception ? (Exception) cause : new Exception(cause));
+
                             if (onCompletionCallback != null) {
                                 onCompletionCallback.run();
                             }
                         }
-                    } else {
-                        // Non-rate-limit errors stop the conversation
-                        isConversationActive = false;
-                        userHandler.onError(e);
-                        
-                        // Notify completion callback
-                        if (onCompletionCallback != null) {
-                            onCompletionCallback.run();
-                        }
-                    }
-                }
-            });
+                        return null;
+                    });
             }
 
         } catch (Exception e) {
@@ -273,8 +296,8 @@ public class ConversationalToolHandler {
                             // Execute tools after text streaming completes
                             handleToolCallsFromStream(toolCalls);
                         } else {
-                            // Conversation complete
-                            handleConversationEndFromStream();
+                            // Conversation complete - pass the full response text
+                            handleConversationEndFromStream(fullText);
                         }
                     }
 
@@ -386,7 +409,8 @@ public class ConversationalToolHandler {
                         if ("tool_calls".equals(stopReason) && !toolCalls.isEmpty()) {
                             handleToolCallsFromOpenAIStream(toolCalls);
                         } else {
-                            handleConversationEndFromStream();
+                            // Conversation complete - pass the full response text
+                            handleConversationEndFromStream(fullText);
                         }
                     }
 
@@ -458,7 +482,8 @@ public class ConversationalToolHandler {
                         if ("tool_calls".equals(stopReason) && !toolCalls.isEmpty()) {
                             handleToolCallsFromLMStudioStream(toolCalls);
                         } else {
-                            handleConversationEndFromStream();
+                            // Conversation complete - pass the full response text
+                            handleConversationEndFromStream(fullText);
                         }
                     }
 
@@ -647,11 +672,22 @@ public class ConversationalToolHandler {
     /**
      * Handle conversation end from streaming (no tool calls).
      */
-    private void handleConversationEndFromStream() {
+    private void handleConversationEndFromStream(String fullText) {
         isConversationActive = false;
 
+        // Pass the accumulated response text to onComplete
+        String responseText = fullText != null ? fullText : "";
+
+        // Debug logging
+        Msg.info(this, String.format("🏁 Conversation end from stream. Response length: %d chars",
+            responseText.length()));
+        if (responseText.length() > 0) {
+            String preview = responseText.length() > 100 ? responseText.substring(0, 100) + "..." : responseText;
+            Msg.info(this, "🏁 Response preview: " + preview);
+        }
+
         javax.swing.SwingUtilities.invokeLater(() -> {
-            userHandler.onComplete("");
+            userHandler.onComplete(responseText);
         });
 
         // Notify completion callback
