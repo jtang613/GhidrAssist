@@ -1,5 +1,7 @@
 package ghidrassist.agent.react;
 
+import ghidra.util.Msg;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -36,6 +38,7 @@ public class FindingsCache {
     }
 
     private final List<Finding> findings;
+    private final List<String> iterationSummaries;
     private final int maxFindings;
 
     public FindingsCache() {
@@ -44,6 +47,7 @@ public class FindingsCache {
 
     public FindingsCache(int maxFindings) {
         this.findings = new ArrayList<>();
+        this.iterationSummaries = new ArrayList<>();
         this.maxFindings = maxFindings;
     }
 
@@ -206,6 +210,7 @@ public class FindingsCache {
      */
     public void clear() {
         findings.clear();
+        iterationSummaries.clear();
     }
 
     /**
@@ -213,5 +218,62 @@ public class FindingsCache {
      */
     public String toCompactString() {
         return String.format("%d findings accumulated", findings.size());
+    }
+
+    /**
+     * Add a summary from an iteration.
+     * This captures the LLM's analytical summary after each iteration.
+     */
+    public void addIterationSummary(String summary) {
+        if (summary != null && !summary.trim().isEmpty()) {
+            String trimmed = summary.trim();
+            iterationSummaries.add(trimmed);
+
+            // Debug logging: Show what we're capturing
+            String preview = trimmed.length() > 100 ? trimmed.substring(0, 100) + "..." : trimmed;
+            Msg.info(this, String.format("📝 Captured iteration summary #%d: %s",
+                iterationSummaries.size(), preview));
+        } else {
+            Msg.warn(this, "⚠️ Attempted to add empty/null iteration summary - skipping");
+        }
+    }
+
+    /**
+     * Format iteration summaries for synthesis prompt.
+     * Shows last 10 iterations by default.
+     */
+    public String formatIterationSummaries() {
+        return formatIterationSummaries(10);
+    }
+
+    /**
+     * Format iteration summaries with custom limit.
+     */
+    public String formatIterationSummaries(int maxIterations) {
+        if (iterationSummaries.isEmpty()) {
+            Msg.warn(this, "⚠️ formatIterationSummaries called but NO summaries were collected!");
+            return "No iteration summaries available.";
+        }
+
+        // Get last N iterations (most recent)
+        int startIdx = Math.max(0, iterationSummaries.size() - maxIterations);
+        List<String> recent = iterationSummaries.subList(startIdx, iterationSummaries.size());
+
+        // Debug logging: Show what we're sending to synthesis
+        Msg.info(this, String.format("📤 Formatting %d iteration summaries for synthesis (out of %d total):",
+            recent.size(), iterationSummaries.size()));
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < recent.size(); i++) {
+            String summary = recent.get(i);
+            String preview = summary.length() > 100 ? summary.substring(0, 100) + "..." : summary;
+            Msg.info(this, String.format("  Iteration %d preview: %s", startIdx + i + 1, preview));
+
+            sb.append("### Iteration ").append(startIdx + i + 1).append("\n");
+            sb.append(summary).append("\n\n");
+        }
+
+        Msg.info(this, String.format("📤 Total synthesis context length: %d characters", sb.length()));
+        return sb.toString();
     }
 }

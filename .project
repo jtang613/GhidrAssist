@@ -2,22 +2,23 @@
 <projectDescription>
 	<name>GhidrAssist</name>
 	<comment></comment>
-	<projects/>
-	<natures>
-		<nature>org.eclipse.jdt.core.javanature</nature>
-	</natures>
+	<projects>
+	</projects>
 	<buildSpec>
 		<buildCommand>
 			<name>org.eclipse.jdt.core.javabuilder</name>
-			<arguments/>
+			<arguments>
+			</arguments>
 		</buildCommand>
 	</buildSpec>
+	<natures>
+		<nature>org.eclipse.jdt.core.javanature</nature>
+	</natures>
 	<linkedResources>
 		<link>
 			<name>Ghidra</name>
 			<type>2</type>
-			<location>/home/jtang613/tools/ghidra_11.4.2_PUBLIC</location>
+			<location>/home/jtang613/tools/ghidra_11.4.3_PUBLIC</location>
 		</link>
 	</linkedResources>
-	<filteredResources/>
 </projectDescription>
