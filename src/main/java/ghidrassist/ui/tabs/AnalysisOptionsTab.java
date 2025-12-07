@@ -5,7 +5,7 @@ import java.awt.*;
 import ghidrassist.core.TabController;
 
 public class AnalysisOptionsTab extends JPanel {
-    private static final String VERSION = "1.2.0";
+    private static final String VERSION = "1.3.0";
 
     private final TabController controller;
     private JTextArea contextArea;
