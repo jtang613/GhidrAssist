@@ -64,7 +64,7 @@ public class GhidrAssistUI extends JPanel {
             controller.handleContextLoad();
             
             // Load RAG file list
-            controller.loadIndexedFiles(ragManagementTab.getDocumentList());
+            controller.refreshRAGDocuments();
         });
         
         tabbedPane.addChangeListener(e -> {
