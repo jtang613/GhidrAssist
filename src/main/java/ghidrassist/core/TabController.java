@@ -7,13 +7,20 @@ import ghidra.util.Msg;
 import ghidra.util.task.Task;
 import ghidra.util.task.TaskLauncher;
 import ghidra.util.task.TaskMonitor;
+import ghidrassist.AnalysisDB;
 import ghidrassist.AnalysisDB.Analysis;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.apiprovider.ReasoningConfig;
+import ghidrassist.chat.ChatChange;
+import ghidrassist.chat.ChatEditManager;
+import ghidrassist.chat.ChangeType;
+import ghidrassist.chat.PersistedChatMessage;
 import ghidrassist.services.*;
 import ghidrassist.ui.tabs.*;
+
+import java.sql.Timestamp;
 
 import javax.swing.*;
 import javax.swing.event.HyperlinkEvent;
@@ -64,6 +71,9 @@ public class TabController {
     private final ScheduledExecutorService updateScheduler = Executors.newSingleThreadScheduledExecutor();
     private volatile ScheduledFuture<?> activeRenderTask;  // Tracked at class level for proper cancellation
     private final Object renderLock = new Object();
+
+    // Chat edit manager for chunked editing
+    private final ChatEditManager chatEditManager = new ChatEditManager();
 
     // UI Component references
     private ExplainTab explainTab;
@@ -783,6 +793,211 @@ public class TabController {
                 queryTab.updateChatHistory(sessions);
             });
         }
+    }
+
+    // ==== Chat Edit Mode Handlers ====
+
+    /**
+     * Handle when user clicks Edit button - prepare editable content
+     */
+    public void handleChatEditStart() {
+        if (queryTab == null) {
+            return;
+        }
+
+        int currentSessionId = queryService.getCurrentSessionId();
+        Msg.info(this, "Edit Start: currentSessionId=" + currentSessionId);
+        if (currentSessionId == -1) {
+            Msg.showInfo(this, queryTab, "No Chat",
+                    "No active chat session to edit.");
+            queryTab.exitEditMode();
+            return;
+        }
+
+        // Load messages from database if not already loaded
+        queryService.loadMessagesFromDatabase();
+
+        // Get messages for current session
+        List<PersistedChatMessage> messages = queryService.getMessages();
+        Msg.info(this, "Edit Start: loaded " + messages.size() + " messages from memory");
+        if (messages.isEmpty()) {
+            Msg.showInfo(this, queryTab, "Empty Chat",
+                    "No messages to edit in this chat.");
+            queryTab.exitEditMode();
+            return;
+        }
+
+        // Get chat name from sessions list
+        List<AnalysisDB.ChatSession> sessions = queryService.getChatSessions();
+        String chatName = "Untitled";
+        for (AnalysisDB.ChatSession session : sessions) {
+            if (session.getId() == currentSessionId) {
+                chatName = session.getDescription();
+                break;
+            }
+        }
+
+        // Generate editable content with chunk markers
+        String editableContent = chatEditManager.generateEditableContent(chatName, messages);
+        queryTab.setEditableContent(editableContent);
+    }
+
+    /**
+     * Handle when user clicks Save button - parse and apply changes
+     */
+    public void handleChatEditSave(String editedContent) {
+        if (queryTab == null || editedContent == null) {
+            Msg.info(this, "Edit Save: null queryTab or editedContent");
+            return;
+        }
+
+        int currentSessionId = queryService.getCurrentSessionId();
+        Msg.info(this, "Edit Save: currentSessionId=" + currentSessionId);
+        if (currentSessionId == -1) {
+            return;
+        }
+
+        String programHash = getProgramHash();
+        Msg.info(this, "Edit Save: programHash=" + (programHash != null ? programHash.substring(0, 8) + "..." : "null"));
+        if (programHash == null) {
+            return;
+        }
+
+        // Detect changes
+        List<ChatChange> changes = chatEditManager.parseEditedContent(editedContent);
+        Msg.info(this, "Edit Save: detected " + changes.size() + " changes");
+        for (ChatChange change : changes) {
+            Msg.info(this, "  Change: " + change.getChangeType() + " - " + change.getChunkId());
+        }
+
+        if (!changes.isEmpty()) {
+            applyChanges(programHash, currentSessionId, changes, editedContent);
+            reloadCurrentChat();
+        } else {
+            // No changes detected - still save all messages as a full rebuild
+            Msg.info(this, "Edit Save: no changes detected, performing full rebuild anyway");
+            List<ChatEditManager.ExtractedMessage> finalMessages =
+                    chatEditManager.extractAllMessages(editedContent);
+            Msg.info(this, "Edit Save: extracted " + finalMessages.size() + " messages for rebuild");
+
+            if (!finalMessages.isEmpty()) {
+                AnalysisDB analysisDB = queryService.getAnalysisDB();
+                analysisDB.deleteMessages(programHash, currentSessionId);
+
+                List<PersistedChatMessage> newMessageList = new ArrayList<>();
+                for (int i = 0; i < finalMessages.size(); i++) {
+                    ChatEditManager.ExtractedMessage msg = finalMessages.get(i);
+                    Msg.info(this, "  Saving message " + i + ": role=" + msg.role);
+                    analysisDB.saveMessage(
+                            programHash, currentSessionId, i,
+                            "edited", "{}",
+                            msg.role, msg.content, "edited"
+                    );
+
+                    PersistedChatMessage persistedMsg = new PersistedChatMessage(
+                            null, msg.role, msg.content,
+                            new Timestamp(System.currentTimeMillis()), i
+                    );
+                    persistedMsg.setProviderType("edited");
+                    persistedMsg.setMessageType("edited");
+                    newMessageList.add(persistedMsg);
+                }
+
+                queryService.setMessages(newMessageList);
+            }
+            reloadCurrentChat();
+        }
+    }
+
+    /**
+     * Apply detected changes to the database
+     */
+    private void applyChanges(String programHash, int chatId,
+                              List<ChatChange> changes, String editedContent) {
+        boolean messagesUpdated = false;
+        boolean titleUpdated = false;
+        String newTitle = null;
+
+        // Detect what changed
+        for (ChatChange change : changes) {
+            if (change.getChangeType() == ChangeType.MODIFIED) {
+                if (change.isTitleChange()) {
+                    titleUpdated = true;
+                    newTitle = change.getNewContent();
+                } else {
+                    messagesUpdated = true;
+                }
+            } else if (change.getChangeType() == ChangeType.DELETED ||
+                       change.getChangeType() == ChangeType.ADDED) {
+                messagesUpdated = true;
+            }
+        }
+
+        // Full rebuild from scratch
+        if (messagesUpdated) {
+            List<ChatEditManager.ExtractedMessage> finalMessages =
+                    chatEditManager.extractAllMessages(editedContent);
+
+            AnalysisDB analysisDB = queryService.getAnalysisDB();
+
+            // Delete existing messages
+            analysisDB.deleteMessages(programHash, chatId);
+
+            // Save each message
+            List<PersistedChatMessage> newMessageList = new ArrayList<>();
+            for (int i = 0; i < finalMessages.size(); i++) {
+                ChatEditManager.ExtractedMessage msg = finalMessages.get(i);
+                analysisDB.saveMessage(
+                        programHash, chatId, i,
+                        "edited", "{}",
+                        msg.role, msg.content, "edited"
+                );
+
+                PersistedChatMessage persistedMsg = new PersistedChatMessage(
+                        null, msg.role, msg.content,
+                        new Timestamp(System.currentTimeMillis()), i
+                );
+                persistedMsg.setProviderType("edited");
+                persistedMsg.setMessageType("edited");
+                newMessageList.add(persistedMsg);
+            }
+
+            // Update in-memory state
+            queryService.setMessages(newMessageList);
+        }
+
+        // Handle title changes
+        if (titleUpdated && newTitle != null) {
+            queryService.updateChatDescription(chatId, newTitle);
+            refreshChatHistory();
+        }
+    }
+
+    /**
+     * Reload and display the current chat
+     */
+    private void reloadCurrentChat() {
+        if (queryTab == null) {
+            return;
+        }
+
+        // Get updated conversation history
+        String conversationHistory = queryService.getConversationHistory();
+
+        // Convert to HTML and display
+        String html = markdownHelper.markdownToHtml(conversationHistory);
+        queryTab.setResponseText(html);
+        queryTab.setMarkdownSource(conversationHistory);
+    }
+
+    /**
+     * Get program hash for current program
+     */
+    private String getProgramHash() {
+        if (plugin.getCurrentProgram() != null) {
+            return plugin.getCurrentProgram().getExecutableSHA256();
+        }
+        return null;
     }
 
     public boolean isQueryRunning() {

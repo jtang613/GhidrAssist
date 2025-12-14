@@ -4,6 +4,8 @@ import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.text.*;
 import java.awt.*;
+import java.awt.datatransfer.Clipboard;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
 import java.awt.event.MouseAdapter;
@@ -12,6 +14,7 @@ import java.text.SimpleDateFormat;
 import java.util.TimeZone;
 import java.util.Date;
 import ghidra.util.Msg;
+import ghidrassist.core.MarkdownHelper;
 import ghidrassist.core.TabController;
 import ghidrassist.mcp2.tools.MCPToolManager;
 import ghidrassist.mcp2.server.MCPServerRegistry;
@@ -19,7 +22,8 @@ import ghidrassist.AnalysisDB;
 
 public class QueryTab extends JPanel {
     private static final long serialVersionUID = 1L;
-	private final TabController controller;
+    private final TabController controller;
+    private final MarkdownHelper markdownHelper;
     private JTextPane responseTextPane;  // Changed from JEditorPane for better performance
     private StyledDocument responseDocument;
     private JTextArea queryTextArea;
@@ -32,6 +36,14 @@ public class QueryTab extends JPanel {
     private JTable chatHistoryTable;
     private DefaultTableModel chatHistoryModel;
     private SimpleDateFormat dateFormat;
+
+    // Edit mode components
+    private JButton editSaveButton;
+    private JTextArea markdownEditArea;
+    private JPanel contentPanel;
+    private CardLayout contentLayout;
+    private boolean isEditMode = false;
+    private String currentMarkdownSource = "";
     private static final String QUERY_HINT_TEXT = 
         "#line to include the current disassembly line.\n" +
         "#func to include current function disassembly.\n" +
@@ -41,6 +53,7 @@ public class QueryTab extends JPanel {
     public QueryTab(TabController controller) {
         super(new BorderLayout());
         this.controller = controller;
+        this.markdownHelper = new MarkdownHelper();
         this.dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
         this.dateFormat.setTimeZone(TimeZone.getDefault()); // Use local timezone
 
@@ -51,12 +64,13 @@ public class QueryTab extends JPanel {
 
         // Enable double buffering for smoother updates
         responseTextPane.setDoubleBuffered(true);
-        
+
         initializeComponents();
         layoutComponents();
         setupListeners();
         setupMCPDetection();
         setupChatHistoryRefresh();
+        setupContextMenu();
     }
 
     private void initializeComponents() {
@@ -84,7 +98,18 @@ public class QueryTab extends JPanel {
         submitButton = new JButton("Submit");
         newButton = new JButton("New");
         deleteButton = new JButton("Delete");
-        
+        editSaveButton = new JButton("Edit");
+
+        // Initialize markdown edit area for edit mode
+        markdownEditArea = new JTextArea();
+        markdownEditArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        markdownEditArea.setLineWrap(true);
+        markdownEditArea.setWrapStyleWord(true);
+
+        // Setup card layout for switching between view and edit modes
+        contentLayout = new CardLayout();
+        contentPanel = new JPanel(contentLayout);
+
         // Initialize chat history table
         chatHistoryModel = new DefaultTableModel(new Object[]{"Description", "Date"}, 0) {
             @Override
@@ -104,41 +129,53 @@ public class QueryTab extends JPanel {
     }
 
     private void layoutComponents() {
-        // Create panel for checkboxes
+        // Create top panel with checkboxes and edit button
+        JPanel topPanel = new JPanel(new BorderLayout());
+
         JPanel checkboxPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         checkboxPanel.add(useRAGCheckBox);
         checkboxPanel.add(useMCPCheckBox);
         checkboxPanel.add(useAgenticCheckBox);
-        add(checkboxPanel, BorderLayout.NORTH);
+        topPanel.add(checkboxPanel, BorderLayout.CENTER);
 
-        // Create scroll panes
+        JPanel editPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        editPanel.add(editSaveButton);
+        topPanel.add(editPanel, BorderLayout.EAST);
+
+        add(topPanel, BorderLayout.NORTH);
+
+        // Setup content panel with CardLayout (view mode + edit mode)
         JScrollPane responseScrollPane = new JScrollPane(responseTextPane);
+        JScrollPane editScrollPane = new JScrollPane(markdownEditArea);
+        contentPanel.add(responseScrollPane, "view");
+        contentPanel.add(editScrollPane, "edit");
+
         JScrollPane queryScrollPane = new JScrollPane(queryTextArea);
-        
+
         // Create chat history scroll pane with default height of 2 rows
         JScrollPane chatHistoryScrollPane = new JScrollPane(chatHistoryTable);
         chatHistoryScrollPane.setPreferredSize(new Dimension(0, 50)); // About 2 rows height
         chatHistoryScrollPane.setMinimumSize(new Dimension(0, 40));
-        
+
         // Create a panel for chat history and query area
         JPanel bottomPanel = new JPanel(new BorderLayout());
         bottomPanel.add(chatHistoryScrollPane, BorderLayout.NORTH);
         bottomPanel.add(queryScrollPane, BorderLayout.CENTER);
-        
+
         // Create main split pane between response and (chat history + query)
-        JSplitPane mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, 
-            responseScrollPane, bottomPanel);
+        JSplitPane mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
+            contentPanel, bottomPanel);
         mainSplitPane.setResizeWeight(0.7); // Give more space to response area
-        
+
         // Create inner split pane for chat history and query area
         JSplitPane bottomSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
             chatHistoryScrollPane, queryScrollPane);
         bottomSplitPane.setResizeWeight(0.3); // Chat history takes less space than query
-        
+
         // Replace the bottom panel with the split pane
         bottomPanel.removeAll();
         bottomPanel.add(bottomSplitPane, BorderLayout.CENTER);
-        
+
         add(mainSplitPane, BorderLayout.CENTER);
 
         JPanel buttonPanel = new JPanel();
@@ -157,8 +194,30 @@ public class QueryTab extends JPanel {
         ));
 
         newButton.addActionListener(e -> controller.handleNewChatSession());
-        
+
         deleteButton.addActionListener(e -> controller.handleDeleteCurrentSession());
+
+        // Edit/Save button handler
+        editSaveButton.addActionListener(e -> {
+            if (isEditMode) {
+                // Save mode - capture content and notify controller
+                currentMarkdownSource = markdownEditArea.getText();
+                controller.handleChatEditSave(currentMarkdownSource);
+
+                // Switch to view mode
+                contentLayout.show(contentPanel, "view");
+                editSaveButton.setText("Edit");
+                isEditMode = false;
+            } else {
+                // Edit mode - notify controller to prepare content
+                controller.handleChatEditStart();
+
+                // Switch to edit mode
+                contentLayout.show(contentPanel, "edit");
+                editSaveButton.setText("Save");
+                isEditMode = true;
+            }
+        });
         
         // Chat history table selection listener
         chatHistoryTable.getSelectionModel().addListSelectionListener(e -> {
@@ -430,5 +489,171 @@ public class QueryTab extends JPanel {
     public int getSelectedChatSession() {
         return chatHistoryTable.getSelectedRow();
     }
-    
+
+    /**
+     * Setup context menu for clipboard operations
+     */
+    private void setupContextMenu() {
+        JPopupMenu contextMenu = new JPopupMenu();
+
+        JMenuItem copyMarkdown = new JMenuItem("Copy as Markdown");
+        copyMarkdown.addActionListener(e -> {
+            String selectedText = isEditMode ?
+                    markdownEditArea.getSelectedText() :
+                    getSelectedMarkdownText();
+            if (selectedText != null && !selectedText.isEmpty()) {
+                copyToClipboard(selectedText);
+            }
+        });
+
+        JMenuItem copyHtml = new JMenuItem("Copy as HTML");
+        copyHtml.addActionListener(e -> {
+            String selectedText = responseTextPane.getSelectedText();
+            if (selectedText != null && !selectedText.isEmpty()) {
+                // For HTML, get from the rendered content
+                copyToClipboard(selectedText);
+            }
+        });
+
+        JMenuItem copyPlainText = new JMenuItem("Copy as Plain Text");
+        copyPlainText.addActionListener(e -> {
+            String selectedText = isEditMode ?
+                    markdownEditArea.getSelectedText() :
+                    responseTextPane.getSelectedText();
+            if (selectedText != null && !selectedText.isEmpty()) {
+                // Strip markdown formatting for plain text
+                String plainText = selectedText.replaceAll("\\*\\*|__|`|#+ |\\[|\\]\\([^)]*\\)", "");
+                copyToClipboard(plainText);
+            }
+        });
+
+        JMenuItem copyAll = new JMenuItem("Copy All as Markdown");
+        copyAll.addActionListener(e -> {
+            copyToClipboard(currentMarkdownSource);
+        });
+
+        JMenuItem selectAll = new JMenuItem("Select All");
+        selectAll.addActionListener(e -> {
+            if (isEditMode) {
+                markdownEditArea.selectAll();
+            } else {
+                responseTextPane.selectAll();
+            }
+        });
+
+        JMenuItem paste = new JMenuItem("Paste");
+        paste.addActionListener(e -> {
+            if (isEditMode) {
+                markdownEditArea.paste();
+            }
+        });
+
+        contextMenu.add(copyMarkdown);
+        contextMenu.add(copyHtml);
+        contextMenu.add(copyPlainText);
+        contextMenu.addSeparator();
+        contextMenu.add(copyAll);
+        contextMenu.add(selectAll);
+        contextMenu.addSeparator();
+        contextMenu.add(paste);
+
+        // Show paste only in edit mode
+        contextMenu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+            @Override
+            public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
+                paste.setEnabled(isEditMode);
+            }
+            @Override
+            public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {}
+            @Override
+            public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {}
+        });
+
+        responseTextPane.setComponentPopupMenu(contextMenu);
+        markdownEditArea.setComponentPopupMenu(contextMenu);
+    }
+
+    /**
+     * Get selected markdown text based on selection in view mode
+     */
+    private String getSelectedMarkdownText() {
+        // If there's selected text in the response pane, try to map to markdown
+        String selectedText = responseTextPane.getSelectedText();
+        if (selectedText != null && !selectedText.isEmpty()) {
+            // For now, return the selected text - could be enhanced to map to actual markdown
+            return selectedText;
+        }
+        return currentMarkdownSource;
+    }
+
+    /**
+     * Copy text to system clipboard
+     */
+    private void copyToClipboard(String text) {
+        if (text != null && !text.isEmpty()) {
+            try {
+                Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
+                clipboard.setContents(new StringSelection(text), null);
+            } catch (Exception e) {
+                Msg.error(this, "Failed to copy to clipboard: " + e.getMessage());
+            }
+        }
+    }
+
+    // Edit mode public methods
+
+    /**
+     * Set editable content for edit mode
+     */
+    public void setEditableContent(String markdown) {
+        currentMarkdownSource = markdown;
+        markdownEditArea.setText(markdown);
+    }
+
+    /**
+     * Get the current editable content
+     */
+    public String getEditableContent() {
+        return isEditMode ? markdownEditArea.getText() : currentMarkdownSource;
+    }
+
+    /**
+     * Set the markdown source (for view mode)
+     */
+    public void setMarkdownSource(String markdown) {
+        currentMarkdownSource = markdown;
+    }
+
+    /**
+     * Get the current markdown source
+     */
+    public String getMarkdownSource() {
+        return currentMarkdownSource;
+    }
+
+    /**
+     * Check if currently in edit mode
+     */
+    public boolean isInEditMode() {
+        return isEditMode;
+    }
+
+    /**
+     * Exit edit mode without saving
+     */
+    public void exitEditMode() {
+        if (isEditMode) {
+            contentLayout.show(contentPanel, "view");
+            editSaveButton.setText("Edit");
+            isEditMode = false;
+        }
+    }
+
+    /**
+     * Get the MarkdownHelper instance
+     */
+    public MarkdownHelper getMarkdownHelper() {
+        return markdownHelper;
+    }
+
 }
