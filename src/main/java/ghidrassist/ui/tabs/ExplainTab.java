@@ -2,6 +2,9 @@ package ghidrassist.ui.tabs;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.datatransfer.Clipboard;
+import java.awt.datatransfer.StringSelection;
+import ghidra.util.Msg;
 import ghidrassist.core.MarkdownHelper;
 import ghidrassist.core.TabController;
 
@@ -29,6 +32,7 @@ public class ExplainTab extends JPanel {
         initializeComponents();
         layoutComponents();
         setupListeners();
+        setupContextMenu();
     }
 
     private void initializeComponents() {
@@ -157,5 +161,119 @@ public class ExplainTab extends JPanel {
 
     public void setLineButtonText(String text) {
         explainLineButton.setText(text);
+    }
+
+    /**
+     * Setup context menu for clipboard operations
+     */
+    private void setupContextMenu() {
+        JPopupMenu contextMenu = new JPopupMenu();
+
+        JMenuItem copyMarkdown = new JMenuItem("Copy as Markdown");
+        copyMarkdown.addActionListener(e -> {
+            String selectedText = isEditMode ?
+                    markdownTextArea.getSelectedText() :
+                    getSelectedMarkdownText();
+            if (selectedText != null && !selectedText.isEmpty()) {
+                copyToClipboard(selectedText);
+            }
+        });
+
+        JMenuItem copyHtml = new JMenuItem("Copy as HTML");
+        copyHtml.addActionListener(e -> {
+            String selectedText = explainTextPane.getSelectedText();
+            if (selectedText != null && !selectedText.isEmpty()) {
+                copyToClipboard(selectedText);
+            }
+        });
+
+        JMenuItem copyPlainText = new JMenuItem("Copy as Plain Text");
+        copyPlainText.addActionListener(e -> {
+            String selectedText = isEditMode ?
+                    markdownTextArea.getSelectedText() :
+                    explainTextPane.getSelectedText();
+            if (selectedText != null && !selectedText.isEmpty()) {
+                // Strip markdown formatting for plain text
+                String plainText = selectedText.replaceAll("\\*\\*|__|`|#+ |\\[|\\]\\([^)]*\\)", "");
+                copyToClipboard(plainText);
+            }
+        });
+
+        JMenuItem copyAll = new JMenuItem("Copy All as Markdown");
+        copyAll.addActionListener(e -> {
+            copyToClipboard(currentMarkdown);
+        });
+
+        JMenuItem selectAll = new JMenuItem("Select All");
+        selectAll.addActionListener(e -> {
+            if (isEditMode) {
+                markdownTextArea.selectAll();
+            } else {
+                explainTextPane.selectAll();
+            }
+        });
+
+        JMenuItem paste = new JMenuItem("Paste");
+        paste.addActionListener(e -> {
+            if (isEditMode) {
+                markdownTextArea.paste();
+            }
+        });
+
+        contextMenu.add(copyMarkdown);
+        contextMenu.add(copyHtml);
+        contextMenu.add(copyPlainText);
+        contextMenu.addSeparator();
+        contextMenu.add(copyAll);
+        contextMenu.add(selectAll);
+        contextMenu.addSeparator();
+        contextMenu.add(paste);
+
+        // Show paste only in edit mode
+        contextMenu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+            @Override
+            public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) {
+                paste.setEnabled(isEditMode);
+            }
+            @Override
+            public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) {}
+            @Override
+            public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) {}
+        });
+
+        explainTextPane.setComponentPopupMenu(contextMenu);
+        markdownTextArea.setComponentPopupMenu(contextMenu);
+    }
+
+    /**
+     * Get selected markdown text based on selection in view mode
+     */
+    private String getSelectedMarkdownText() {
+        String selectedText = explainTextPane.getSelectedText();
+        if (selectedText != null && !selectedText.isEmpty()) {
+            return selectedText;
+        }
+        return currentMarkdown;
+    }
+
+    /**
+     * Copy text to system clipboard
+     */
+    private void copyToClipboard(String text) {
+        if (text != null && !text.isEmpty()) {
+            try {
+                Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
+                clipboard.setContents(new StringSelection(text), null);
+            } catch (Exception e) {
+                Msg.error(this, "Failed to copy to clipboard: " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Get the current markdown content
+     */
+    public String getCurrentMarkdown() {
+        return currentMarkdown;
     }
 }
