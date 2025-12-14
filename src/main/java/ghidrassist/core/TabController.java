@@ -18,6 +18,7 @@ import ghidrassist.chat.ChatEditManager;
 import ghidrassist.chat.ChangeType;
 import ghidrassist.chat.PersistedChatMessage;
 import ghidrassist.services.*;
+import ghidrassist.services.RAGManagementService.RAGIndexStats;
 import ghidrassist.ui.tabs.*;
 
 import java.sql.Timestamp;
@@ -559,56 +560,167 @@ public class TabController {
     }
 
     // ==== RAG Management Operations ====
-    
-    public void handleAddDocuments(JList<String> documentList) {
+
+    /**
+     * Handle adding documents to RAG index.
+     */
+    public void handleAddDocuments() {
         JFileChooser fileChooser = createDocumentFileChooser();
-        
+
         int result = fileChooser.showOpenDialog(ragManagementTab);
         if (result == JFileChooser.APPROVE_OPTION) {
             File[] files = fileChooser.getSelectedFiles();
             try {
                 ragManagementService.addDocuments(files);
-                loadIndexedFiles(documentList);
+                refreshRAGDocuments();
                 Msg.showInfo(this, ragManagementTab, "Success", "Documents added to RAG.");
             } catch (Exception ex) {
-                Msg.showError(this, ragManagementTab, "Error", 
-                    "Failed to ingest documents: " + ex.getMessage());
+                Msg.showError(this, ragManagementTab, "Error",
+                        "Failed to ingest documents: " + ex.getMessage());
             }
         }
     }
 
-    public void handleDeleteSelected(JList<String> documentList) {
-        List<String> selectedFiles = documentList.getSelectedValuesList();
-        if (selectedFiles.isEmpty()) {
-            Msg.showInfo(this, ragManagementTab, "No Selection", 
-                "No documents selected for deletion.");
+    /**
+     * Handle deleting a single document from RAG index.
+     */
+    public void handleDeleteDocument(String filename) {
+        if (filename == null || filename.isEmpty()) {
+            Msg.showInfo(this, ragManagementTab, "No Selection",
+                    "No document selected for deletion.");
             return;
         }
 
         int confirmation = JOptionPane.showConfirmDialog(ragManagementTab,
-            "Are you sure you want to delete the selected documents?",
-            "Confirm Deletion", JOptionPane.YES_NO_OPTION);
-            
+                "Are you sure you want to delete '" + filename + "'?",
+                "Confirm Deletion", JOptionPane.YES_NO_OPTION);
+
         if (confirmation == JOptionPane.YES_OPTION) {
             try {
-                ragManagementService.deleteDocuments(selectedFiles);
-                loadIndexedFiles(documentList);
-                Msg.showInfo(this, ragManagementTab, "Success", 
-                    "Selected documents deleted from RAG.");
+                ragManagementService.deleteDocuments(java.util.Collections.singletonList(filename));
+                refreshRAGDocuments();
+                Msg.showInfo(this, ragManagementTab, "Success",
+                        "Document deleted from RAG.");
             } catch (Exception ex) {
-                Msg.showError(this, ragManagementTab, "Error", 
-                    "Failed to delete documents: " + ex.getMessage());
+                Msg.showError(this, ragManagementTab, "Error",
+                        "Failed to delete document: " + ex.getMessage());
             }
         }
     }
 
+    /**
+     * Handle clearing the entire RAG index.
+     */
+    public void handleClearIndex() {
+        int confirmation = JOptionPane.showConfirmDialog(ragManagementTab,
+                "Are you sure you want to clear the entire RAG index?\nThis will delete all indexed documents.",
+                "Confirm Clear Index", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+
+        if (confirmation == JOptionPane.YES_OPTION) {
+            try {
+                ragManagementService.clearAllDocuments();
+                refreshRAGDocuments();
+                if (ragManagementTab != null) {
+                    ragManagementTab.clearSearchResults();
+                }
+                Msg.showInfo(this, ragManagementTab, "Success", "RAG index cleared.");
+            } catch (Exception ex) {
+                Msg.showError(this, ragManagementTab, "Error",
+                        "Failed to clear index: " + ex.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Refresh the document table and statistics.
+     */
+    public void refreshRAGDocuments() {
+        if (ragManagementTab == null) {
+            return;
+        }
+        try {
+            // Get documents with metadata
+            List<RAGDocumentInfo> docs = ragManagementService.getIndexedDocumentsWithInfo();
+            ragManagementTab.updateDocumentTable(docs);
+
+            // Get statistics
+            RAGIndexStats stats = ragManagementService.getIndexStats();
+            ragManagementTab.updateStats(
+                    stats.getTotalFiles(),
+                    stats.getTotalChunks(),
+                    stats.getTotalEmbeddings()
+            );
+        } catch (Exception ex) {
+            Msg.showError(this, ragManagementTab, "Error",
+                    "Failed to load indexed files: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Handle RAG search.
+     */
+    public void handleRAGSearch(String query, String searchType, RAGManagementTab tab) {
+        if (query == null || query.trim().isEmpty()) {
+            return;
+        }
+
+        try {
+            List<SearchResult> results;
+            int maxResults = 10;
+
+            switch (searchType) {
+                case "Semantic":
+                    results = ragManagementService.searchSemantic(query, maxResults);
+                    break;
+                case "Keyword":
+                    results = ragManagementService.searchKeyword(query, maxResults);
+                    break;
+                case "Hybrid":
+                default:
+                    results = ragManagementService.searchHybrid(query, maxResults);
+                    break;
+            }
+
+            tab.displaySearchResults(query, results, searchType);
+        } catch (Exception ex) {
+            Msg.showError(this, tab, "Search Error",
+                    "Failed to perform search: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Legacy method for backwards compatibility.
+     * @deprecated Use handleAddDocuments() instead
+     */
+    @Deprecated
+    public void handleAddDocuments(JList<String> documentList) {
+        handleAddDocuments();
+    }
+
+    /**
+     * Legacy method for backwards compatibility.
+     * @deprecated Use handleDeleteDocument(String) instead
+     */
+    @Deprecated
+    public void handleDeleteSelected(JList<String> documentList) {
+        List<String> selectedFiles = documentList.getSelectedValuesList();
+        if (!selectedFiles.isEmpty()) {
+            handleDeleteDocument(selectedFiles.get(0));
+        }
+    }
+
+    /**
+     * Legacy method for backwards compatibility.
+     * @deprecated Use refreshRAGDocuments() instead
+     */
+    @Deprecated
     public void loadIndexedFiles(JList<String> documentList) {
         try {
             List<String> fileNames = ragManagementService.getIndexedFiles();
             documentList.setListData(fileNames.toArray(new String[0]));
         } catch (Exception ex) {
-            Msg.showError(this, ragManagementTab, "Error", 
-                "Failed to load indexed files: " + ex.getMessage());
+            Msg.showError(this, ragManagementTab, "Error",
+                    "Failed to load indexed files: " + ex.getMessage());
         }
     }
 

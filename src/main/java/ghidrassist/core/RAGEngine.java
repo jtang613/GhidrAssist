@@ -17,15 +17,12 @@ import ghidrassist.GAUtils;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.apiprovider.APIProvider;
 import ghidrassist.apiprovider.APIProviderConfig;
-import ghidrassist.apiprovider.APIProvider.EmbeddingCallback;
 
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class RAGEngine {
@@ -67,6 +64,68 @@ public class RAGEngine {
         analyzer = new StandardAnalyzer();
         IndexWriterConfig config = new IndexWriterConfig(analyzer);
         indexWriter = new IndexWriter(indexDirectory, config);
+
+        // Load persisted embeddings into cache
+        loadEmbeddingsFromIndex();
+    }
+
+    /**
+     * Load embeddings from Lucene index into memory cache.
+     * Called during initialization to restore embeddings after restart.
+     */
+    private static void loadEmbeddingsFromIndex() throws IOException {
+        indexLock.lock();
+        try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
+            StoredFields storedFields = reader.storedFields();
+            for (int i = 0; i < reader.maxDoc(); i++) {
+                Document doc = storedFields.document(i);
+                String filename = doc.get("filename");
+                IndexableField chunkIdField = doc.getField("chunk_id");
+                String embeddingStr = doc.get("embedding");
+
+                if (filename != null && chunkIdField != null && embeddingStr != null && !embeddingStr.isEmpty()) {
+                    int chunkId = chunkIdField.numericValue().intValue();
+                    double[] embedding = deserializeEmbedding(embeddingStr);
+                    if (embedding != null) {
+                        String chunkKey = filename + "_" + chunkId;
+                        embeddingCache.put(chunkKey, embedding);
+                    }
+                }
+            }
+            System.out.println("Loaded " + embeddingCache.size() + " embeddings from index");
+        } finally {
+            indexLock.unlock();
+        }
+    }
+
+    /**
+     * Serialize embedding array to string for storage.
+     */
+    private static String serializeEmbedding(double[] embedding) {
+        if (embedding == null || embedding.length == 0) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < embedding.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(embedding[i]);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Deserialize embedding string back to array.
+     */
+    private static double[] deserializeEmbedding(String str) {
+        if (str == null || str.isEmpty()) {
+            return null;
+        }
+        String[] parts = str.split(",");
+        double[] embedding = new double[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            embedding[i] = Double.parseDouble(parts[i]);
+        }
+        return embedding;
     }
 
     private static APIProvider getProvider() {
@@ -79,58 +138,50 @@ public class RAGEngine {
 
     public static void ingestDocuments(List<File> files) throws IOException {
         APIProvider provider = getProvider();
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<IOException> error = new AtomicReference<>();
-        
+
         indexLock.lock();
         try {
             for (File file : files) {
                 String content = readFileContent(file);
                 if (content != null && !content.isEmpty()) {
                     List<String> chunks = chunkContent(content);
+                    long fileSize = file.length();  // Store original file size
+
                     for (int i = 0; i < chunks.size(); i++) {
                         String chunk = chunks.get(i);
+
+                        // Generate embedding synchronously
+                        double[] embedding = null;
+                        try {
+                            embedding = provider.getEmbeddings(chunk);
+                        } catch (Exception e) {
+                            System.err.println("Warning: Failed to generate embedding for chunk " + i + ": " + e.getMessage());
+                        }
+
+                        // Create document with all fields including embedding
                         Document doc = new Document();
                         doc.add(new StringField("filename", file.getName(), Field.Store.YES));
                         doc.add(new IntPoint("chunk_id", i));
                         doc.add(new StoredField("chunk_id", i));
+                        doc.add(new StoredField("file_size", fileSize));
                         doc.add(new TextField("content", chunk, Field.Store.YES));
-                        indexWriter.addDocument(doc);
 
-                        final int chunkIndex = i;
-                        provider.getEmbeddingsAsync(chunk, new EmbeddingCallback() {
-                            @Override
-                            public void onSuccess(double[] embedding) {
-                                String chunkKey = file.getName() + "_" + chunkIndex;
-                                embeddingCache.put(chunkKey, embedding);
-                                if (chunkIndex == chunks.size() - 1) {
-                                    latch.countDown();
-                                }
-                            }
-                            
-                            @Override
-                            public void onError(Throwable e) {
-                                error.set(new IOException("Failed to generate embeddings", e));
-                                latch.countDown();
-                            }
-                        });
+                        // Store embedding as serialized string (persists to disk)
+                        if (embedding != null) {
+                            String embeddingStr = serializeEmbedding(embedding);
+                            doc.add(new StoredField("embedding", embeddingStr));
+
+                            // Also add to cache for immediate use
+                            String chunkKey = file.getName() + "_" + i;
+                            embeddingCache.put(chunkKey, embedding);
+                        }
+
+                        indexWriter.addDocument(doc);
                     }
                 }
             }
-            
-            // Wait for embeddings with timeout
-            if (!latch.await(2, TimeUnit.MINUTES)) {
-                throw new IOException("Timeout waiting for embeddings generation");
-            }
-            
-            if (error.get() != null) {
-                throw error.get();
-            }
-            
+
             indexWriter.commit();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while generating embeddings", e);
         } finally {
             indexLock.unlock();
         }
@@ -162,17 +213,22 @@ public class RAGEngine {
             .collect(Collectors.toList());
     }
 
+    private static final double SEMANTIC_MIN_THRESHOLD = 0.50;  // Low floor - just filter noise
+    private static final double SEMANTIC_RELATIVE_THRESHOLD = 0.95;  // Must be within 95% of top score
+    private static final int SEMANTIC_MAX_RESULTS = 5;  // Hard limit on semantic results
+
     private static List<VectorSearchResult> searchSimilar(double[] queryEmbedding, int maxResults) {
-        return embeddingCache.asMap().entrySet().stream()
+        // First pass: collect all candidates above minimum threshold, sorted by score
+        List<VectorSearchResult> candidates = embeddingCache.asMap().entrySet().stream()
             .map(entry -> {
                 String key = entry.getKey();
                 double[] embedding = entry.getValue();
                 double similarity = cosineSimilarity(queryEmbedding, embedding);
-                
+
                 String[] keyParts = key.split("_");
                 String filename = keyParts[0];
                 int chunkId = Integer.parseInt(keyParts[1]);
-                
+
                 try {
                     String snippet = getSnippetFromIndex(filename, chunkId);
                     return new VectorSearchResult(filename, snippet, similarity, chunkId);
@@ -180,9 +236,22 @@ public class RAGEngine {
                     return null;
                 }
             })
-            .filter(result -> result != null && result.getScore() > 0.5)
+            .filter(result -> result != null && result.getScore() >= SEMANTIC_MIN_THRESHOLD)
             .sorted((a, b) -> Double.compare(b.getScore(), a.getScore()))
-            .limit(maxResults)
+            .collect(Collectors.toList());
+
+        if (candidates.isEmpty()) {
+            return candidates;
+        }
+
+        // Apply relative threshold: only keep results within 95% of top score
+        double topScore = candidates.get(0).getScore();
+        double relativeThreshold = topScore * SEMANTIC_RELATIVE_THRESHOLD;
+
+        int limit = Math.min(maxResults, SEMANTIC_MAX_RESULTS);
+        return candidates.stream()
+            .filter(result -> result.getScore() >= relativeThreshold)
+            .limit(limit)
             .collect(Collectors.toList());
     }
 
@@ -276,7 +345,10 @@ public class RAGEngine {
 
                 if (!uniqueFiles.contains(filename) && uniqueFiles.size() < maxResults) {
                     String snippet = generateSnippet(content, queryStr);
-                    results.add(new SearchResult(filename, snippet, sd.score/100, chunkId));
+                    // Normalize BM25 score to 0-1 range using saturation function
+                    // This aligns with cosine similarity scoring (also 0-1)
+                    double normalizedScore = sd.score / (sd.score + 1.0);
+                    results.add(new SearchResult(filename, snippet, normalizedScore, chunkId));
                     uniqueFiles.add(filename);
                 }
             }
@@ -311,6 +383,99 @@ public class RAGEngine {
             Term term = new Term("filename", filename);
             indexWriter.deleteDocuments(term);
             indexWriter.commit();
+            // Also remove embeddings from cache
+            embeddingCache.asMap().entrySet().removeIf(entry -> entry.getKey().startsWith(filename + "_"));
+        } finally {
+            indexLock.unlock();
+        }
+    }
+
+    /**
+     * Get the chunk count for a specific document.
+     * @param filename The document filename
+     * @return Number of chunks for this document
+     */
+    public static int getChunkCount(String filename) throws IOException {
+        indexLock.lock();
+        try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            Query query = new TermQuery(new Term("filename", filename));
+            TopDocs topDocs = searcher.search(query, Integer.MAX_VALUE);
+            return (int) topDocs.totalHits.value;
+        } finally {
+            indexLock.unlock();
+        }
+    }
+
+    /**
+     * Get the total chunk count across all documents.
+     * @return Total number of chunks in the index
+     */
+    public static int getTotalChunkCount() throws IOException {
+        indexLock.lock();
+        try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
+            return reader.numDocs();
+        } finally {
+            indexLock.unlock();
+        }
+    }
+
+    /**
+     * Get the number of cached embeddings.
+     * @return Number of embeddings in cache
+     */
+    public static int getEmbeddingCount() {
+        return (int) embeddingCache.size();
+    }
+
+    /**
+     * Get the original file size for a document.
+     * @param filename The document filename
+     * @return File size in bytes, or -1 if not found
+     */
+    public static long getDocumentSize(String filename) throws IOException {
+        indexLock.lock();
+        try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
+            IndexSearcher searcher = new IndexSearcher(reader);
+            Query query = new TermQuery(new Term("filename", filename));
+            TopDocs topDocs = searcher.search(query, 1);
+            if (topDocs.totalHits.value > 0) {
+                Document doc = searcher.storedFields().document(topDocs.scoreDocs[0].doc);
+                IndexableField sizeField = doc.getField("file_size");
+                if (sizeField != null) {
+                    return sizeField.numericValue().longValue();
+                }
+            }
+            return -1; // Not found or no size stored (legacy documents)
+        } finally {
+            indexLock.unlock();
+        }
+    }
+
+    /**
+     * Perform semantic (vector) search using embeddings.
+     * @param queryStr The search query
+     * @param maxResults Maximum number of results
+     * @return List of search results
+     */
+    public static List<SearchResult> semanticSearch(String queryStr, int maxResults) throws Exception {
+        APIProvider provider = getProvider();
+        double[] queryEmbedding = provider.getEmbeddings(queryStr);
+        List<VectorSearchResult> vectorResults = searchSimilar(queryEmbedding, maxResults);
+        return vectorResults.stream()
+            .map(vr -> new SearchResult(vr.getFilename(), vr.getSnippet(), vr.getScore(), vr.getChunkId()))
+            .collect(Collectors.toList());
+    }
+
+    /**
+     * Clear the entire index and embedding cache.
+     */
+    public static void clearIndex() throws IOException {
+        indexLock.lock();
+        try {
+            indexWriter.deleteAll();
+            indexWriter.commit();
+            embeddingCache.invalidateAll();
         } finally {
             indexLock.unlock();
         }
@@ -353,25 +518,6 @@ class EmbeddingData {
     public String getProvider() {
         return provider;
     }
-}
-
-class SearchResult {
-    private String filename;
-    private String snippet;
-    private double score;
-    private int chunkId;
-
-    public SearchResult(String filename, String snippet, double score, int chunkId) {
-        this.filename = filename;
-        this.snippet = snippet;
-        this.score = score;
-        this.chunkId = chunkId;
-    }
-
-    public String getFilename() { return filename; }
-    public String getSnippet() { return snippet; }
-    public double getScore() { return score; }
-    public int getChunkId() { return chunkId; }
 }
 
 class VectorSearchResult {
