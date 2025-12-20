@@ -30,6 +30,7 @@ public class ReActResult {
     private final Status status;
     private final String answer;
     private final List<String> findings;
+    private final List<String> iterationSummaries;
 
     // Metrics
     private final int iterationCount;
@@ -44,6 +45,7 @@ public class ReActResult {
         this.status = builder.status;
         this.answer = builder.answer;
         this.findings = new ArrayList<>(builder.findings);
+        this.iterationSummaries = new ArrayList<>(builder.iterationSummaries);
         this.iterationCount = builder.iterationCount;
         this.toolCallCount = builder.toolCallCount;
         this.duration = builder.duration;
@@ -127,6 +129,7 @@ public class ReActResult {
     public Status getStatus() { return status; }
     public String getAnswer() { return answer; }
     public List<String> getFindings() { return new ArrayList<>(findings); }
+    public List<String> getIterationSummaries() { return new ArrayList<>(iterationSummaries); }
     public int getIterationCount() { return iterationCount; }
     public int getToolCallCount() { return toolCallCount; }
     public Duration getDuration() { return duration; }
@@ -151,6 +154,7 @@ public class ReActResult {
         private Status status;
         private String answer = "";
         private List<String> findings = new ArrayList<>();
+        private List<String> iterationSummaries = new ArrayList<>();
         private int iterationCount = 0;
         private int toolCallCount = 0;
         private Duration duration = Duration.ZERO;
@@ -169,6 +173,11 @@ public class ReActResult {
 
         public Builder findings(List<String> findings) {
             this.findings = new ArrayList<>(findings);
+            return this;
+        }
+
+        public Builder iterationSummaries(List<String> summaries) {
+            this.iterationSummaries = new ArrayList<>(summaries);
             return this;
         }
 

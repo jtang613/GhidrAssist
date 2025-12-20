@@ -309,5 +309,46 @@ public abstract class APIProvider implements ChatProvider {
             return response;
         }, operationName);
     }
-    
+
+    // ========== Token Counting Methods (for Context Management) ==========
+
+    /**
+     * Count tokens in a list of chat messages.
+     * Default implementation returns -1 (unsupported).
+     * Providers with native token counting APIs should override this method.
+     *
+     * @param messages List of chat messages
+     * @return Token count, or -1 if provider doesn't support token counting
+     * @throws APIProviderException if token counting fails
+     */
+    public int countTokens(List<ChatMessage> messages) throws APIProviderException {
+        return -1; // Not supported by default
+    }
+
+    /**
+     * Count tokens in a text string.
+     * Default implementation returns -1 (unsupported).
+     * Providers with native token counting APIs should override this method.
+     *
+     * @param text Text to count tokens for
+     * @return Token count, or -1 if provider doesn't support token counting
+     * @throws APIProviderException if token counting fails
+     */
+    public int countTokens(String text) throws APIProviderException {
+        return -1; // Not supported by default
+    }
+
+    /**
+     * Estimate tokens required for tool definitions.
+     * Default implementation returns -1 (unsupported).
+     * Providers can override with more accurate estimates.
+     *
+     * @param tools List of tool definitions in OpenAI function format
+     * @return Token estimate, or -1 if provider doesn't support estimation
+     * @throws APIProviderException if estimation fails
+     */
+    public int estimateTokensForTools(List<Map<String, Object>> tools) throws APIProviderException {
+        return -1; // Not supported by default
+    }
+
 }

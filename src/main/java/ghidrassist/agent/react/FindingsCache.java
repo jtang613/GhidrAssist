@@ -1,15 +1,45 @@
 package ghidrassist.agent.react;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  * Accumulates findings/evidence during analysis.
  * Tracks what tools discovered and maintains relevance scoring.
+ * Enhanced with BinAssist keyword-based scoring for automatic relevance detection.
  */
 public class FindingsCache {
+
+    // BinAssist keyword scoring constants
+    public static final int RELEVANCE_HIGH = 9;
+    public static final int RELEVANCE_MEDIUM = 6;
+    public static final int RELEVANCE_LOW = 3;
+
+    // High-relevance keywords (security, vulnerabilities, critical findings)
+    private static final Set<String> HIGH_KEYWORDS = new HashSet<>(Arrays.asList(
+        "vulnerability", "exploit", "buffer overflow", "unsafe", "injection",
+        "backdoor", "malware", "shellcode", "rop chain", "heap spray",
+        "use after free", "double free", "stack overflow", "format string",
+        "integer overflow", "null pointer", "race condition", "privilege",
+        "escalation", "arbitrary code", "remote code execution"
+    ));
+
+    // Medium-relevance keywords (structural, functional analysis)
+    private static final Set<String> MEDIUM_KEYWORDS = new HashSet<>(Arrays.asList(
+        "function", "address", "reference", "import", "export",
+        "symbol", "call", "jump", "branch", "loop", "condition",
+        "parameter", "return", "register", "stack", "heap",
+        "pointer", "structure", "class", "method", "variable",
+        "string", "constant", "offset", "section", "segment"
+    ));
+
+    // Default relevance for findings without keyword matches
+    private static final int DEFAULT_RELEVANCE = RELEVANCE_LOW;
 
     public static class Finding {
         private final String fact;
@@ -69,8 +99,8 @@ public class FindingsCache {
     }
 
     /**
-     * Extract key findings from tool output.
-     * This is a simple heuristic-based approach.
+     * Extract key findings from tool output using keyword-based scoring.
+     * Enhanced with BinAssist keyword matching for automatic relevance.
      */
     public void extractFromToolOutput(String toolName, String output) {
         if (output == null || output.isEmpty()) {
@@ -82,18 +112,49 @@ public class FindingsCache {
         for (String line : lines) {
             line = line.trim();
 
-            // Look for patterns that indicate important findings
-            if (line.contains("vulnerability") || line.contains("buffer overflow") ||
-                line.contains("unsafe")) {
-                addFinding(line, output, toolName, 10);  // High relevance
-            } else if (line.contains("function") || line.contains("calls") ||
-                      line.contains("address") || line.contains("0x")) {
-                addFinding(line, output, toolName, 7);  // Medium-high relevance
-            } else if (line.length() > 20 && line.length() < 200) {
-                // Reasonable length lines might be useful
-                addFinding(line, output, toolName, 3);  // Low relevance
+            // Skip empty or very short lines
+            if (line.length() < 10) {
+                continue;
+            }
+
+            // Skip lines that are too long (likely raw data)
+            if (line.length() > 500) {
+                continue;
+            }
+
+            // Calculate relevance based on keywords
+            int relevance = calculateRelevance(line);
+
+            // Only add findings with reasonable length and some relevance
+            if (line.length() >= 20 && line.length() <= 300) {
+                addFinding(line, output, toolName, relevance);
             }
         }
+    }
+
+    /**
+     * Calculate relevance score based on keyword matching.
+     * Returns highest matching keyword category score.
+     */
+    private int calculateRelevance(String text) {
+        String lowerText = text.toLowerCase();
+
+        // Check for high-relevance keywords first
+        for (String keyword : HIGH_KEYWORDS) {
+            if (lowerText.contains(keyword)) {
+                return RELEVANCE_HIGH;
+            }
+        }
+
+        // Check for medium-relevance keywords
+        for (String keyword : MEDIUM_KEYWORDS) {
+            if (lowerText.contains(keyword)) {
+                return RELEVANCE_MEDIUM;
+            }
+        }
+
+        // Default to low relevance
+        return RELEVANCE_LOW;
     }
 
     /**
@@ -115,15 +176,28 @@ public class FindingsCache {
 
     /**
      * Format findings for LLM prompt - show most relevant.
+     * Default: top 10 findings, no character limit.
      */
     public String formatForPrompt() {
-        return formatForPrompt(10);  // Top 10 by default
+        return formatForPrompt(10, 0);
     }
 
     /**
-     * Format top N findings for prompt.
+     * Format top N findings for prompt (no character limiting).
      */
     public String formatForPrompt(int maxShow) {
+        return formatForPrompt(maxShow, 0);
+    }
+
+    /**
+     * Format top N findings for prompt with optional character limiting.
+     * Enhanced version supporting BinAssist parity (top 50 for iterations).
+     *
+     * @param maxShow Maximum number of findings to show
+     * @param maxCharsPerFinding Maximum characters per finding (0 = no limit)
+     * @return Formatted findings string
+     */
+    public String formatForPrompt(int maxShow, int maxCharsPerFinding) {
         if (findings.isEmpty()) {
             return "No significant findings yet.";
         }
@@ -131,22 +205,51 @@ public class FindingsCache {
         return findings.stream()
             .sorted(Comparator.comparingInt(Finding::getRelevance).reversed())
             .limit(maxShow)
-            .map(f -> "• " + f.getFact())
+            .map(f -> {
+                String fact = f.getFact();
+                // Apply character limit if specified
+                if (maxCharsPerFinding > 0 && fact.length() > maxCharsPerFinding) {
+                    fact = fact.substring(0, maxCharsPerFinding - 3) + "...";
+                }
+                return "• " + fact;
+            })
             .collect(Collectors.joining("\n"));
     }
 
     /**
      * Get detailed findings with evidence.
+     * Enhanced for synthesis with top 100 findings + iteration summaries (BinAssist parity).
      */
     public String formatDetailed() {
-        if (findings.isEmpty()) {
-            return "No findings.";
+        return formatDetailed(100, true);
+    }
+
+    /**
+     * Get detailed findings with custom limits.
+     *
+     * @param maxFindings Maximum number of findings to include
+     * @param includeIterationSummaries Whether to include iteration summaries
+     * @return Formatted detailed findings
+     */
+    public String formatDetailed(int maxFindings, boolean includeIterationSummaries) {
+        StringBuilder sb = new StringBuilder();
+
+        // Add iteration summaries first (provides context)
+        if (includeIterationSummaries && !iterationSummaries.isEmpty()) {
+            sb.append("## Investigation History\n\n");
+            sb.append(formatIterationSummaries()).append("\n");
         }
 
-        StringBuilder sb = new StringBuilder();
+        // Add findings
+        if (findings.isEmpty()) {
+            sb.append("## Findings\n\nNo findings accumulated.\n");
+            return sb.toString();
+        }
+
+        sb.append("## Key Findings\n\n");
         findings.stream()
             .sorted(Comparator.comparingInt(Finding::getRelevance).reversed())
-            .limit(20)
+            .limit(maxFindings)
             .forEach(f -> {
                 sb.append("**").append(f.getFact()).append("**");
                 if (f.getToolUsed() != null) {
@@ -254,5 +357,13 @@ public class FindingsCache {
             sb.append(recent.get(i)).append("\n\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * Get all iteration summaries.
+     * @return Copy of iteration summaries list
+     */
+    public List<String> getIterationSummaries() {
+        return new ArrayList<>(iterationSummaries);
     }
 }

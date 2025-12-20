@@ -94,6 +94,48 @@ public class AnalysisDB {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_role "
                     + "ON GHChatMessages(role)");
         }
+
+        // ReAct agent conversation storage with chunked iterations
+        String createReActMessagesTableSQL = "CREATE TABLE IF NOT EXISTS GHReActMessages ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "program_hash TEXT NOT NULL,"
+                + "session_id INTEGER NOT NULL,"
+                + "message_order INTEGER NOT NULL,"
+                + "phase TEXT NOT NULL,"  // "planning", "investigation", "reflection", "synthesis"
+                + "iteration_number INTEGER,"
+                + "role TEXT NOT NULL,"  // "system", "user", "assistant", "tool"
+                + "content_text TEXT,"
+                + "native_message_data TEXT,"  // JSON: tool_calls, tool_call_id, etc.
+                + "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+                + "UNIQUE(program_hash, session_id, message_order),"
+                + "FOREIGN KEY (session_id) REFERENCES GHChatHistory(id) ON DELETE CASCADE"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createReActMessagesTableSQL);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_react_messages_lookup "
+                    + "ON GHReActMessages(program_hash, session_id, phase, iteration_number)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_react_messages_order "
+                    + "ON GHReActMessages(session_id, message_order)");
+        }
+
+        // ReAct iteration chunks for context boundaries
+        String createReActIterationChunksTableSQL = "CREATE TABLE IF NOT EXISTS GHReActIterationChunks ("
+                + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                + "program_hash TEXT NOT NULL,"
+                + "session_id INTEGER NOT NULL,"
+                + "iteration_number INTEGER NOT NULL,"
+                + "iteration_summary TEXT,"  // LLM's analysis summary
+                + "message_start_index INTEGER NOT NULL,"
+                + "message_end_index INTEGER NOT NULL,"
+                + "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+                + "UNIQUE(program_hash, session_id, iteration_number),"
+                + "FOREIGN KEY (session_id) REFERENCES GHChatHistory(id) ON DELETE CASCADE"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createReActIterationChunksTableSQL);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_react_chunks_lookup "
+                    + "ON GHReActIterationChunks(program_hash, session_id, iteration_number)");
+        }
     }
 
     /**
@@ -668,5 +710,222 @@ public class AnalysisDB {
         public int getId() { return id; }
         public String getDescription() { return description; }
         public Timestamp getLastUpdate() { return lastUpdate; }
+    }
+
+    // ReAct Message Storage Methods
+
+    /**
+     * Save a ReAct message to GHReActMessages table.
+     *
+     * @param programHash Program hash
+     * @param sessionId Chat session ID
+     * @param messageOrder Message order in conversation
+     * @param phase Current phase (planning/investigation/reflection/synthesis)
+     * @param iterationNumber Iteration number (null for planning/synthesis)
+     * @param message ChatMessage to save
+     * @return Generated message ID, or -1 on failure
+     */
+    public int saveReActMessage(String programHash, int sessionId, int messageOrder,
+                                String phase, Integer iterationNumber,
+                                ghidrassist.apiprovider.ChatMessage message) {
+        String sql = "INSERT OR REPLACE INTO GHReActMessages " +
+                "(program_hash, session_id, message_order, phase, iteration_number, role, content_text, native_message_data) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            pstmt.setString(1, programHash);
+            pstmt.setInt(2, sessionId);
+            pstmt.setInt(3, messageOrder);
+            pstmt.setString(4, phase);
+            if (iterationNumber != null) {
+                pstmt.setInt(5, iterationNumber);
+            } else {
+                pstmt.setNull(5, java.sql.Types.INTEGER);
+            }
+            pstmt.setString(6, message.getRole());
+            pstmt.setString(7, message.getContent());
+
+            // Store native message data as JSON (tool_calls, tool_call_id, etc.)
+            String nativeData = serializeMessageMetadata(message);
+            pstmt.setString(8, nativeData);
+
+            pstmt.executeUpdate();
+
+            ResultSet rs = pstmt.getGeneratedKeys();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to save ReAct message: " + e.getMessage(), e);
+        }
+        return -1;
+    }
+
+    /**
+     * Save a ReAct iteration chunk to GHReActIterationChunks table.
+     *
+     * @param programHash Program hash
+     * @param sessionId Chat session ID
+     * @param iterationNumber Iteration number
+     * @param summary Iteration summary from LLM
+     * @param messageStartIndex Start index in message list
+     * @param messageEndIndex End index in message list
+     * @return Generated chunk ID, or -1 on failure
+     */
+    public int saveReActIterationChunk(String programHash, int sessionId, int iterationNumber,
+                                       String summary, int messageStartIndex, int messageEndIndex) {
+        String sql = "INSERT OR REPLACE INTO GHReActIterationChunks " +
+                "(program_hash, session_id, iteration_number, iteration_summary, message_start_index, message_end_index) " +
+                "VALUES (?, ?, ?, ?, ?, ?)";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            pstmt.setString(1, programHash);
+            pstmt.setInt(2, sessionId);
+            pstmt.setInt(3, iterationNumber);
+            pstmt.setString(4, summary);
+            pstmt.setInt(5, messageStartIndex);
+            pstmt.setInt(6, messageEndIndex);
+
+            pstmt.executeUpdate();
+
+            ResultSet rs = pstmt.getGeneratedKeys();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to save ReAct iteration chunk: " + e.getMessage(), e);
+        }
+        return -1;
+    }
+
+    /**
+     * Serialize ChatMessage metadata to JSON for storage.
+     */
+    private String serializeMessageMetadata(ghidrassist.apiprovider.ChatMessage message) {
+        com.google.gson.JsonObject json = new com.google.gson.JsonObject();
+
+        if (message.getToolCalls() != null) {
+            json.add("tool_calls", message.getToolCalls());
+        }
+        if (message.getToolCallId() != null) {
+            json.addProperty("tool_call_id", message.getToolCallId());
+        }
+        if (message.getThinkingContent() != null) {
+            json.addProperty("thinking_content", message.getThinkingContent());
+        }
+        if (message.getThinkingSignature() != null) {
+            json.addProperty("thinking_signature", message.getThinkingSignature());
+        }
+
+        return json.toString();
+    }
+
+    /**
+     * Get ReAct messages for a session.
+     *
+     * @param programHash Program hash
+     * @param sessionId Session ID
+     * @return List of messages ordered by message_order
+     */
+    public List<ghidrassist.apiprovider.ChatMessage> getReActMessages(String programHash, int sessionId) {
+        List<ghidrassist.apiprovider.ChatMessage> messages = new ArrayList<>();
+        String sql = "SELECT role, content_text, native_message_data FROM GHReActMessages " +
+                "WHERE program_hash = ? AND session_id = ? ORDER BY message_order ASC";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, programHash);
+            pstmt.setInt(2, sessionId);
+
+            ResultSet rs = pstmt.executeQuery();
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+
+            while (rs.next()) {
+                String role = rs.getString("role");
+                String content = rs.getString("content_text");
+                String nativeData = rs.getString("native_message_data");
+
+                ghidrassist.apiprovider.ChatMessage message = new ghidrassist.apiprovider.ChatMessage(role, content);
+
+                // Restore metadata from JSON
+                if (nativeData != null && !nativeData.isEmpty()) {
+                    try {
+                        com.google.gson.JsonObject json = gson.fromJson(nativeData, com.google.gson.JsonObject.class);
+
+                        if (json.has("tool_calls")) {
+                            message.setToolCalls(json.get("tool_calls").getAsJsonArray());
+                        }
+                        if (json.has("tool_call_id")) {
+                            message.setToolCallId(json.get("tool_call_id").getAsString());
+                        }
+                        if (json.has("thinking_content")) {
+                            message.setThinkingContent(json.get("thinking_content").getAsString());
+                        }
+                        if (json.has("thinking_signature")) {
+                            message.setThinkingSignature(json.get("thinking_signature").getAsString());
+                        }
+                    } catch (Exception e) {
+                        Msg.warn(this, "Failed to parse message metadata: " + e.getMessage());
+                    }
+                }
+
+                messages.add(message);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to retrieve ReAct messages: " + e.getMessage(), e);
+        }
+
+        return messages;
+    }
+
+    /**
+     * Get ReAct iteration chunks for a session.
+     *
+     * @param programHash Program hash
+     * @param sessionId Session ID
+     * @return List of iteration summaries ordered by iteration number
+     */
+    public List<String> getReActIterationSummaries(String programHash, int sessionId) {
+        List<String> summaries = new ArrayList<>();
+        String sql = "SELECT iteration_summary FROM GHReActIterationChunks " +
+                "WHERE program_hash = ? AND session_id = ? ORDER BY iteration_number ASC";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, programHash);
+            pstmt.setInt(2, sessionId);
+
+            ResultSet rs = pstmt.executeQuery();
+            while (rs.next()) {
+                String summary = rs.getString("iteration_summary");
+                if (summary != null) {
+                    summaries.add(summary);
+                }
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to retrieve ReAct iteration summaries: " + e.getMessage(), e);
+        }
+
+        return summaries;
+    }
+
+    /**
+     * Check if a session has ReAct messages.
+     *
+     * @param sessionId Session ID
+     * @return true if session has ReAct messages
+     */
+    public boolean isReActSession(int sessionId) {
+        String sql = "SELECT COUNT(*) FROM GHReActMessages WHERE session_id = ?";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setInt(1, sessionId);
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1) > 0;
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to check if ReAct session: " + e.getMessage(), e);
+        }
+
+        return false;
     }
 }

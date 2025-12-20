@@ -465,7 +465,7 @@ public class TabController {
             return currentOrchestrator.analyze(
                 query,
                 initialContext,
-                "", // session ID - can be implemented later if needed
+                String.valueOf(queryService.getCurrentSessionId()),
                 progressHandler
             );
         }).thenAccept(result -> {
@@ -477,8 +477,12 @@ public class TabController {
                 finalDisplay.append("# Final Result\n\n");
                 finalDisplay.append(result.toMarkdown());
 
-                // Save the assistant response to conversation history
-                queryService.addAssistantResponse(finalDisplay.toString());
+                // Save ReAct analysis with proper chunking to database
+                queryService.saveReActAnalysis(
+                    query,
+                    result.getAnswer(),
+                    result.getIterationSummaries()
+                );
 
                 // Show in UI (using conversation history for consistency with regular queries)
                 String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());

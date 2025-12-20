@@ -464,14 +464,93 @@ public class QueryService {
      * Switch to a specific chat session
      */
     public boolean switchToChatSession(int sessionId) {
-        String conversation = analysisDB.getChatConversation(sessionId);
-        if (conversation != null) {
-            currentSessionId = sessionId;
+        if (plugin.getCurrentProgram() == null) {
+            return false;
+        }
+
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+
+        // Set current session ID first
+        currentSessionId = sessionId;
+
+        // Check if this is a ReAct session
+        if (analysisDB.isReActSession(sessionId)) {
+            // Load ReAct messages from dedicated table
+            java.util.List<ghidrassist.apiprovider.ChatMessage> messages =
+                analysisDB.getReActMessages(programHash, sessionId);
+
+            if (messages != null && !messages.isEmpty()) {
+                conversationHistory.setLength(0);
+                messageList.clear();
+
+                // Format ReAct messages as conversation
+                String formattedConversation = formatReActConversation(messages, sessionId);
+                conversationHistory.append(formattedConversation);
+                return true;
+            }
+            return false;
+        } else {
+            // Load regular conversation from per-message storage
             conversationHistory.setLength(0);
-            conversationHistory.append(conversation);
+            messageList.clear();
+
+            // Load messages from database and rebuild conversation
+            loadMessagesFromDatabase();
+
+            // If no messages were loaded, fall back to legacy blob
+            if (messageList.isEmpty()) {
+                String conversation = analysisDB.getChatConversation(sessionId);
+                if (conversation != null) {
+                    conversationHistory.append(conversation);
+                    return true;
+                }
+                return false;
+            }
+
             return true;
         }
-        return false;
+    }
+
+    /**
+     * Format ReAct messages into markdown conversation format.
+     * Structures the conversation with user query, iteration summaries, and final answer.
+     */
+    private String formatReActConversation(java.util.List<ghidrassist.apiprovider.ChatMessage> messages, int sessionId) {
+        StringBuilder conversation = new StringBuilder();
+
+        // First message should be the user query
+        if (!messages.isEmpty() && "user".equals(messages.get(0).getRole())) {
+            conversation.append("**User**: ").append(messages.get(0).getContent()).append("\n\n");
+        }
+
+        // Get iteration summaries for structured display
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        java.util.List<String> iterationSummaries = analysisDB.getReActIterationSummaries(programHash, sessionId);
+
+        if (!iterationSummaries.isEmpty()) {
+            conversation.append("**Assistant** (ReAct Investigation):\n\n");
+            conversation.append("# Investigation Process\n\n");
+
+            for (int i = 0; i < iterationSummaries.size(); i++) {
+                conversation.append("## Iteration ").append(i + 1).append("\n");
+                conversation.append(iterationSummaries.get(i)).append("\n\n");
+            }
+        }
+
+        // Find and append the final synthesis message (last assistant message)
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            ghidrassist.apiprovider.ChatMessage msg = messages.get(i);
+            if ("assistant".equals(msg.getRole()) && msg.getContent() != null && !msg.getContent().trim().isEmpty()) {
+                // Check if this looks like a synthesis (not an iteration summary)
+                if (!iterationSummaries.contains(msg.getContent())) {
+                    conversation.append("# Final Analysis\n\n");
+                    conversation.append(msg.getContent()).append("\n\n");
+                    break;
+                }
+            }
+        }
+
+        return conversation.toString();
     }
     
     /**
@@ -628,6 +707,54 @@ public class QueryService {
      */
     public AnalysisDB getAnalysisDB() {
         return analysisDB;
+    }
+
+    /**
+     * Save ReAct analysis to database with proper chunking.
+     * Stores to GHReActMessages table instead of regular chat messages.
+     *
+     * @param userQuery Original user query
+     * @param finalResult Final answer from ReAct analysis
+     * @param iterationSummaries List of iteration summaries (one per iteration)
+     */
+    public void saveReActAnalysis(String userQuery, String finalResult, java.util.List<String> iterationSummaries) {
+        ensureSession();
+
+        if (currentSessionId == -1 || plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        int messageOrder = 0;
+
+        // Save user query as first message
+        ghidrassist.apiprovider.ChatMessage userMsg =
+            new ghidrassist.apiprovider.ChatMessage("user", userQuery);
+        analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
+            "planning", null, userMsg);
+
+        // Save iteration summaries as investigation messages
+        if (iterationSummaries != null) {
+            for (int i = 0; i < iterationSummaries.size(); i++) {
+                ghidrassist.apiprovider.ChatMessage iterMsg =
+                    new ghidrassist.apiprovider.ChatMessage("assistant", iterationSummaries.get(i));
+                analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
+                    "investigation", i + 1, iterMsg);
+
+                // Save iteration chunk
+                analysisDB.saveReActIterationChunk(programHash, currentSessionId, i + 1,
+                    iterationSummaries.get(i), messageOrder - 1, messageOrder - 1);
+            }
+        }
+
+        // Save final synthesis as last message
+        ghidrassist.apiprovider.ChatMessage finalMsg =
+            new ghidrassist.apiprovider.ChatMessage("assistant", finalResult);
+        analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
+            "synthesis", null, finalMsg);
+
+        // Also save to legacy conversation history for compatibility
+        addAssistantResponse(finalResult);
     }
 
     /**

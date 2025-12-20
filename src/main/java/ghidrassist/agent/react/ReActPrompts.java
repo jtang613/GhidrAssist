@@ -67,6 +67,7 @@ public class ReActPrompts {
 
     /**
      * Build the investigation prompt with current state.
+     * Enhanced with BinAssist parity: iteration context, current task focus marker.
      */
     public static String buildInvestigationPrompt(
         String objective,
@@ -81,7 +82,8 @@ public class ReActPrompts {
 
         sb.append("**Your Goal**: ").append(objective).append("\n\n");
 
-        if (initialContext != null && !initialContext.isEmpty()) {
+        if (initialContext != null && !initialContext.isEmpty() && iteration == 1) {
+            // Only show initial context on first iteration
             sb.append("**Initial Context**:\n```\n");
             // Truncate if too long
             String truncated = initialContext.length() > 2000
@@ -99,12 +101,37 @@ public class ReActPrompts {
             sb.append(findings).append("\n\n");
         }
 
-        sb.append("**Next Step**:\n");
-        sb.append("Think about what information you still need. ");
-        sb.append("Which tool should you use to gather it? ");
-        sb.append("Call the appropriate tool to continue your investigation.\n");
+        sb.append("**Current Task**: Focus on the task marked with [->] in the progress list above.\n\n");
+
+        sb.append("**Instructions**:\n");
+        sb.append("1. Think about what information you still need for the current task\n");
+        sb.append("2. Call the appropriate MCP tool(s) to gather that information\n");
+        sb.append("3. After receiving results, briefly summarize what you learned\n\n");
+
+        sb.append("If you believe the current task is complete based on previous findings,\n");
+        sb.append("you may proceed without additional tool calls.\n");
 
         return sb.toString();
+    }
+
+    /**
+     * Build investigation prompt with iteration warning when approaching limit.
+     */
+    public static String buildInvestigationPromptWithWarning(
+        String objective,
+        String initialContext,
+        String todos,
+        String findings,
+        int iteration,
+        int remaining
+    ) {
+        String basePrompt = buildInvestigationPrompt(objective, initialContext, todos, findings, iteration);
+
+        if (remaining <= 3) {
+            return basePrompt + "\n" + getIterationLimitWarning(remaining);
+        }
+
+        return basePrompt;
     }
 
     /**
@@ -193,31 +220,47 @@ public class ReActPrompts {
 
     /**
      * Prompt for self-reflection after an iteration.
-     * Asks the agent if it has enough information to answer the question.
+     * Asks the agent to assess progress, update plan, and decide readiness.
+     * Uses strict formatting for reliable parsing (BinAssist parity).
      */
     public static String getReflectionPrompt(String objective, String findings, String todos) {
         return String.format("""
-            ## Self-Reflection
+            ## Self-Reflection & Plan Adaptation
 
             **Original Question**: %s
 
-            **Investigation Progress**:
+            **Current Investigation Plan**:
             %s
 
-            **Findings So Far**:
+            **Findings Accumulated**:
             %s
 
-            **Reflection Task**: Based on what you've discovered so far, answer these questions:
+            **Reflection Tasks**:
+            1. **Progress Assessment**: Review what you've learned and how it relates to the objective
+            2. **Plan Adaptation**: Based on new findings, should the investigation plan change?
+            3. **Readiness Check**: Can you now answer the user's question comprehensively?
 
-            1. Do you have sufficient information to answer the user's question comprehensively?
-            2. Are there critical gaps in your understanding that require more investigation?
+            **Required Response Format** (use plain text, keep label and content on same line):
 
-            Respond with **ONLY** one of these two options:
-            - "READY: [brief explanation of why you can answer now]"
-            - "CONTINUE: [brief explanation of what critical information is still needed]"
+            **Assessment:** [Your assessment here on same line]
 
-            Be honest - if you can provide a good answer with what you know, say READY.
-            If you truly need more investigation, say CONTINUE.
+            **Plan Updates:**
+            - ADD: [task] (or "None")
+            - REMOVE: [task] (or "None")
+
+            **Decision:** READY or CONTINUE
+
+            **Reason:** [Your reason here on same line - do NOT put a newline after "Reason:"]
+
+            **Guidelines**:
+            - Keep each label and its content on the SAME LINE
+            - **ADD** new tasks if findings reveal unexpected complexity or new investigation paths
+            - **REMOVE** pending tasks that are no longer relevant based on what you've learned
+            - Say **CONTINUE** if there are pending tasks that would provide valuable information
+            - Say **READY** only if ALL planned tasks are complete OR remaining tasks would not
+              meaningfully improve the answer
+            - Completing investigation tasks thoroughly leads to better answers
+            - Do NOT use code blocks, backticks, or extra newlines after labels
             """,
             objective,
             todos,
