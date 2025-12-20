@@ -37,8 +37,10 @@ public class ConversationalToolHandler {
     private volatile boolean isConversationActive = false;
     private volatile boolean isCancelled = false;
     private int rateLimitRetries = 0;
+    private int toolCallRound = 0; // Track tool calling rounds within iteration
     private static final int MAX_RATE_LIMIT_RETRIES = 3;
     private static final int MAX_CONVERSATION_HISTORY = 20; // Keep last 20 messages to prevent token overflow
+    private static final int MAX_TOOL_ROUNDS = 10; // Maximum tool calling rounds per iteration (BinAssist parity)
     private static final int API_TIMEOUT_SECONDS = 120; // Timeout for blocking API calls
     
     public ConversationalToolHandler(
@@ -71,6 +73,7 @@ public class ConversationalToolHandler {
         isCancelled = false; // Reset cancellation flag
         conversationHistory.clear();
         rateLimitRetries = 0; // Reset retry counter
+        toolCallRound = 0; // Reset tool call round counter
         
         // Add initial user message
         conversationHistory.addAll(apiClient.createFunctionMessages(userPrompt));
@@ -100,13 +103,32 @@ public class ConversationalToolHandler {
     }
     
     /**
-     * Continue the conversation with the current message history
+     * Continue the conversation with the current message history.
+     * Supports multi-turn tool calling with safety limit (max 10 rounds per iteration).
      */
     private void continueConversation() {
         if (!isConversationActive || isCancelled) {
             return;
         }
-        
+
+        // Check tool calling round limit (safety mechanism for infinite loops)
+        if (toolCallRound >= MAX_TOOL_ROUNDS) {
+            Msg.warn(this, String.format(
+                "Reached maximum tool calling rounds (%d). Completing conversation to prevent infinite loops.",
+                MAX_TOOL_ROUNDS
+            ));
+            userHandler.onUpdate(String.format(
+                "\n⚠️ **Maximum tool rounds reached (%d)** - Completing investigation with current findings.\n\n",
+                MAX_TOOL_ROUNDS
+            ));
+            isConversationActive = false;
+            userHandler.onComplete("Maximum tool calling rounds reached");
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+            return;
+        }
+
         try {
             // Trim conversation history to prevent token overflow
             trimConversationHistory();
@@ -301,6 +323,11 @@ public class ConversationalToolHandler {
                         conversationHistory.add(assistantMsg);
 
                         if ("tool_use".equals(stopReason) && !toolCalls.isEmpty()) {
+                            // Increment tool call round counter (multi-turn tracking)
+                            toolCallRound++;
+                            Msg.debug(ConversationalToolHandler.this,
+                                String.format("Tool calling round %d/%d", toolCallRound, MAX_TOOL_ROUNDS));
+
                             // Execute tools after text streaming completes
                             handleToolCallsFromStream(toolCalls);
                         } else {
@@ -415,6 +442,11 @@ public class ConversationalToolHandler {
                         conversationHistory.add(assistantMsg);
 
                         if ("tool_calls".equals(stopReason) && !toolCalls.isEmpty()) {
+                            // Increment tool call round counter (multi-turn tracking)
+                            toolCallRound++;
+                            Msg.debug(ConversationalToolHandler.this,
+                                String.format("Tool calling round %d/%d", toolCallRound, MAX_TOOL_ROUNDS));
+
                             handleToolCallsFromOpenAIStream(toolCalls);
                         } else {
                             // Conversation complete - pass the full response text
@@ -488,6 +520,11 @@ public class ConversationalToolHandler {
                         conversationHistory.add(assistantMsg);
 
                         if ("tool_calls".equals(stopReason) && !toolCalls.isEmpty()) {
+                            // Increment tool call round counter (multi-turn tracking)
+                            toolCallRound++;
+                            Msg.debug(ConversationalToolHandler.this,
+                                String.format("Tool calling round %d/%d", toolCallRound, MAX_TOOL_ROUNDS));
+
                             handleToolCallsFromLMStudioStream(toolCalls);
                         } else {
                             // Conversation complete - pass the full response text
@@ -1341,5 +1378,15 @@ public class ConversationalToolHandler {
         });
         
         return future;
+    }
+
+    /**
+     * Get the current conversation history.
+     * Useful for persisting ReAct conversations.
+     *
+     * @return Copy of conversation history
+     */
+    public List<ChatMessage> getConversationHistory() {
+        return new ArrayList<>(conversationHistory);
     }
 }

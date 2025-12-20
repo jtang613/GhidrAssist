@@ -11,10 +11,14 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonElement;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -203,7 +207,159 @@ public class MCPToolManager {
                 return MCPToolResult.error(throwable.getMessage());
             });
     }
-    
+
+    /**
+     * Execute multiple tools in parallel for better performance.
+     * Implements BinAssist parity with max 3 concurrent tool executions.
+     *
+     * @param toolCalls List of tool calls to execute
+     * @param maxConcurrent Maximum number of concurrent executions (default: 3)
+     * @return CompletableFuture with list of results in original order
+     */
+    public CompletableFuture<List<MCPToolResult>> executeToolsParallel(
+        List<ToolCallRequest> toolCalls,
+        int maxConcurrent
+    ) {
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return CompletableFuture.completedFuture(new ArrayList<>());
+        }
+
+        // Track original order
+        Map<String, Integer> originalOrder = new HashMap<>();
+        for (int i = 0; i < toolCalls.size(); i++) {
+            originalOrder.put(toolCalls.get(i).getCallId(), i);
+        }
+
+        ExecutorService executor = Executors.newFixedThreadPool(Math.min(maxConcurrent, toolCalls.size()));
+        List<CompletableFuture<ToolCallResult>> futures = new ArrayList<>();
+
+        try {
+            // Submit all tool calls
+            for (ToolCallRequest toolCall : toolCalls) {
+                CompletableFuture<ToolCallResult> future = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        MCPToolResult result = executeTool(toolCall.getToolName(), toolCall.getArguments())
+                            .orTimeout(30, TimeUnit.SECONDS)
+                            .get();
+
+                        return new ToolCallResult(toolCall.getCallId(), result);
+
+                    } catch (java.util.concurrent.ExecutionException e) {
+                        // Check if it's a timeout
+                        if (e.getCause() instanceof java.util.concurrent.TimeoutException) {
+                            Msg.warn(this, String.format("Tool '%s' timed out after 30 seconds", toolCall.getToolName()));
+                            return new ToolCallResult(
+                                toolCall.getCallId(),
+                                MCPToolResult.error("Tool execution timeout after 30 seconds")
+                            );
+                        } else {
+                            Msg.error(this, String.format("Tool '%s' failed: %s", toolCall.getToolName(), e.getCause().getMessage()));
+                            return new ToolCallResult(
+                                toolCall.getCallId(),
+                                MCPToolResult.error(e.getCause().getMessage())
+                            );
+                        }
+                    } catch (Exception e) {
+                        Msg.error(this, String.format("Tool '%s' failed: %s", toolCall.getToolName(), e.getMessage()));
+                        return new ToolCallResult(
+                            toolCall.getCallId(),
+                            MCPToolResult.error(e.getMessage())
+                        );
+                    }
+                }, executor);
+
+                futures.add(future);
+            }
+
+            // Wait for all to complete
+            return CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                .thenApply(v -> {
+                    // Collect results
+                    List<ToolCallResult> results = futures.stream()
+                        .map(CompletableFuture::join)
+                        .collect(Collectors.toList());
+
+                    // Reorder to match original sequence
+                    results.sort((a, b) -> {
+                        int orderA = originalOrder.getOrDefault(a.getCallId(), Integer.MAX_VALUE);
+                        int orderB = originalOrder.getOrDefault(b.getCallId(), Integer.MAX_VALUE);
+                        return Integer.compare(orderA, orderB);
+                    });
+
+                    Msg.debug(this, String.format("Parallel execution complete: %d tools", results.size()));
+
+                    // Extract MCPToolResults in correct order
+                    return results.stream()
+                        .map(ToolCallResult::getResult)
+                        .collect(Collectors.toList());
+                })
+                .whenComplete((results, throwable) -> {
+                    executor.shutdown();
+                });
+
+        } catch (Exception e) {
+            executor.shutdown();
+            return CompletableFuture.failedFuture(e);
+        }
+    }
+
+    /**
+     * Execute multiple tools in parallel with default concurrency (3).
+     */
+    public CompletableFuture<List<MCPToolResult>> executeToolsParallel(List<ToolCallRequest> toolCalls) {
+        return executeToolsParallel(toolCalls, 3);
+    }
+
+    // ========== Helper Classes for Parallel Execution ==========
+
+    /**
+     * Represents a tool call request with tracking ID.
+     */
+    public static class ToolCallRequest {
+        private final String callId;
+        private final String toolName;
+        private final JsonObject arguments;
+
+        public ToolCallRequest(String callId, String toolName, JsonObject arguments) {
+            this.callId = callId;
+            this.toolName = toolName;
+            this.arguments = arguments;
+        }
+
+        public String getCallId() {
+            return callId;
+        }
+
+        public String getToolName() {
+            return toolName;
+        }
+
+        public JsonObject getArguments() {
+            return arguments;
+        }
+    }
+
+    /**
+     * Represents a completed tool call with result.
+     */
+    private static class ToolCallResult {
+        private final String callId;
+        private final MCPToolResult result;
+
+        public ToolCallResult(String callId, MCPToolResult result) {
+            this.callId = callId;
+            this.result = result;
+        }
+
+        public String getCallId() {
+            return callId;
+        }
+
+        public MCPToolResult getResult() {
+            return result;
+        }
+    }
+
     /**
      * Get all available tools from all servers
      */

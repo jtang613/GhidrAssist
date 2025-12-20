@@ -21,20 +21,29 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * Key features:
  * - Todo list management for tracking investigation progress
- * - Findings accumulation for building evidence
- * - Context summarization to stay within token limits
+ * - Findings accumulation with relevance scoring
+ * - Context window management with token-based thresholds
+ * - Unified conversation history with chunked iterations
  * - Structured prompts with todos and findings
+ * - Reflection-based plan adaptation
+ * - Dynamic iteration budget extension
+ *
+ * Enhanced for BinAssist feature parity.
  */
 public class ReActOrchestrator {
 
     // Configuration
-    private final int maxIterations;
+    private int maxIterations;  // Now mutable for dynamic extension
+    private final int baseMaxIterations;  // Original limit for tracking
     private final int contextSummaryThreshold;
 
     // Dependencies
     private final LlmApi llmApi;
     private final MCPToolManager toolManager;
     private final GhidrAssistPlugin plugin;
+
+    // Conversation history manager (optional - for persistence)
+    private ConversationHistoryManager historyManager;
 
     // Cancellation support
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
@@ -51,6 +60,7 @@ public class ReActOrchestrator {
     ) {
         this.plugin = plugin;
         this.maxIterations = maxIterations;
+        this.baseMaxIterations = maxIterations;  // Store original limit
         this.contextSummaryThreshold = contextSummaryThreshold;
         this.llmApi = new LlmApi(providerConfig, plugin);
         this.toolManager = MCPToolManager.getInstance();
@@ -208,11 +218,12 @@ public class ReActOrchestrator {
         }
 
         // Build investigation prompt
+        // Use enhanced findings format: top 50 findings, 500 chars each (BinAssist parity)
         String prompt = ReActPrompts.buildInvestigationPrompt(
             objective,
             currentIteration == 1 ? initialContext : null,  // Only include context on first iteration
             todoManager.formatForPrompt(),
-            findings.formatForPrompt(),
+            findings.formatForPrompt(50, 500),  // Top 50, max 500 chars per finding
             currentIteration
         );
 
@@ -354,6 +365,7 @@ public class ReActOrchestrator {
                     .findings(findings.getAllFindings().stream()
                         .map(f -> f.getFact())
                         .toList())
+                    .iterationSummaries(findings.getIterationSummaries())
                     .iterationCount(iterationCount)
                     .toolCallCount(toolCallCount)
                     .duration(duration)
@@ -439,23 +451,49 @@ public class ReActOrchestrator {
         reflectionFuture.thenAccept(reflectionResponse -> {
             String trimmedResponse = reflectionResponse.trim();
 
-            // Parse the reflection response - check if it indicates readiness
-            String upperResponse = trimmedResponse.toUpperCase();
-            boolean containsReady = upperResponse.contains("READY:");
-            boolean startsWithReady = upperResponse.startsWith("READY");
-            boolean containsNotReady = upperResponse.contains("NOT READY");
+            // Parse structured reflection response for plan updates
+            ReflectionParsed parsed = parseReflectionResponse(trimmedResponse);
 
-            boolean shouldSynthesize = containsReady || (startsWithReady && !containsNotReady);
+            // Apply plan updates if present (ADD/REMOVE tasks)
+            boolean planChanged = false;
+            if (!parsed.tasksToAdd.isEmpty() || !parsed.tasksToRemove.isEmpty()) {
+                planChanged = todoManager.updateFromReflection(parsed.tasksToAdd, parsed.tasksToRemove);
+
+                if (planChanged) {
+                    Msg.info(this, String.format(
+                        "Reflection updated plan: +%d tasks, -%d tasks",
+                        parsed.tasksToAdd.size(), parsed.tasksToRemove.size()
+                    ));
+                    handler.onTodosUpdated(todoManager.formatForPrompt());
+
+                    // Dynamic iteration budget extension (BinAssist parity)
+                    if (!parsed.tasksToAdd.isEmpty()) {
+                        int extensionAmount = parsed.tasksToAdd.size();
+                        maxIterations += extensionAmount;
+                        Msg.info(this, String.format(
+                            "Extended iteration budget by %d (new limit: %d)",
+                            extensionAmount, maxIterations
+                        ));
+                        handler.onFinding(String.format(
+                            "⚡ Extended investigation budget: +%d iterations (new limit: %d)",
+                            extensionAmount, maxIterations
+                        ));
+                    }
+                }
+            }
+
+            // Determine if ready to synthesize
+            boolean shouldSynthesize = "READY".equals(parsed.decision);
 
             if (shouldSynthesize) {
-                // Log reflection and decision as findings, not thoughts (to avoid replacing iteration output)
-                handler.onFinding("Self-Reflection: " + trimmedResponse);
-                handler.onFinding("Decision: Sufficient information gathered - synthesizing final answer");
+                // Log reflection and decision
+                handler.onFinding("Self-Reflection: " + parsed.assessment);
+                handler.onFinding("Decision: READY - Sufficient information gathered, synthesizing final answer");
                 synthesizeFinalAnswer(objective, todoManager, findings, tools, handler, startTime, resultFuture, currentIteration, toolCallCount.get(), ReActResult.Status.SUCCESS);
             } else {
-                // Log reflection and decision as findings, not thoughts (to avoid replacing iteration output)
-                handler.onFinding("Self-Reflection: " + trimmedResponse);
-                handler.onFinding("Decision: More investigation needed - continuing");
+                // Log reflection and decision
+                handler.onFinding("Self-Reflection: " + parsed.assessment);
+                handler.onFinding("Decision: CONTINUE - " + parsed.reason);
                 // Continue to next iteration
                 runReActIteration(
                     objective,
@@ -521,6 +559,90 @@ public class ReActOrchestrator {
                 break;  // Only one should be in progress at a time
             }
         }
+    }
+
+    /**
+     * Parse structured reflection response.
+     * Expected format:
+     * **Assessment:** ...
+     * **Plan Updates:**
+     * - ADD: task (or "None")
+     * - REMOVE: task (or "None")
+     * **Decision:** READY or CONTINUE
+     * **Reason:** ...
+     */
+    private ReflectionParsed parseReflectionResponse(String response) {
+        ReflectionParsed parsed = new ReflectionParsed();
+
+        String[] lines = response.split("\n");
+        boolean inPlanUpdates = false;
+
+        for (String line : lines) {
+            line = line.trim();
+
+            // Parse Assessment
+            if (line.startsWith("**Assessment:**")) {
+                parsed.assessment = line.substring("**Assessment:**".length()).trim();
+            }
+            // Parse Plan Updates section
+            else if (line.startsWith("**Plan Updates:**")) {
+                inPlanUpdates = true;
+            }
+            // Parse Decision
+            else if (line.startsWith("**Decision:**")) {
+                inPlanUpdates = false;
+                String decision = line.substring("**Decision:**".length()).trim().toUpperCase();
+                // Extract READY or CONTINUE
+                if (decision.contains("READY") && !decision.contains("NOT READY")) {
+                    parsed.decision = "READY";
+                } else {
+                    parsed.decision = "CONTINUE";
+                }
+            }
+            // Parse Reason
+            else if (line.startsWith("**Reason:**")) {
+                parsed.reason = line.substring("**Reason:**".length()).trim();
+            }
+            // Parse ADD/REMOVE within Plan Updates
+            else if (inPlanUpdates) {
+                if (line.startsWith("- ADD:") || line.startsWith("-ADD:")) {
+                    String task = line.replaceFirst("^-\\s*ADD:\\s*", "").trim();
+                    if (!task.equalsIgnoreCase("None") && !task.isEmpty()) {
+                        parsed.tasksToAdd.add(task);
+                    }
+                } else if (line.startsWith("- REMOVE:") || line.startsWith("-REMOVE:")) {
+                    String task = line.replaceFirst("^-\\s*REMOVE:\\s*", "").trim();
+                    if (!task.equalsIgnoreCase("None") && !task.isEmpty()) {
+                        parsed.tasksToRemove.add(task);
+                    }
+                }
+            }
+        }
+
+        // Fallback parsing if structured format not found
+        if (parsed.decision == null) {
+            String upperResponse = response.toUpperCase();
+            if (upperResponse.contains("READY:") || upperResponse.startsWith("READY")) {
+                parsed.decision = "READY";
+                parsed.assessment = "Ready to synthesize (legacy format)";
+            } else {
+                parsed.decision = "CONTINUE";
+                parsed.assessment = "Continue investigation (legacy format)";
+            }
+        }
+
+        return parsed;
+    }
+
+    /**
+     * Helper class for parsed reflection response.
+     */
+    private static class ReflectionParsed {
+        String assessment = "";
+        List<String> tasksToAdd = new java.util.ArrayList<>();
+        List<String> tasksToRemove = new java.util.ArrayList<>();
+        String decision = null;  // "READY" or "CONTINUE"
+        String reason = "";
     }
 
     /**

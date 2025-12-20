@@ -18,7 +18,7 @@
 		<link>
 			<name>Ghidra</name>
 			<type>2</type>
-			<location>/home/jtang613/tools/ghidra_11.4.3_PUBLIC</location>
+			<location>/home/jtang613/tools/ghidra_12.0_PUBLIC</location>
 		</link>
 	</linkedResources>
 </projectDescription>
