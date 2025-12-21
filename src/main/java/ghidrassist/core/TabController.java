@@ -478,14 +478,15 @@ public class TabController {
                 finalDisplay.append(result.toMarkdown());
 
                 // Save ReAct analysis with proper chunking to database
+                // Pass the FULL chronological history, not just summaries
                 queryService.saveReActAnalysis(
                     query,
-                    result.getAnswer(),
-                    result.getIterationSummaries()
+                    historyContainer[0].toString(),  // Full investigation details
+                    result.getAnswer()
                 );
 
-                // Show in UI (using conversation history for consistency with regular queries)
-                String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                // Show in UI - display the full chronological history that was streamed
+                String html = markdownHelper.markdownToHtml(finalDisplay.toString());
                 queryTab.setResponseText(html);
 
                 // Clear the orchestrator reference
@@ -1459,6 +1460,8 @@ public class TabController {
             private final StringBuilder chronologicalHistory = new StringBuilder();  // Single sequential history
             private final Object historyLock = new Object();  // Protect concurrent access
             private String currentIterationOutput = "";
+            private final StringBuilder synthesisBuffer = new StringBuilder();  // Separate buffer for synthesis streaming
+            private boolean synthesisStarted = false;
             private int lastIterationSeen = -1;  // Start at -1 so iteration 0 triggers header
 
             @Override
@@ -1542,6 +1545,10 @@ public class TabController {
                         chronologicalHistory.append("---\n\n");
                         currentIterationOutput = "";
                     }
+                    // Archive synthesis buffer if present
+                    if (synthesisBuffer.length() > 0) {
+                        chronologicalHistory.append(synthesisBuffer).append("\n\n");
+                    }
                     historyContainer[0] = chronologicalHistory;
                 }
                 // Final render happens in handleAgenticQuery's thenAccept handler
@@ -1599,6 +1606,37 @@ public class TabController {
                 }
             }
 
+            @Override
+            public void onSynthesisChunk(String chunk) {
+                synchronized (historyLock) {
+                    // Add synthesis header on first chunk
+                    if (!synthesisStarted) {
+                        // Archive any remaining iteration output
+                        if (!currentIterationOutput.isEmpty()) {
+                            chronologicalHistory.append(currentIterationOutput).append("\n\n");
+                            currentIterationOutput = "";
+                        }
+                        chronologicalHistory.append("---\n\n");
+                        chronologicalHistory.append("## 🎯 Final Analysis\n\n");
+                        synthesisStarted = true;
+                    }
+
+                    // Handle cumulative vs delta responses - extract only new content
+                    String currentBuffer = synthesisBuffer.toString();
+                    if (chunk.startsWith(currentBuffer)) {
+                        // Cumulative response - extract delta
+                        String newContent = chunk.substring(currentBuffer.length());
+                        if (!newContent.isEmpty()) {
+                            synthesisBuffer.append(newContent);
+                        }
+                    } else {
+                        // Delta response - append directly
+                        synthesisBuffer.append(chunk);
+                    }
+                }
+                // Let periodic render task handle display - no immediate UI update
+            }
+
             /**
              * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
              */
@@ -1607,9 +1645,17 @@ public class TabController {
                 synchronized (historyLock) {
                     StringBuilder display = new StringBuilder();
                     display.append(chronologicalHistory);
+
+                    // Include current iteration output if present
                     if (!currentIterationOutput.isEmpty()) {
                         display.append(currentIterationOutput).append("\n\n");
                     }
+
+                    // Include synthesis buffer if streaming
+                    if (synthesisBuffer.length() > 0) {
+                        display.append(synthesisBuffer);
+                    }
+
                     content = display.toString();
                 }
 

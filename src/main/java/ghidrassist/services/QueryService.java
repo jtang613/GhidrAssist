@@ -513,41 +513,60 @@ public class QueryService {
 
     /**
      * Format ReAct messages into markdown conversation format.
-     * Structures the conversation with user query, iteration summaries, and final answer.
+     * Restores the complete investigation: user query, full investigation history, and final synthesis.
      */
     private String formatReActConversation(java.util.List<ghidrassist.apiprovider.ChatMessage> messages, int sessionId) {
         StringBuilder conversation = new StringBuilder();
 
-        // First message should be the user query
-        if (!messages.isEmpty() && "user".equals(messages.get(0).getRole())) {
-            conversation.append("**User**: ").append(messages.get(0).getContent()).append("\n\n");
-        }
+        String userQuery = null;
+        String investigationHistory = null;
+        String finalSynthesis = null;
 
-        // Get iteration summaries for structured display
-        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-        java.util.List<String> iterationSummaries = analysisDB.getReActIterationSummaries(programHash, sessionId);
-
-        if (!iterationSummaries.isEmpty()) {
-            conversation.append("**Assistant** (ReAct Investigation):\n\n");
-            conversation.append("# Investigation Process\n\n");
-
-            for (int i = 0; i < iterationSummaries.size(); i++) {
-                conversation.append("## Iteration ").append(i + 1).append("\n");
-                conversation.append(iterationSummaries.get(i)).append("\n\n");
-            }
-        }
-
-        // Find and append the final synthesis message (last assistant message)
-        for (int i = messages.size() - 1; i >= 0; i--) {
-            ghidrassist.apiprovider.ChatMessage msg = messages.get(i);
-            if ("assistant".equals(msg.getRole()) && msg.getContent() != null && !msg.getContent().trim().isEmpty()) {
-                // Check if this looks like a synthesis (not an iteration summary)
-                if (!iterationSummaries.contains(msg.getContent())) {
-                    conversation.append("# Final Analysis\n\n");
-                    conversation.append(msg.getContent()).append("\n\n");
-                    break;
+        // Extract components from messages
+        for (ghidrassist.apiprovider.ChatMessage msg : messages) {
+            if ("user".equals(msg.getRole())) {
+                userQuery = msg.getContent();
+            } else if ("assistant".equals(msg.getRole())) {
+                // Investigation history is the longest message (contains all iteration details)
+                // Synthesis is typically shorter
+                if (msg.getContent() != null) {
+                    if (investigationHistory == null || msg.getContent().length() > investigationHistory.length()) {
+                        // This is likely the investigation history (comprehensive)
+                        // Save previous as potential synthesis
+                        if (investigationHistory != null) {
+                            finalSynthesis = investigationHistory;
+                        }
+                        investigationHistory = msg.getContent();
+                    } else {
+                        // This is likely the synthesis (shorter, more focused)
+                        finalSynthesis = msg.getContent();
+                    }
                 }
             }
+        }
+
+        // Build formatted conversation in order
+        // 1. User query at the top
+        if (userQuery != null) {
+            conversation.append("**User**: ").append(userQuery).append("\n\n");
+        }
+
+        // 2. Full investigation history (all iterations with details)
+        if (investigationHistory != null) {
+            conversation.append(investigationHistory);
+            // Add separator if we have synthesis coming
+            if (finalSynthesis != null && !investigationHistory.contains("# Final")) {
+                conversation.append("\n\n---\n\n");
+            }
+        }
+
+        // 3. Final synthesis/analysis
+        if (finalSynthesis != null) {
+            // Only add header if not already present in the synthesis
+            if (!finalSynthesis.trim().startsWith("#")) {
+                conversation.append("# Final Analysis\n\n");
+            }
+            conversation.append(finalSynthesis).append("\n\n");
         }
 
         return conversation.toString();
@@ -710,14 +729,15 @@ public class QueryService {
     }
 
     /**
-     * Save ReAct analysis to database with proper chunking.
-     * Stores to GHReActMessages table instead of regular chat messages.
+     * Save ReAct analysis to database with full investigation history.
+     * Stores complete chronological investigation to GHReActMessages table.
+     * Preserves all details: planning, iterations, tool calls, reflections, synthesis.
      *
      * @param userQuery Original user query
-     * @param finalResult Final answer from ReAct analysis
-     * @param iterationSummaries List of iteration summaries (one per iteration)
+     * @param investigationHistory Full chronological history (all iterations with details)
+     * @param finalResult Final answer from ReAct synthesis
      */
-    public void saveReActAnalysis(String userQuery, String finalResult, java.util.List<String> iterationSummaries) {
+    public void saveReActAnalysis(String userQuery, String investigationHistory, String finalResult) {
         ensureSession();
 
         if (currentSessionId == -1 || plugin.getCurrentProgram() == null) {
@@ -725,26 +745,41 @@ public class QueryService {
         }
 
         String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-        int messageOrder = 0;
 
-        // Save user query as first message
+        // Get current message count to avoid overwriting existing messages
+        int existingMessageCount = analysisDB.getReActMessages(programHash, currentSessionId).size();
+        int messageOrder = existingMessageCount;
+
+        // Get max existing iteration number for proper offset
+        int iterationNumber = analysisDB.getMaxReActIteration(programHash, currentSessionId) + 1;
+
+        // Append user query to conversation history (if not already there)
+        if (!conversationHistory.toString().contains(userQuery)) {
+            conversationHistory.append("**User**: ").append(userQuery).append("\n\n");
+        }
+
+        // Save user query as first ReAct message
         ghidrassist.apiprovider.ChatMessage userMsg =
             new ghidrassist.apiprovider.ChatMessage("user", userQuery);
         analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
             "planning", null, userMsg);
 
-        // Save iteration summaries as investigation messages
-        if (iterationSummaries != null) {
-            for (int i = 0; i < iterationSummaries.size(); i++) {
-                ghidrassist.apiprovider.ChatMessage iterMsg =
-                    new ghidrassist.apiprovider.ChatMessage("assistant", iterationSummaries.get(i));
-                analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
-                    "investigation", i + 1, iterMsg);
+        // Save FULL investigation history as investigation message
+        // This includes: planning, all iterations (thoughts, tool calls, observations),
+        // reflections, todos progression, findings - everything streamed to the user
+        if (investigationHistory != null && !investigationHistory.isEmpty()) {
+            ghidrassist.apiprovider.ChatMessage investigationMsg =
+                new ghidrassist.apiprovider.ChatMessage("assistant", investigationHistory);
+            analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
+                "investigation", iterationNumber, investigationMsg);
 
-                // Save iteration chunk
-                analysisDB.saveReActIterationChunk(programHash, currentSessionId, i + 1,
-                    iterationSummaries.get(i), messageOrder - 1, messageOrder - 1);
-            }
+            // Save iteration chunk with full history
+            analysisDB.saveReActIterationChunk(programHash, currentSessionId, iterationNumber,
+                investigationHistory, messageOrder - 1, messageOrder - 1);
+
+            // Append to conversation history
+            conversationHistory.append("**Assistant** (ReAct Investigation):\n\n");
+            conversationHistory.append(investigationHistory).append("\n\n");
         }
 
         // Save final synthesis as last message
@@ -753,8 +788,8 @@ public class QueryService {
         analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
             "synthesis", null, finalMsg);
 
-        // Also save to legacy conversation history for compatibility
-        addAssistantResponse(finalResult);
+        // Append final result to conversation history
+        conversationHistory.append("**Assistant** (Final Analysis):\n").append(finalResult).append("\n\n");
     }
 
     /**

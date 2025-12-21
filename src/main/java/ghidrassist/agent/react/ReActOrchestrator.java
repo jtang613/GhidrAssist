@@ -352,6 +352,8 @@ public class ReActOrchestrator {
             @Override
             public void onUpdate(String partialResponse) {
                 answer.append(partialResponse);
+                // Stream synthesis to UI
+                handler.onSynthesisChunk(partialResponse);
             }
 
             @Override
