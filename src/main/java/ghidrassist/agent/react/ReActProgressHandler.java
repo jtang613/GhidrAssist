@@ -90,4 +90,12 @@ public interface ReActProgressHandler {
     default void onSummarizing(String summary) {
         // Default implementation does nothing - can be overridden
     }
+
+    /**
+     * Called when synthesis response is streaming.
+     * @param chunk Chunk of the synthesis response
+     */
+    default void onSynthesisChunk(String chunk) {
+        // Default implementation does nothing - can be overridden
+    }
 }

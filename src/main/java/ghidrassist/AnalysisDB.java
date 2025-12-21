@@ -928,4 +928,30 @@ public class AnalysisDB {
 
         return false;
     }
+
+    /**
+     * Get the maximum iteration number for a ReAct session.
+     * Used to continue iteration numbering across multiple ReAct runs in same session.
+     *
+     * @param programHash Program hash
+     * @param sessionId Session ID
+     * @return Maximum iteration number, or 0 if no iterations exist
+     */
+    public int getMaxReActIteration(String programHash, int sessionId) {
+        String sql = "SELECT COALESCE(MAX(iteration_number), 0) FROM GHReActIterationChunks " +
+                "WHERE program_hash = ? AND session_id = ?";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+            pstmt.setString(1, programHash);
+            pstmt.setInt(2, sessionId);
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get max ReAct iteration: " + e.getMessage(), e);
+        }
+
+        return 0;
+    }
 }
