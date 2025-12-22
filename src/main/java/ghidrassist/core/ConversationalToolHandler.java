@@ -40,17 +40,18 @@ public class ConversationalToolHandler {
     private int toolCallRound = 0; // Track tool calling rounds within iteration
     private static final int MAX_RATE_LIMIT_RETRIES = 3;
     private static final int MAX_CONVERSATION_HISTORY = 20; // Keep last 20 messages to prevent token overflow
-    private static final int MAX_TOOL_ROUNDS = 10; // Maximum tool calling rounds per iteration (BinAssist parity)
+    private final int maxToolRounds; // Maximum tool calling rounds per iteration (configurable)
     private static final int API_TIMEOUT_SECONDS = 120; // Timeout for blocking API calls
-    
+
     public ConversationalToolHandler(
             LlmApiClient apiClient,
             List<Map<String, Object>> functions,
             ResponseProcessor responseProcessor,
             LlmApi.LlmResponseHandler userHandler,
             LlmErrorHandler errorHandler,
-            Runnable onCompletionCallback) {
-        
+            Runnable onCompletionCallback,
+            int maxToolRounds) {
+
         this.apiClient = apiClient;
         this.availableFunctions = functions;
         this.responseProcessor = responseProcessor;
@@ -58,6 +59,7 @@ public class ConversationalToolHandler {
         this.errorHandler = errorHandler;
         this.onCompletionCallback = onCompletionCallback;
         this.conversationHistory = new ArrayList<>();
+        this.maxToolRounds = maxToolRounds > 0 ? maxToolRounds : 10; // Default to 10 if invalid
     }
     
     /**
@@ -112,14 +114,14 @@ public class ConversationalToolHandler {
         }
 
         // Check tool calling round limit (safety mechanism for infinite loops)
-        if (toolCallRound >= MAX_TOOL_ROUNDS) {
+        if (toolCallRound >= maxToolRounds) {
             Msg.warn(this, String.format(
                 "Reached maximum tool calling rounds (%d). Completing conversation to prevent infinite loops.",
-                MAX_TOOL_ROUNDS
+                maxToolRounds
             ));
             userHandler.onUpdate(String.format(
                 "\n⚠️ **Maximum tool rounds reached (%d)** - Completing investigation with current findings.\n\n",
-                MAX_TOOL_ROUNDS
+                maxToolRounds
             ));
             isConversationActive = false;
             userHandler.onComplete("Maximum tool calling rounds reached");
@@ -326,7 +328,7 @@ public class ConversationalToolHandler {
                             // Increment tool call round counter (multi-turn tracking)
                             toolCallRound++;
                             Msg.debug(ConversationalToolHandler.this,
-                                String.format("Tool calling round %d/%d", toolCallRound, MAX_TOOL_ROUNDS));
+                                String.format("Tool calling round %d/%d", toolCallRound, maxToolRounds));
 
                             // Execute tools after text streaming completes
                             handleToolCallsFromStream(toolCalls);
@@ -445,7 +447,7 @@ public class ConversationalToolHandler {
                             // Increment tool call round counter (multi-turn tracking)
                             toolCallRound++;
                             Msg.debug(ConversationalToolHandler.this,
-                                String.format("Tool calling round %d/%d", toolCallRound, MAX_TOOL_ROUNDS));
+                                String.format("Tool calling round %d/%d", toolCallRound, maxToolRounds));
 
                             handleToolCallsFromOpenAIStream(toolCalls);
                         } else {
@@ -523,7 +525,7 @@ public class ConversationalToolHandler {
                             // Increment tool call round counter (multi-turn tracking)
                             toolCallRound++;
                             Msg.debug(ConversationalToolHandler.this,
-                                String.format("Tool calling round %d/%d", toolCallRound, MAX_TOOL_ROUNDS));
+                                String.format("Tool calling round %d/%d", toolCallRound, maxToolRounds));
 
                             handleToolCallsFromLMStudioStream(toolCalls);
                         } else {

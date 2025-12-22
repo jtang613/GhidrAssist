@@ -24,14 +24,16 @@ public class QueryService {
     private final GhidrAssistPlugin plugin;
     private final StringBuilder conversationHistory;
     private final AnalysisDB analysisDB;
+    private final AnalysisDataService analysisDataService;
     private int currentSessionId = -1;
     private List<PersistedChatMessage> messageList = new ArrayList<>();
     private String currentProviderType = "unknown";
-    
+
     public QueryService(GhidrAssistPlugin plugin) {
         this.plugin = plugin;
         this.conversationHistory = new StringBuilder();
         this.analysisDB = new AnalysisDB();
+        this.analysisDataService = new AnalysisDataService(plugin);
     }
     
     /**
@@ -143,8 +145,9 @@ public class QueryService {
         
         if (!mcpFunctions.isEmpty()) {
             // Use conversational tool calling with finish_reason monitoring
-            llmApi.sendConversationalToolRequest(request.getFullConversation(), 
-                mcpFunctions, handler);
+            int maxToolRounds = analysisDataService.getMaxToolCalls();
+            llmApi.sendConversationalToolRequest(request.getFullConversation(),
+                mcpFunctions, handler, maxToolRounds);
         } else {
             // No MCP tools available, fall back to regular query
             executeRegularQuery(request, llmApi, handler);

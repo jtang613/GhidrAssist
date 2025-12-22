@@ -164,6 +164,40 @@ public class TabController {
         return effort != null ? effort.substring(0, 1).toUpperCase() + effort.substring(1) : "None";
     }
 
+    /**
+     * Set the max tool calls per iteration.
+     * Saves to database for persistence across sessions.
+     */
+    public void setMaxToolCalls(int maxToolCalls) {
+        // Validate range (must be at least 1)
+        if (maxToolCalls < 1) {
+            maxToolCalls = 10;
+        }
+
+        // Save to database
+        try {
+            analysisDataService.saveMaxToolCalls(maxToolCalls);
+            Msg.info(this, "Max tool calls per iteration set to: " + maxToolCalls);
+        } catch (IllegalStateException e) {
+            // No program loaded - just log
+            Msg.info(this, "Max tool calls set to: " + maxToolCalls + " (not saved - no program loaded)");
+        }
+    }
+
+    /**
+     * Get the max tool calls per iteration.
+     * Loads from database if available.
+     */
+    public int getMaxToolCalls() {
+        // Try to load from database first
+        try {
+            return analysisDataService.getMaxToolCalls();
+        } catch (Exception e) {
+            // Fall back to default
+            return 10;
+        }
+    }
+
     // ==== Code Analysis Operations ====
     
     public void handleExplainFunction() {
@@ -452,9 +486,13 @@ public class TabController {
         // Chain the analysis after MCP initialization
         initFuture.thenCompose(v -> {
             // Create ReAct orchestrator with new architecture
+            int maxToolRounds = getMaxToolCalls();  // Load user's max tool calls setting
             currentOrchestrator = new ghidrassist.agent.react.ReActOrchestrator(
                     ghidrassist.GhidrAssistPlugin.getCurrentProviderConfig(),
-                    plugin
+                    plugin,
+                    15,  // maxIterations
+                    8000,  // contextSummaryThreshold
+                    maxToolRounds  // maxToolRounds per iteration
                 );
 
             // Create progress handler for UI updates with todos and findings support
@@ -745,8 +783,9 @@ public class TabController {
         try {
             String currentContext = analysisDataService.getContext();
             analysisOptionsTab.setContextText(currentContext);
-            // Also reload reasoning effort when context is loaded
+            // Also reload reasoning effort and max tool calls when context is loaded
             analysisOptionsTab.loadReasoningEffort();
+            analysisOptionsTab.loadMaxToolCalls();
         } catch (Exception e) {
             Msg.showError(this, analysisOptionsTab, "Error",
                 "Failed to load context: " + e.getMessage());
