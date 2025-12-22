@@ -90,11 +90,11 @@ public class LlmApi {
      * Send a conversational tool calling request that handles multiple turns
      * Monitors finish_reason to determine when to execute tools vs. complete
      */
-    public void sendConversationalToolRequest(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler) {
+    public void sendConversationalToolRequest(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler, int maxToolRounds) {
         if (!apiClient.isProviderAvailable()) {
             errorHandler.handleError(
-                new IllegalStateException("LLM provider is not initialized."), 
-                "send conversational tool request", 
+                new IllegalStateException("LLM provider is not initialized."),
+                "send conversational tool request",
                 null
             );
             return;
@@ -104,14 +104,14 @@ public class LlmApi {
         Runnable onCompletion = () -> {
             activeConversationalHandler = null;
         };
-        
+
         // Create enhanced response handler for conversational tool calling
         ConversationalToolHandler toolHandler = new ConversationalToolHandler(
-            apiClient, functions, responseProcessor, responseHandler, errorHandler, onCompletion);
-        
+            apiClient, functions, responseProcessor, responseHandler, errorHandler, onCompletion, maxToolRounds);
+
         // Store reference for cancellation
         activeConversationalHandler = toolHandler;
-        
+
         // Start the conversation
         toolHandler.startConversation(prompt);
     }

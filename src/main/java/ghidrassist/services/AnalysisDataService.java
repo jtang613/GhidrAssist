@@ -116,6 +116,30 @@ public class AnalysisDataService {
     }
 
     /**
+     * Save max tool calls per iteration for the current program
+     */
+    public void saveMaxToolCalls(int maxToolCalls) {
+        if (plugin.getCurrentProgram() == null) {
+            throw new IllegalStateException("No active program to save max tool calls for.");
+        }
+
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        analysisDB.upsertMaxToolCalls(programHash, maxToolCalls);
+    }
+
+    /**
+     * Get max tool calls per iteration for the current program
+     */
+    public int getMaxToolCalls() {
+        if (plugin.getCurrentProgram() == null) {
+            return 10; // Default when no program loaded
+        }
+
+        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+        return analysisDB.getMaxToolCalls(programHash);
+    }
+
+    /**
      * Get context statistics
      */
     public ContextStats getContextStats() {

@@ -56,6 +56,13 @@ public class AnalysisDB {
         } catch (SQLException e) {
             // Column already exists, ignore
         }
+
+        // Migration: Add max_tool_calls column if it doesn't exist
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE GHContext ADD COLUMN max_tool_calls INTEGER DEFAULT 10");
+        } catch (SQLException e) {
+            // Column already exists, ignore
+        }
         
         String createChatHistoryTableSQL = "CREATE TABLE IF NOT EXISTS GHChatHistory ("
                 + "id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -201,6 +208,20 @@ public class AnalysisDB {
                 } catch (SQLException e) {
                     Msg.error(this, "Failed to add column " + colName + " to GHChatMessages: " + e.getMessage());
                 }
+            }
+        }
+
+        // Migrate data from old 'timestamp' column to 'created_at' if timestamp exists
+        if (existingColumns.contains("timestamp")) {
+            try (Statement stmt = connection.createStatement()) {
+                // Copy timestamp values to created_at for rows where created_at is NULL
+                String migrateSql = "UPDATE GHChatMessages SET created_at = timestamp WHERE created_at IS NULL";
+                int updated = stmt.executeUpdate(migrateSql);
+                if (updated > 0) {
+                    Msg.info(this, "Migrated " + updated + " rows from timestamp to created_at in GHChatMessages");
+                }
+            } catch (SQLException e) {
+                Msg.error(this, "Failed to migrate timestamp data: " + e.getMessage());
             }
         }
     }
@@ -382,6 +403,65 @@ public class AnalysisDB {
         return "none"; // Default to none if not found
     }
 
+    public void upsertMaxToolCalls(String programHash, int maxToolCalls) {
+        // Validate range (must be at least 1)
+        if (maxToolCalls < 1) {
+            maxToolCalls = 10; // Default value
+        }
+
+        // Check if context entry exists
+        String selectSQL = "SELECT program_hash FROM GHContext WHERE program_hash = ?";
+        boolean exists = false;
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setString(1, programHash);
+            ResultSet rs = pstmt.executeQuery();
+            exists = rs.next();
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to check context: " + e.getMessage());
+            return;
+        }
+
+        if (!exists) {
+            // Create entry with default context
+            String insertSQL = "INSERT INTO GHContext (program_hash, system_context, max_tool_calls) VALUES (?, '', ?)";
+            try (PreparedStatement pstmt = connection.prepareStatement(insertSQL)) {
+                pstmt.setString(1, programHash);
+                pstmt.setInt(2, maxToolCalls);
+                pstmt.executeUpdate();
+            } catch (SQLException e) {
+                Msg.showError(this, null, "Database Error", "Failed to insert max tool calls: " + e.getMessage());
+            }
+        } else {
+            // Update existing entry
+            String updateSQL = "UPDATE GHContext SET max_tool_calls = ?, timestamp = CURRENT_TIMESTAMP WHERE program_hash = ?";
+            try (PreparedStatement pstmt = connection.prepareStatement(updateSQL)) {
+                pstmt.setInt(1, maxToolCalls);
+                pstmt.setString(2, programHash);
+                pstmt.executeUpdate();
+            } catch (SQLException e) {
+                Msg.showError(this, null, "Database Error", "Failed to update max tool calls: " + e.getMessage());
+            }
+        }
+    }
+
+    public int getMaxToolCalls(String programHash) {
+        String selectSQL = "SELECT max_tool_calls FROM GHContext WHERE program_hash = ?";
+
+        try (PreparedStatement pstmt = connection.prepareStatement(selectSQL)) {
+            pstmt.setString(1, programHash);
+
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                int maxToolCalls = rs.getInt("max_tool_calls");
+                // Return default if not set (0) or invalid
+                return maxToolCalls > 0 ? maxToolCalls : 10;
+            }
+        } catch (SQLException e) {
+            Msg.showError(this, null, "Database Error", "Failed to retrieve max tool calls: " + e.getMessage());
+        }
+        return 10; // Default to 10 if not found
+    }
+
     // Chat History Methods
     
     public int createChatSession(String programHash, String description, String conversation) {
@@ -532,22 +612,19 @@ public class AnalysisDB {
             }
         } else {
             // Insert new row
-            // Note: session_id and sequence_number included for compatibility with older table schemas
             String insertSql = "INSERT INTO GHChatMessages "
-                    + "(program_hash, chat_id, session_id, message_order, sequence_number, provider_type, native_message_data, "
+                    + "(program_hash, chat_id, message_order, provider_type, native_message_data, "
                     + "role, content_text, message_type, created_at, updated_at) "
-                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+                    + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
             try (PreparedStatement pstmt = connection.prepareStatement(insertSql, Statement.RETURN_GENERATED_KEYS)) {
                 pstmt.setString(1, programHash);
                 pstmt.setInt(2, chatId);
-                pstmt.setInt(3, chatId);  // session_id = chat_id for compatibility
-                pstmt.setInt(4, order);
-                pstmt.setInt(5, order);   // sequence_number = message_order for compatibility
-                pstmt.setString(6, providerType);
-                pstmt.setString(7, nativeData != null ? nativeData : "{}");
-                pstmt.setString(8, role);
-                pstmt.setString(9, content);
-                pstmt.setString(10, messageType != null ? messageType : "standard");
+                pstmt.setInt(3, order);
+                pstmt.setString(4, providerType);
+                pstmt.setString(5, nativeData != null ? nativeData : "{}");
+                pstmt.setString(6, role);
+                pstmt.setString(7, content);
+                pstmt.setString(8, messageType != null ? messageType : "standard");
                 pstmt.executeUpdate();
 
                 ResultSet rs = pstmt.getGeneratedKeys();
@@ -570,9 +647,8 @@ public class AnalysisDB {
      */
     public List<PersistedChatMessage> getMessages(String programHash, int chatId) {
         List<PersistedChatMessage> messages = new ArrayList<>();
-        // Use COALESCE to fall back to timestamp column for older rows without created_at
         String sql = "SELECT id, role, content_text, message_order, "
-                + "COALESCE(created_at, timestamp, CURRENT_TIMESTAMP) as created_at, "
+                + "created_at, "
                 + "provider_type, native_message_data, message_type "
                 + "FROM GHChatMessages WHERE program_hash = ? AND chat_id = ? "
                 + "ORDER BY message_order ASC";

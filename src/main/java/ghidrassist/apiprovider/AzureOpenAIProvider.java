@@ -510,7 +510,10 @@ public class AzureOpenAIProvider extends APIProvider
             if (errorObj.has("error")) {
                 JsonObject error = errorObj.getAsJsonObject("error");
                 if (error.has("code")) {
-                    return error.get("code").getAsString();
+                    JsonElement codeElement = error.get("code");
+                    if (codeElement != null && !codeElement.isJsonNull()) {
+                        return codeElement.getAsString();
+                    }
                 }
             }
         } catch (JsonSyntaxException e) {
@@ -531,7 +534,10 @@ public class AzureOpenAIProvider extends APIProvider
             if (errorObj.has("error")) {
                 JsonObject error = errorObj.getAsJsonObject("error");
                 if (error.has("message")) {
-                    return error.get("message").getAsString();
+                    JsonElement messageElement = error.get("message");
+                    if (messageElement != null && !messageElement.isJsonNull()) {
+                        return messageElement.getAsString();
+                    }
                 }
             }
         } catch (JsonSyntaxException e) {

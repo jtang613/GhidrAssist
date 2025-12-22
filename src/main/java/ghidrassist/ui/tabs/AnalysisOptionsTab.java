@@ -13,6 +13,7 @@ public class AnalysisOptionsTab extends JPanel {
     private JButton saveButton;
     private JButton revertButton;
     private JComboBox<String> reasoningEffortCombo;
+    private JSpinner maxToolCallsSpinner;
 
     public AnalysisOptionsTab(TabController controller) {
         super(new BorderLayout());
@@ -21,6 +22,7 @@ public class AnalysisOptionsTab extends JPanel {
         layoutComponents();
         setupListeners();
         loadReasoningEffort(); // Load saved reasoning effort
+        loadMaxToolCalls(); // Load saved max tool calls
     }
 
     private void initializeComponents() {
@@ -36,6 +38,13 @@ public class AnalysisOptionsTab extends JPanel {
         reasoningEffortCombo = new JComboBox<>(REASONING_EFFORT_OPTIONS);
         reasoningEffortCombo.setSelectedItem("None");
         reasoningEffortCombo.setToolTipText("Set reasoning/thinking effort level for supported models (o1, o3, gpt-oss, Claude with thinking, etc.)");
+
+        // Max tool calls spinner
+        SpinnerNumberModel spinnerModel = new SpinnerNumberModel(10, 1, 50, 1);
+        maxToolCallsSpinner = new JSpinner(spinnerModel);
+        maxToolCallsSpinner.setToolTipText("Maximum tool calls per iteration (default: 10)");
+        // Set preferred width to make it compact
+        maxToolCallsSpinner.setPreferredSize(new Dimension(60, maxToolCallsSpinner.getPreferredSize().height));
     }
 
     private void layoutComponents() {
@@ -44,6 +53,15 @@ public class AnalysisOptionsTab extends JPanel {
         JLabel reasoningLabel = new JLabel("Reasoning Effort:");
         reasoningPanel.add(reasoningLabel);
         reasoningPanel.add(reasoningEffortCombo);
+
+        // Add spacing
+        reasoningPanel.add(Box.createHorizontalStrut(20));
+
+        // Add max tool calls spinner
+        JLabel maxToolCallsLabel = new JLabel("Max Tool Calls / Iteration:");
+        reasoningPanel.add(maxToolCallsLabel);
+        reasoningPanel.add(maxToolCallsSpinner);
+
         reasoningPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
         add(reasoningPanel, BorderLayout.NORTH);
 
@@ -87,6 +105,12 @@ public class AnalysisOptionsTab extends JPanel {
             String selectedEffort = (String) reasoningEffortCombo.getSelectedItem();
             controller.setReasoningEffort(selectedEffort);
         });
+
+        // Max tool calls spinner listener
+        maxToolCallsSpinner.addChangeListener(e -> {
+            int maxToolCalls = (Integer) maxToolCallsSpinner.getValue();
+            controller.setMaxToolCalls(maxToolCalls);
+        });
     }
 
     public void setContextText(String text) {
@@ -102,5 +126,14 @@ public class AnalysisOptionsTab extends JPanel {
         if (savedEffort != null) {
             reasoningEffortCombo.setSelectedItem(savedEffort);
         }
+    }
+
+    /**
+     * Load the saved max tool calls from the controller and update the spinner.
+     * Called when the tab is initialized or when the program changes.
+     */
+    public void loadMaxToolCalls() {
+        int savedMaxToolCalls = controller.getMaxToolCalls();
+        maxToolCallsSpinner.setValue(savedMaxToolCalls);
     }
 }
