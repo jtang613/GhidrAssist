@@ -186,6 +186,9 @@ public class QueryTab extends JPanel {
     }
 
     private void setupListeners() {
+        // Add hyperlink listener for RLHF feedback buttons
+        responseTextPane.addHyperlinkListener(controller::handleHyperlinkEvent);
+
         submitButton.addActionListener(e -> controller.handleQuerySubmit(
             queryTextArea.getText(),
             useRAGCheckBox.isSelected(),

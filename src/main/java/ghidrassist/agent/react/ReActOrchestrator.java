@@ -36,6 +36,7 @@ public class ReActOrchestrator {
     private int maxIterations;  // Now mutable for dynamic extension
     private final int baseMaxIterations;  // Original limit for tracking
     private final int contextSummaryThreshold;
+    private final int maxToolRounds;  // Maximum tool calls per iteration
 
     // Dependencies
     private final LlmApi llmApi;
@@ -49,7 +50,7 @@ public class ReActOrchestrator {
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
 
     public ReActOrchestrator(APIProviderConfig providerConfig, GhidrAssistPlugin plugin) {
-        this(providerConfig, plugin, 15, 8000);
+        this(providerConfig, plugin, 15, 8000, 10);
     }
 
     public ReActOrchestrator(
@@ -58,10 +59,21 @@ public class ReActOrchestrator {
         int maxIterations,
         int contextSummaryThreshold
     ) {
+        this(providerConfig, plugin, maxIterations, contextSummaryThreshold, 10);
+    }
+
+    public ReActOrchestrator(
+        APIProviderConfig providerConfig,
+        GhidrAssistPlugin plugin,
+        int maxIterations,
+        int contextSummaryThreshold,
+        int maxToolRounds
+    ) {
         this.plugin = plugin;
         this.maxIterations = maxIterations;
         this.baseMaxIterations = maxIterations;  // Store original limit
         this.contextSummaryThreshold = contextSummaryThreshold;
+        this.maxToolRounds = maxToolRounds > 0 ? maxToolRounds : 10;  // Default to 10 if invalid
         this.llmApi = new LlmApi(providerConfig, plugin);
         this.toolManager = MCPToolManager.getInstance();
     }
@@ -315,7 +327,7 @@ public class ReActOrchestrator {
         };
 
         // Call the conversational tool handler
-        llmApi.sendConversationalToolRequest(prompt, tools, iterationHandler);
+        llmApi.sendConversationalToolRequest(prompt, tools, iterationHandler, maxToolRounds);
     }
 
     /**

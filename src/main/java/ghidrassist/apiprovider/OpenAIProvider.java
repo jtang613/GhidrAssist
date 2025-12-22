@@ -753,9 +753,15 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
             if (errorObj.has("error")) {
                 JsonObject error = errorObj.getAsJsonObject("error");
                 if (error.has("type")) {
-                    return error.get("type").getAsString();
+                    JsonElement typeElement = error.get("type");
+                    if (typeElement != null && !typeElement.isJsonNull()) {
+                        return typeElement.getAsString();
+                    }
                 } else if (error.has("code")) {
-                    return error.get("code").getAsString();
+                    JsonElement codeElement = error.get("code");
+                    if (codeElement != null && !codeElement.isJsonNull()) {
+                        return codeElement.getAsString();
+                    }
                 }
             }
         } catch (JsonSyntaxException e) {
@@ -776,7 +782,10 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
             if (errorObj.has("error")) {
                 JsonObject error = errorObj.getAsJsonObject("error");
                 if (error.has("message")) {
-                    return error.get("message").getAsString();
+                    JsonElement messageElement = error.get("message");
+                    if (messageElement != null && !messageElement.isJsonNull()) {
+                        return messageElement.getAsString();
+                    }
                 }
             }
         } catch (JsonSyntaxException e) {
