@@ -595,6 +595,12 @@ public class AnalysisDB {
         }
 
         if (existingId > 0) {
+            // NEVER UPDATE message_order=0 (the user query) - it must be preserved!
+            if (order == 0 && "user".equals(role)) {
+                Msg.warn(this, "Attempted to overwrite user query at order=0 - skipping update to preserve original");
+                return existingId;
+            }
+
             // Update existing row
             String updateSql = "UPDATE GHChatMessages SET provider_type = ?, native_message_data = ?, "
                     + "role = ?, content_text = ?, message_type = ?, updated_at = CURRENT_TIMESTAMP "

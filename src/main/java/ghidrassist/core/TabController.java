@@ -976,6 +976,15 @@ public class TabController {
         // Get messages for current session
         List<PersistedChatMessage> messages = queryService.getMessages();
         Msg.info(this, "Edit Start: loaded " + messages.size() + " messages from memory");
+
+        // DEBUG: Log first few messages to see if user query is present
+        for (int i = 0; i < Math.min(3, messages.size()); i++) {
+            PersistedChatMessage msg = messages.get(i);
+            Msg.info(this, String.format("  Message[%d]: role=%s, order=%d, content=%s",
+                i, msg.getRole(), msg.getOrder(),
+                msg.getContent().substring(0, Math.min(50, msg.getContent().length()))));
+        }
+
         if (messages.isEmpty()) {
             Msg.showInfo(this, queryTab, "Empty Chat",
                     "No messages to edit in this chat.");

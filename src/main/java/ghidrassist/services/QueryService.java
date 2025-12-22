@@ -48,7 +48,7 @@ public class QueryService {
      */
     public QueryRequest createQueryRequest(String query, boolean useRAG, boolean useMCP) throws Exception {
         String processedQuery = QueryProcessor.processMacrosInQuery(query, plugin);
-        
+
         if (useRAG) {
             try {
                 processedQuery = QueryProcessor.appendRAGContext(processedQuery);
@@ -56,13 +56,10 @@ public class QueryService {
                 throw new Exception("Failed to perform RAG search: " + e.getMessage(), e);
             }
         }
-        
-        // Add to conversation history
-        conversationHistory.append("**User**:\n").append(processedQuery).append("\n\n");
-        
-        // Ensure we have a session for this conversation
-        ensureSession();
-        
+
+        // Add user message to conversation history AND save to database
+        addUserMessage(processedQuery, currentProviderType, null);
+
         return new QueryRequest(processedQuery, conversationHistory.toString(), useMCP);
     }
     
