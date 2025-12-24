@@ -1,5 +1,7 @@
 package ghidrassist.chat;
 
+import ghidrassist.chat.util.RoleNormalizer;
+
 import java.util.*;
 import java.util.regex.*;
 
@@ -159,7 +161,7 @@ public class ChatEditManager {
             Matcher headerMatch = HEADER_PATTERN.matcher(chunkContent);
             if (headerMatch.find()) {
                 String roleText = headerMatch.group(1).toLowerCase();
-                String role = normalizeRole(roleText);
+                String role = RoleNormalizer.normalize(roleText);
 
                 // Extract content (skip header line)
                 String[] lines = chunkContent.split("\n");
@@ -258,7 +260,7 @@ public class ChatEditManager {
 
         Matcher matcher = unmarkedHeaderPattern.matcher(content);
         while (matcher.find()) {
-            String role = normalizeRole(matcher.group(1));
+            String role = RoleNormalizer.normalize(matcher.group(1));
             String blockContent = matcher.group(2).trim();
 
             // Clean up separators
@@ -289,7 +291,7 @@ public class ChatEditManager {
 
         Matcher matcher = headerPattern.matcher(content);
         while (matcher.find()) {
-            String role = normalizeRole(matcher.group(1));
+            String role = RoleNormalizer.normalize(matcher.group(1));
             String msgContent = matcher.group(2).trim();
 
             // Clean up separators
@@ -307,27 +309,6 @@ public class ChatEditManager {
         }
 
         return messages;
-    }
-
-    private String normalizeRole(String roleText) {
-        if (roleText == null) {
-            return "unknown";
-        }
-        switch (roleText.toLowerCase()) {
-            case "user":
-                return "user";
-            case "assistant":
-            case "ghidrassist":
-                return "assistant";
-            case "edited":
-                return "edited";
-            case "error":
-                return "error";
-            case "tool":
-                return "tool_call";
-            default:
-                return roleText.toLowerCase();
-        }
     }
 
     /**

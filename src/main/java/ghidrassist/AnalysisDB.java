@@ -757,6 +757,14 @@ public class AnalysisDB {
         return 0;
     }
 
+    /**
+     * Get the database connection for use with new chat persistence components.
+     * @return The database connection
+     */
+    public Connection getConnection() {
+        return connection;
+    }
+
     public void close() {
         try {
             if (connection != null && !connection.isClosed()) {

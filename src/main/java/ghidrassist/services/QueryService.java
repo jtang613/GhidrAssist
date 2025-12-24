@@ -6,6 +6,16 @@ import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.chat.PersistedChatMessage;
+import ghidrassist.chat.message.MessageRepository;
+import ghidrassist.chat.message.MessageStore;
+import ghidrassist.chat.message.ThreadSafeMessageStore;
+import ghidrassist.chat.persistence.ChatHistoryDAO;
+import ghidrassist.chat.persistence.SqliteTransactionManager;
+import ghidrassist.chat.persistence.TransactionManager;
+import ghidrassist.chat.session.ChatSession;
+import ghidrassist.chat.session.ChatSessionManager;
+import ghidrassist.chat.session.ChatSessionRepository;
+import ghidrassist.chat.util.RoleNormalizer;
 import ghidrassist.core.QueryProcessor;
 import ghidrassist.mcp2.tools.MCPToolManager;
 
@@ -18,31 +28,49 @@ import java.util.regex.Pattern;
 /**
  * Service for handling custom queries and conversations.
  * Responsible for processing user queries, RAG integration, and conversation management.
+ *
+ * Refactored to use:
+ * - MessageStore for thread-safe in-memory message storage (eliminates dual storage)
+ * - ChatSessionManager for thread-safe session lifecycle
+ * - ChatHistoryDAO for database operations
+ * - RoleNormalizer for consistent role handling
  */
 public class QueryService {
-    
+
     private final GhidrAssistPlugin plugin;
-    private final StringBuilder conversationHistory;
-    private final AnalysisDB analysisDB;
+    private final AnalysisDB analysisDB;  // Keep for ReAct and backward compatibility
     private final AnalysisDataService analysisDataService;
-    private int currentSessionId = -1;
-    private List<PersistedChatMessage> messageList = new ArrayList<>();
-    private String currentProviderType = "unknown";
+
+    // New architecture components
+    private final MessageStore messageStore;
+    private final ChatSessionManager sessionManager;
+    private final MessageRepository messageRepository;
+    private final ChatSessionRepository sessionRepository;
 
     public QueryService(GhidrAssistPlugin plugin) {
         this.plugin = plugin;
-        this.conversationHistory = new StringBuilder();
         this.analysisDB = new AnalysisDB();
         this.analysisDataService = new AnalysisDataService(plugin);
+
+        // Initialize new architecture components
+        TransactionManager transactionManager = new SqliteTransactionManager(analysisDB.getConnection());
+        ChatHistoryDAO dao = new ChatHistoryDAO(transactionManager);
+
+        this.messageStore = new ThreadSafeMessageStore();
+        this.messageRepository = dao;
+        this.sessionRepository = dao;
+        this.sessionManager = new ChatSessionManager(sessionRepository, messageRepository, messageStore);
     }
-    
+
+    // ==================== Query Request Creation ====================
+
     /**
      * Process a user query with optional RAG context (backwards compatibility)
      */
     public QueryRequest createQueryRequest(String query, boolean useRAG) throws Exception {
         return createQueryRequest(query, useRAG, false);
     }
-    
+
     /**
      * Process a user query with optional RAG context and MCP integration
      */
@@ -57,12 +85,14 @@ public class QueryService {
             }
         }
 
-        // Add user message to conversation history AND save to database
-        addUserMessage(processedQuery, currentProviderType, null);
+        // Add user message to message store and database
+        addUserMessage(processedQuery, messageStore.getCurrentProviderType(), null);
 
-        return new QueryRequest(processedQuery, conversationHistory.toString(), useMCP);
+        return new QueryRequest(processedQuery, messageStore.getFormattedConversation(), useMCP);
     }
-    
+
+    // ==================== Query Execution ====================
+
     /**
      * Execute a query request
      */
@@ -71,26 +101,22 @@ public class QueryService {
         if (config == null) {
             throw new Exception("No API provider configured.");
         }
-        
+
         LlmApi llmApi = new LlmApi(config, plugin);
         executeQuery(request, llmApi, handler);
     }
-    
+
     /**
      * Execute a query request with provided LlmApi instance
      */
     public void executeQuery(QueryRequest request, LlmApi llmApi, LlmApi.LlmResponseHandler handler) throws Exception {
-        // Use conversational tool calling with MCP tools if MCP is enabled and available
         if (request.shouldUseMCP()) {
             try {
                 MCPToolManager toolManager = MCPToolManager.getInstance();
-                
-                // Initialize servers asynchronously if not already done
+
                 if (!toolManager.isInitialized()) {
-                    // Start initialization in background and handle result asynchronously
                     toolManager.initializeServers()
                         .thenRun(() -> {
-                            // Once initialized, execute the query with MCP tools
                             try {
                                 executeMCPQuery(request, llmApi, toolManager, handler);
                             } catch (Exception e) {
@@ -104,141 +130,97 @@ public class QueryService {
                             }
                         })
                         .exceptionally(throwable -> {
-                            ghidra.util.Msg.warn(this, "MCP initialization failed, falling back to regular query: " + throwable.getMessage());
+                            ghidra.util.Msg.warn(this, "MCP initialization failed: " + throwable.getMessage());
                             try {
                                 executeRegularQuery(request, llmApi, handler);
                             } catch (Exception e) {
-                                ghidra.util.Msg.error(this, "Failed to execute regular query: " + e.getMessage());
                                 handler.onError(e);
                             }
                             return null;
                         });
-                    return; // Exit early, will continue asynchronously
+                    return;
                 } else {
-                    // Already initialized, execute immediately
                     try {
                         executeMCPQuery(request, llmApi, toolManager, handler);
                         return;
                     } catch (Exception e) {
-                        ghidra.util.Msg.warn(this, "MCP query execution failed, falling back to regular query: " + e.getMessage());
+                        ghidra.util.Msg.warn(this, "MCP query failed, falling back: " + e.getMessage());
                     }
                 }
             } catch (Exception e) {
-                ghidra.util.Msg.warn(this, "MCP initialization failed, falling back to regular query: " + e.getMessage());
+                ghidra.util.Msg.warn(this, "MCP initialization failed: " + e.getMessage());
             }
         }
-        
-        // Fall back to regular query execution
+
         executeRegularQuery(request, llmApi, handler);
     }
-    
-    /**
-     * Execute MCP-enabled query with conversational tool calling
-     */
-    private void executeMCPQuery(QueryRequest request, LlmApi llmApi, MCPToolManager toolManager, LlmApi.LlmResponseHandler handler) throws Exception {
-        // Get MCP tools as function schemas
-        java.util.List<java.util.Map<String, Object>> mcpFunctions = 
-            toolManager.getToolsAsFunction();
-        
+
+    private void executeMCPQuery(QueryRequest request, LlmApi llmApi, MCPToolManager toolManager,
+                                  LlmApi.LlmResponseHandler handler) throws Exception {
+        java.util.List<java.util.Map<String, Object>> mcpFunctions = toolManager.getToolsAsFunction();
+
         if (!mcpFunctions.isEmpty()) {
-            // Use conversational tool calling with finish_reason monitoring
             int maxToolRounds = analysisDataService.getMaxToolCalls();
             llmApi.sendConversationalToolRequest(request.getFullConversation(),
                 mcpFunctions, handler, maxToolRounds);
         } else {
-            // No MCP tools available, fall back to regular query
             executeRegularQuery(request, llmApi, handler);
         }
     }
-    
-    /**
-     * Execute regular query without MCP
-     */
-    private void executeRegularQuery(QueryRequest request, LlmApi llmApi, LlmApi.LlmResponseHandler handler) throws Exception {
+
+    private void executeRegularQuery(QueryRequest request, LlmApi llmApi,
+                                      LlmApi.LlmResponseHandler handler) throws Exception {
         llmApi.sendRequestAsync(request.getFullConversation(), handler);
     }
-    
+
+    // ==================== Message Management ====================
+
     /**
-     * Add user query to conversation history (legacy method)
+     * Add user query to conversation (legacy method)
      */
     public void addUserQuery(String query) {
-        addUserMessage(query, currentProviderType, null);
+        addUserMessage(query, messageStore.getCurrentProviderType(), null);
     }
 
     /**
-     * Add user message with provider info and optional API message
+     * Add user message with provider info
      */
     public void addUserMessage(String query, String providerType, ChatMessage apiMessage) {
-        // Add to legacy conversation history
-        conversationHistory.append("**User**:\n").append(query).append("\n\n");
+        messageStore.addUserMessage(query, providerType, apiMessage);
 
-        // Create persisted message
-        PersistedChatMessage msg = new PersistedChatMessage(
-                null, "user", query,
-                new Timestamp(System.currentTimeMillis()),
-                messageList.size()
-        );
-        msg.setProviderType(providerType != null ? providerType : currentProviderType);
-        msg.setNativeMessageData(serializeToolInfo(apiMessage));
-        msg.setMessageType("standard");
-        messageList.add(msg);
-
-        // Ensure we have a session for this conversation
-        ensureSession();
-
-        // Save to per-message storage
-        if (currentSessionId != -1) {
-            String programHash = getProgramHash();
-            if (programHash != null) {
-                analysisDB.saveMessage(
-                        programHash, currentSessionId, msg.getOrder(),
-                        msg.getProviderType(), msg.getNativeMessageData(),
-                        msg.getRole(), msg.getContent(), msg.getMessageType()
-                );
+        // Ensure session exists and save to database
+        String programHash = getProgramHash();
+        if (programHash != null) {
+            int sessionId = sessionManager.ensureSession(programHash);
+            if (sessionId != ChatSessionManager.NO_SESSION) {
+                PersistedChatMessage msg = getLastMessage();
+                if (msg != null) {
+                    messageRepository.saveMessage(programHash, sessionId, msg);
+                }
             }
         }
     }
 
     /**
-     * Add assistant response to conversation history (legacy method)
+     * Add assistant response (legacy method)
      */
     public void addAssistantResponse(String response) {
-        addAssistantMessage(response, currentProviderType, null);
+        addAssistantMessage(response, messageStore.getCurrentProviderType(), null);
     }
 
     /**
-     * Add assistant message with provider info and optional API message
+     * Add assistant message with provider info
      */
     public void addAssistantMessage(String response, String providerType, ChatMessage apiMessage) {
-        // Add to legacy conversation history
-        conversationHistory.append("**Assistant**:\n").append(response).append("\n\n");
+        messageStore.addAssistantMessage(response, providerType, apiMessage);
 
-        // Create persisted message
-        PersistedChatMessage msg = new PersistedChatMessage(
-                null, "assistant", response,
-                new Timestamp(System.currentTimeMillis()),
-                messageList.size()
-        );
-        msg.setProviderType(providerType != null ? providerType : currentProviderType);
-        msg.setNativeMessageData(serializeToolInfo(apiMessage));
-
-        // Determine message type based on API message
-        if (apiMessage != null && apiMessage.getToolCalls() != null) {
-            msg.setMessageType("tool_call");
-        } else {
-            msg.setMessageType("standard");
-        }
-        messageList.add(msg);
-
-        // Save to per-message storage
-        if (currentSessionId != -1) {
-            String programHash = getProgramHash();
-            if (programHash != null) {
-                analysisDB.saveMessage(
-                        programHash, currentSessionId, msg.getOrder(),
-                        msg.getProviderType(), msg.getNativeMessageData(),
-                        msg.getRole(), msg.getContent(), msg.getMessageType()
-                );
+        // Save to database
+        String programHash = getProgramHash();
+        int sessionId = sessionManager.getCurrentSessionId();
+        if (programHash != null && sessionId != ChatSessionManager.NO_SESSION) {
+            PersistedChatMessage msg = getLastMessage();
+            if (msg != null) {
+                messageRepository.saveMessage(programHash, sessionId, msg);
             }
         }
     }
@@ -247,102 +229,221 @@ public class QueryService {
      * Add tool call message
      */
     public void addToolCallMessage(String toolName, String args, String result) {
-        String content = String.format("Tool: %s\nArguments: %s\nResult: %s", toolName, args, result);
-        conversationHistory.append("**Tool Call**:\n").append(content).append("\n\n");
+        messageStore.addToolCallMessage(toolName, args, result);
 
-        PersistedChatMessage msg = new PersistedChatMessage(
-                null, "tool_call", content,
-                new Timestamp(System.currentTimeMillis()),
-                messageList.size()
-        );
-        msg.setProviderType(currentProviderType);
-        msg.setNativeMessageData(String.format("{\"tool\":\"%s\",\"args\":%s,\"result\":\"%s\"}",
-                escapeJson(toolName), args, escapeJson(result)));
-        msg.setMessageType("tool_call");
-        messageList.add(msg);
-
-        if (currentSessionId != -1) {
-            String programHash = getProgramHash();
-            if (programHash != null) {
-                analysisDB.saveMessage(
-                        programHash, currentSessionId, msg.getOrder(),
-                        msg.getProviderType(), msg.getNativeMessageData(),
-                        msg.getRole(), msg.getContent(), msg.getMessageType()
-                );
+        // Save to database
+        String programHash = getProgramHash();
+        int sessionId = sessionManager.getCurrentSessionId();
+        if (programHash != null && sessionId != ChatSessionManager.NO_SESSION) {
+            PersistedChatMessage msg = getLastMessage();
+            if (msg != null) {
+                messageRepository.saveMessage(programHash, sessionId, msg);
             }
         }
     }
 
     /**
-     * Add error to conversation history
+     * Add error message
      */
     public void addError(String errorMessage) {
-        conversationHistory.append("**Error**:\n").append(errorMessage).append("\n\n");
+        messageStore.addErrorMessage(errorMessage);
 
-        PersistedChatMessage msg = new PersistedChatMessage(
-                null, "error", errorMessage,
-                new Timestamp(System.currentTimeMillis()),
-                messageList.size()
-        );
-        msg.setProviderType(currentProviderType);
-        msg.setNativeMessageData("{}");
-        msg.setMessageType("standard");
-        messageList.add(msg);
-
-        if (currentSessionId != -1) {
-            String programHash = getProgramHash();
-            if (programHash != null) {
-                analysisDB.saveMessage(
-                        programHash, currentSessionId, msg.getOrder(),
-                        msg.getProviderType(), msg.getNativeMessageData(),
-                        msg.getRole(), msg.getContent(), msg.getMessageType()
-                );
+        // Save to database
+        String programHash = getProgramHash();
+        int sessionId = sessionManager.getCurrentSessionId();
+        if (programHash != null && sessionId != ChatSessionManager.NO_SESSION) {
+            PersistedChatMessage msg = getLastMessage();
+            if (msg != null) {
+                messageRepository.saveMessage(programHash, sessionId, msg);
             }
         }
     }
-    
+
+    // ==================== Conversation Access ====================
+
     /**
      * Get current conversation history
      */
     public String getConversationHistory() {
-        return conversationHistory.toString();
+        return messageStore.getFormattedConversation();
     }
-    
+
     /**
      * Clear conversation history
      */
     public void clearConversationHistory() {
-        conversationHistory.setLength(0);
-        messageList.clear();
+        messageStore.clear();
     }
 
     /**
      * Get the list of persisted messages
      */
     public List<PersistedChatMessage> getMessages() {
-        return new ArrayList<>(messageList);
+        return messageStore.getMessages();
     }
 
     /**
      * Set the message list (used when loading or after editing)
      */
     public void setMessages(List<PersistedChatMessage> messages) {
-        this.messageList = new ArrayList<>(messages);
-        rebuildConversationHistory();
+        messageStore.setMessages(messages);
     }
+
+    /**
+     * Replace all messages in both memory and database.
+     * Used for edit operations where the entire conversation is rebuilt.
+     *
+     * @param messages The new message list
+     * @return true if successful
+     */
+    public boolean replaceAllMessages(List<PersistedChatMessage> messages) {
+        String programHash = getProgramHash();
+        int sessionId = sessionManager.getCurrentSessionId();
+
+        if (programHash == null || sessionId == ChatSessionManager.NO_SESSION) {
+            return false;
+        }
+
+        // Update in-memory state
+        messageStore.setMessages(messages);
+
+        // Persist to database atomically
+        return messageRepository.replaceAllMessages(programHash, sessionId, messages);
+    }
+
+    /**
+     * Get current provider type
+     */
+    public String getCurrentProviderType() {
+        return messageStore.getCurrentProviderType();
+    }
+
+    /**
+     * Set current provider type
+     */
+    public void setCurrentProviderType(String providerType) {
+        messageStore.setCurrentProviderType(providerType);
+    }
+
+    // ==================== Session Management ====================
+
+    /**
+     * Create a new chat session
+     */
+    public int createNewChatSession() {
+        String programHash = getProgramHash();
+        if (programHash == null) {
+            return -1;
+        }
+        return sessionManager.createNewSession(programHash);
+    }
+
+    /**
+     * Get all chat sessions for current program
+     */
+    public java.util.List<AnalysisDB.ChatSession> getChatSessions() {
+        String programHash = getProgramHash();
+        if (programHash == null) {
+            return new java.util.ArrayList<>();
+        }
+
+        // Convert new ChatSession to legacy format for backward compatibility
+        List<ChatSession> sessions = sessionManager.getSessions(programHash);
+        java.util.List<AnalysisDB.ChatSession> legacySessions = new java.util.ArrayList<>();
+        for (ChatSession session : sessions) {
+            legacySessions.add(new AnalysisDB.ChatSession(
+                session.getId(),
+                session.getDescription(),
+                session.getLastUpdate()
+            ));
+        }
+        return legacySessions;
+    }
+
+    /**
+     * Switch to a specific chat session
+     */
+    public boolean switchToChatSession(int sessionId) {
+        String programHash = getProgramHash();
+        if (programHash == null) {
+            return false;
+        }
+
+        // Check if this is a ReAct session (needs special handling)
+        if (analysisDB.isReActSession(sessionId)) {
+            return switchToReActSession(programHash, sessionId);
+        }
+
+        return sessionManager.switchToSession(programHash, sessionId);
+    }
+
+    private boolean switchToReActSession(String programHash, int sessionId) {
+        java.util.List<ghidrassist.apiprovider.ChatMessage> messages =
+            analysisDB.getReActMessages(programHash, sessionId);
+
+        if (messages != null && !messages.isEmpty()) {
+            messageStore.clear();
+
+            // Format and set as single message for display
+            String formattedConversation = formatReActConversation(messages, sessionId);
+            PersistedChatMessage displayMsg = new PersistedChatMessage(
+                null, "assistant", formattedConversation,
+                new Timestamp(System.currentTimeMillis()), 0
+            );
+            List<PersistedChatMessage> displayList = new ArrayList<>();
+            displayList.add(displayMsg);
+            messageStore.setMessages(displayList);
+
+            // Update session manager's current session
+            // (ReAct sessions bypass normal session switching)
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Delete current chat session
+     */
+    public boolean deleteCurrentSession() {
+        return sessionManager.deleteCurrentSession();
+    }
+
+    /**
+     * Update chat session description
+     */
+    public void updateChatDescription(int sessionId, String description) {
+        sessionManager.updateSessionDescription(sessionId, description);
+    }
+
+    /**
+     * Get current session ID
+     */
+    public int getCurrentSessionId() {
+        return sessionManager.getCurrentSessionId();
+    }
+
+    /**
+     * Ensure session exists
+     */
+    public void ensureSession() {
+        String programHash = getProgramHash();
+        if (programHash != null && !messageStore.isEmpty()) {
+            sessionManager.ensureSession(programHash);
+        }
+    }
+
+    // ==================== Migration Support ====================
 
     /**
      * Check if current session has been migrated to per-message storage
      */
     public boolean isMigrated() {
-        if (currentSessionId == -1) {
+        int sessionId = sessionManager.getCurrentSessionId();
+        if (sessionId == ChatSessionManager.NO_SESSION) {
             return false;
         }
         String programHash = getProgramHash();
-        if (programHash == null) {
-            return false;
-        }
-        return analysisDB.hasPerMessageStorage(programHash, currentSessionId);
+        return programHash != null && messageRepository.hasMessages(programHash, sessionId);
     }
 
     /**
@@ -355,20 +456,20 @@ public class QueryService {
         }
 
         Pattern pattern = Pattern.compile(
-                "\\*\\*(User|Assistant|Error|Tool Call)\\*\\*:\\s*\\n(.*?)(?=\\*\\*(User|Assistant|Error|Tool Call)\\*\\*:|$)",
-                Pattern.DOTALL
+            "\\*\\*(User|Assistant|Error|Tool Call)\\*\\*:\\s*\\n(.*?)(?=\\*\\*(User|Assistant|Error|Tool Call)\\*\\*:|$)",
+            Pattern.DOTALL
         );
 
         Matcher matcher = pattern.matcher(conversation);
         int order = 0;
         while (matcher.find()) {
-            String role = normalizeRole(matcher.group(1));
+            String role = RoleNormalizer.normalize(matcher.group(1));
             String content = matcher.group(2).trim();
 
             PersistedChatMessage msg = new PersistedChatMessage(
-                    null, role, content,
-                    new Timestamp(System.currentTimeMillis()),
-                    order++
+                null, role, content,
+                new Timestamp(System.currentTimeMillis()),
+                order++
             );
             msg.setProviderType("migrated");
             msg.setMessageType("standard");
@@ -383,7 +484,8 @@ public class QueryService {
      * Load messages from database for current session
      */
     public void loadMessagesFromDatabase() {
-        if (currentSessionId == -1) {
+        int sessionId = sessionManager.getCurrentSessionId();
+        if (sessionId == ChatSessionManager.NO_SESSION) {
             return;
         }
         String programHash = getProgramHash();
@@ -391,178 +493,102 @@ public class QueryService {
             return;
         }
 
-        // Try to load from per-message storage first
-        List<PersistedChatMessage> dbMessages = analysisDB.getMessages(programHash, currentSessionId);
+        List<PersistedChatMessage> dbMessages = messageRepository.loadMessages(programHash, sessionId);
         if (!dbMessages.isEmpty()) {
-            messageList = dbMessages;
-            rebuildConversationHistory();
+            messageStore.setMessages(dbMessages);
         } else {
             // Fall back to legacy blob and migrate
-            String conversation = analysisDB.getChatConversation(currentSessionId);
+            String conversation = sessionRepository.getLegacyConversation(sessionId);
             if (conversation != null && !conversation.isEmpty()) {
-                messageList = migrateFromLegacyBlob(conversation);
-                // Save migrated messages to per-message storage
-                for (PersistedChatMessage msg : messageList) {
-                    analysisDB.saveMessage(
-                            programHash, currentSessionId, msg.getOrder(),
-                            msg.getProviderType(), msg.getNativeMessageData(),
-                            msg.getRole(), msg.getContent(), msg.getMessageType()
-                    );
+                List<PersistedChatMessage> migrated = migrateFromLegacyBlob(conversation);
+                messageStore.setMessages(migrated);
+
+                // Save migrated messages
+                for (PersistedChatMessage msg : migrated) {
+                    messageRepository.saveMessage(programHash, sessionId, msg);
                 }
-                rebuildConversationHistory();
             }
         }
     }
 
-    /**
-     * Set the current provider type
-     */
-    public void setCurrentProviderType(String providerType) {
-        this.currentProviderType = providerType;
-    }
+    // ==================== ReAct Support ====================
 
     /**
-     * Get the current provider type
+     * Save ReAct analysis to database with full investigation history.
      */
-    public String getCurrentProviderType() {
-        return currentProviderType;
-    }
-    
-    // Chat Session Management
-    
-    /**
-     * Create a new chat session and make it current
-     */
-    public int createNewChatSession() {
-        if (plugin.getCurrentProgram() == null) {
-            return -1;
-        }
-        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-        
-        // Get next session ID for auto-generated description
-        java.util.List<AnalysisDB.ChatSession> sessions = analysisDB.getChatSessions(programHash);
-        int nextId = sessions.size() + 1;
-        String description = "Chat " + nextId;
-        
-        // Create session with current conversation
-        currentSessionId = analysisDB.createChatSession(programHash, description, conversationHistory.toString());
-        return currentSessionId;
-    }
-    
-    /**
-     * Get all chat sessions for current program
-     */
-    public java.util.List<AnalysisDB.ChatSession> getChatSessions() {
-        if (plugin.getCurrentProgram() == null) {
-            return new java.util.ArrayList<>();
-        }
-        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-        return analysisDB.getChatSessions(programHash);
-    }
-    
-    /**
-     * Switch to a specific chat session
-     */
-    public boolean switchToChatSession(int sessionId) {
-        if (plugin.getCurrentProgram() == null) {
-            return false;
+    public void saveReActAnalysis(String userQuery, String investigationHistory, String finalResult) {
+        ensureSession();
+
+        int sessionId = sessionManager.getCurrentSessionId();
+        if (sessionId == ChatSessionManager.NO_SESSION || plugin.getCurrentProgram() == null) {
+            return;
         }
 
         String programHash = plugin.getCurrentProgram().getExecutableSHA256();
 
-        // Set current session ID first
-        currentSessionId = sessionId;
+        int existingMessageCount = analysisDB.getReActMessages(programHash, sessionId).size();
+        int messageOrder = existingMessageCount;
+        int iterationNumber = analysisDB.getMaxReActIteration(programHash, sessionId) + 1;
 
-        // Check if this is a ReAct session
-        if (analysisDB.isReActSession(sessionId)) {
-            // Load ReAct messages from dedicated table
-            java.util.List<ghidrassist.apiprovider.ChatMessage> messages =
-                analysisDB.getReActMessages(programHash, sessionId);
+        // Save user query
+        ghidrassist.apiprovider.ChatMessage userMsg =
+            new ghidrassist.apiprovider.ChatMessage("user", userQuery);
+        analysisDB.saveReActMessage(programHash, sessionId, messageOrder++,
+            "planning", null, userMsg);
 
-            if (messages != null && !messages.isEmpty()) {
-                conversationHistory.setLength(0);
-                messageList.clear();
+        // Save investigation history
+        if (investigationHistory != null && !investigationHistory.isEmpty()) {
+            ghidrassist.apiprovider.ChatMessage investigationMsg =
+                new ghidrassist.apiprovider.ChatMessage("assistant", investigationHistory);
+            analysisDB.saveReActMessage(programHash, sessionId, messageOrder++,
+                "investigation", iterationNumber, investigationMsg);
 
-                // Format ReAct messages as conversation
-                String formattedConversation = formatReActConversation(messages, sessionId);
-                conversationHistory.append(formattedConversation);
-                return true;
-            }
-            return false;
-        } else {
-            // Load regular conversation from per-message storage
-            conversationHistory.setLength(0);
-            messageList.clear();
-
-            // Load messages from database and rebuild conversation
-            loadMessagesFromDatabase();
-
-            // If no messages were loaded, fall back to legacy blob
-            if (messageList.isEmpty()) {
-                String conversation = analysisDB.getChatConversation(sessionId);
-                if (conversation != null) {
-                    conversationHistory.append(conversation);
-                    return true;
-                }
-                return false;
-            }
-
-            return true;
+            analysisDB.saveReActIterationChunk(programHash, sessionId, iterationNumber,
+                investigationHistory, messageOrder - 1, messageOrder - 1);
         }
+
+        // Save final synthesis
+        ghidrassist.apiprovider.ChatMessage finalMsg =
+            new ghidrassist.apiprovider.ChatMessage("assistant", finalResult);
+        analysisDB.saveReActMessage(programHash, sessionId, messageOrder++,
+            "synthesis", null, finalMsg);
     }
 
-    /**
-     * Format ReAct messages into markdown conversation format.
-     * Restores the complete investigation: user query, full investigation history, and final synthesis.
-     */
-    private String formatReActConversation(java.util.List<ghidrassist.apiprovider.ChatMessage> messages, int sessionId) {
+    private String formatReActConversation(java.util.List<ghidrassist.apiprovider.ChatMessage> messages,
+                                            int sessionId) {
         StringBuilder conversation = new StringBuilder();
-
         String userQuery = null;
         String investigationHistory = null;
         String finalSynthesis = null;
 
-        // Extract components from messages
         for (ghidrassist.apiprovider.ChatMessage msg : messages) {
             if ("user".equals(msg.getRole())) {
                 userQuery = msg.getContent();
             } else if ("assistant".equals(msg.getRole())) {
-                // Investigation history is the longest message (contains all iteration details)
-                // Synthesis is typically shorter
                 if (msg.getContent() != null) {
-                    if (investigationHistory == null || msg.getContent().length() > investigationHistory.length()) {
-                        // This is likely the investigation history (comprehensive)
-                        // Save previous as potential synthesis
+                    if (investigationHistory == null ||
+                        msg.getContent().length() > investigationHistory.length()) {
                         if (investigationHistory != null) {
                             finalSynthesis = investigationHistory;
                         }
                         investigationHistory = msg.getContent();
                     } else {
-                        // This is likely the synthesis (shorter, more focused)
                         finalSynthesis = msg.getContent();
                     }
                 }
             }
         }
 
-        // Build formatted conversation in order
-        // 1. User query at the top
         if (userQuery != null) {
             conversation.append("**User**: ").append(userQuery).append("\n\n");
         }
-
-        // 2. Full investigation history (all iterations with details)
         if (investigationHistory != null) {
             conversation.append(investigationHistory);
-            // Add separator if we have synthesis coming
             if (finalSynthesis != null && !investigationHistory.contains("# Final")) {
                 conversation.append("\n\n---\n\n");
             }
         }
-
-        // 3. Final synthesis/analysis
         if (finalSynthesis != null) {
-            // Only add header if not already present in the synthesis
             if (!finalSynthesis.trim().startsWith("#")) {
                 conversation.append("# Final Analysis\n\n");
             }
@@ -571,50 +597,9 @@ public class QueryService {
 
         return conversation.toString();
     }
-    
-    /**
-     * Delete current chat session
-     */
-    public boolean deleteCurrentSession() {
-        if (currentSessionId != -1) {
-            boolean deleted = analysisDB.deleteChatSession(currentSessionId);
-            if (deleted) {
-                currentSessionId = -1;
-                clearConversationHistory();
-                return true;
-            }
-        }
-        return false;
-    }
-    
-    /**
-     * Update chat session description
-     */
-    public void updateChatDescription(int sessionId, String description) {
-        analysisDB.updateChatDescription(sessionId, description);
-    }
-    
-    /**
-     * Get current session ID
-     */
-    public int getCurrentSessionId() {
-        return currentSessionId;
-    }
-    
-    /**
-     * Create session if none exists and conversation has content
-     */
-    public void ensureSession() {
-        if (currentSessionId == -1 && conversationHistory.length() > 0) {
-            createNewChatSession();
-        }
-    }
 
-    // Private helper methods
+    // ==================== Utility Methods ====================
 
-    /**
-     * Get program hash for current program
-     */
     private String getProgramHash() {
         if (plugin.getCurrentProgram() != null) {
             return plugin.getCurrentProgram().getExecutableSHA256();
@@ -622,175 +607,22 @@ public class QueryService {
         return null;
     }
 
-    /**
-     * Rebuild conversation history from message list
-     */
-    private void rebuildConversationHistory() {
-        conversationHistory.setLength(0);
-        for (PersistedChatMessage msg : messageList) {
-            String roleHeader = formatRoleHeader(msg.getRole());
-            conversationHistory.append("**").append(roleHeader).append("**:\n")
-                    .append(msg.getContent()).append("\n\n");
+    private PersistedChatMessage getLastMessage() {
+        List<PersistedChatMessage> messages = messageStore.getMessages();
+        if (!messages.isEmpty()) {
+            return messages.get(messages.size() - 1);
         }
+        return null;
     }
 
     /**
-     * Format role for conversation history header
-     */
-    private String formatRoleHeader(String role) {
-        if (role == null) {
-            return "Unknown";
-        }
-        switch (role.toLowerCase()) {
-            case "user":
-                return "User";
-            case "assistant":
-                return "Assistant";
-            case "tool_call":
-                return "Tool Call";
-            case "tool_response":
-                return "Tool Response";
-            case "error":
-                return "Error";
-            default:
-                return role.substring(0, 1).toUpperCase() + role.substring(1);
-        }
-    }
-
-    /**
-     * Normalize role string from various formats
-     */
-    private String normalizeRole(String role) {
-        if (role == null) {
-            return "unknown";
-        }
-        switch (role.toLowerCase()) {
-            case "user":
-                return "user";
-            case "assistant":
-                return "assistant";
-            case "tool call":
-            case "tool_call":
-                return "tool_call";
-            case "tool response":
-            case "tool_response":
-                return "tool_response";
-            case "error":
-                return "error";
-            default:
-                return role.toLowerCase();
-        }
-    }
-
-    /**
-     * Serialize essential tool info from ChatMessage to JSON
-     */
-    private String serializeToolInfo(ChatMessage apiMessage) {
-        if (apiMessage == null) {
-            return "{}";
-        }
-
-        // Only store essential tool info, not full provider response
-        if (apiMessage.getToolCalls() != null) {
-            try {
-                // Use simple JSON construction for essential info
-                StringBuilder json = new StringBuilder("{\"tool_calls\":[");
-                String toolCallsStr = apiMessage.getToolCalls().toString();
-                json.append(toolCallsStr);
-                json.append("]}");
-                return json.toString();
-            } catch (Exception e) {
-                return "{}";
-            }
-        }
-
-        return "{}";
-    }
-
-    /**
-     * Escape string for JSON
-     */
-    private String escapeJson(String input) {
-        if (input == null) {
-            return "";
-        }
-        return input.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
-    }
-
-    /**
-     * Get the AnalysisDB instance
+     * Get the AnalysisDB instance (for backward compatibility)
      */
     public AnalysisDB getAnalysisDB() {
         return analysisDB;
     }
 
-    /**
-     * Save ReAct analysis to database with full investigation history.
-     * Stores complete chronological investigation to GHReActMessages table.
-     * Preserves all details: planning, iterations, tool calls, reflections, synthesis.
-     *
-     * @param userQuery Original user query
-     * @param investigationHistory Full chronological history (all iterations with details)
-     * @param finalResult Final answer from ReAct synthesis
-     */
-    public void saveReActAnalysis(String userQuery, String investigationHistory, String finalResult) {
-        ensureSession();
-
-        if (currentSessionId == -1 || plugin.getCurrentProgram() == null) {
-            return;
-        }
-
-        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-
-        // Get current message count to avoid overwriting existing messages
-        int existingMessageCount = analysisDB.getReActMessages(programHash, currentSessionId).size();
-        int messageOrder = existingMessageCount;
-
-        // Get max existing iteration number for proper offset
-        int iterationNumber = analysisDB.getMaxReActIteration(programHash, currentSessionId) + 1;
-
-        // Append user query to conversation history (if not already there)
-        if (!conversationHistory.toString().contains(userQuery)) {
-            conversationHistory.append("**User**: ").append(userQuery).append("\n\n");
-        }
-
-        // Save user query as first ReAct message
-        ghidrassist.apiprovider.ChatMessage userMsg =
-            new ghidrassist.apiprovider.ChatMessage("user", userQuery);
-        analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
-            "planning", null, userMsg);
-
-        // Save FULL investigation history as investigation message
-        // This includes: planning, all iterations (thoughts, tool calls, observations),
-        // reflections, todos progression, findings - everything streamed to the user
-        if (investigationHistory != null && !investigationHistory.isEmpty()) {
-            ghidrassist.apiprovider.ChatMessage investigationMsg =
-                new ghidrassist.apiprovider.ChatMessage("assistant", investigationHistory);
-            analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
-                "investigation", iterationNumber, investigationMsg);
-
-            // Save iteration chunk with full history
-            analysisDB.saveReActIterationChunk(programHash, currentSessionId, iterationNumber,
-                investigationHistory, messageOrder - 1, messageOrder - 1);
-
-            // Append to conversation history
-            conversationHistory.append("**Assistant** (ReAct Investigation):\n\n");
-            conversationHistory.append(investigationHistory).append("\n\n");
-        }
-
-        // Save final synthesis as last message
-        ghidrassist.apiprovider.ChatMessage finalMsg =
-            new ghidrassist.apiprovider.ChatMessage("assistant", finalResult);
-        analysisDB.saveReActMessage(programHash, currentSessionId, messageOrder++,
-            "synthesis", null, finalMsg);
-
-        // Append final result to conversation history
-        conversationHistory.append("**Assistant** (Final Analysis):\n").append(finalResult).append("\n\n");
-    }
+    // ==================== Query Request ====================
 
     /**
      * Request object for query operations
@@ -799,13 +631,13 @@ public class QueryService {
         private final String processedQuery;
         private final String fullConversation;
         private final boolean useMCP;
-        
+
         public QueryRequest(String processedQuery, String fullConversation, boolean useMCP) {
             this.processedQuery = processedQuery;
             this.fullConversation = fullConversation;
             this.useMCP = useMCP;
         }
-        
+
         public String getProcessedQuery() { return processedQuery; }
         public String getFullConversation() { return fullConversation; }
         public boolean shouldUseMCP() { return useMCP; }
