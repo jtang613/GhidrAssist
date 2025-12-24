@@ -1046,18 +1046,10 @@ public class TabController {
             Msg.info(this, "Edit Save: extracted " + finalMessages.size() + " messages for rebuild");
 
             if (!finalMessages.isEmpty()) {
-                AnalysisDB analysisDB = queryService.getAnalysisDB();
-                analysisDB.deleteMessages(programHash, currentSessionId);
-
                 List<PersistedChatMessage> newMessageList = new ArrayList<>();
                 for (int i = 0; i < finalMessages.size(); i++) {
                     ChatEditManager.ExtractedMessage msg = finalMessages.get(i);
                     Msg.info(this, "  Saving message " + i + ": role=" + msg.role);
-                    analysisDB.saveMessage(
-                            programHash, currentSessionId, i,
-                            "edited", "{}",
-                            msg.role, msg.content, "edited"
-                    );
 
                     PersistedChatMessage persistedMsg = new PersistedChatMessage(
                             null, msg.role, msg.content,
@@ -1068,7 +1060,7 @@ public class TabController {
                     newMessageList.add(persistedMsg);
                 }
 
-                queryService.setMessages(newMessageList);
+                queryService.replaceAllMessages(newMessageList);
             }
             reloadCurrentChat();
         }
@@ -1103,20 +1095,10 @@ public class TabController {
             List<ChatEditManager.ExtractedMessage> finalMessages =
                     chatEditManager.extractAllMessages(editedContent);
 
-            AnalysisDB analysisDB = queryService.getAnalysisDB();
-
-            // Delete existing messages
-            analysisDB.deleteMessages(programHash, chatId);
-
-            // Save each message
+            // Build new message list
             List<PersistedChatMessage> newMessageList = new ArrayList<>();
             for (int i = 0; i < finalMessages.size(); i++) {
                 ChatEditManager.ExtractedMessage msg = finalMessages.get(i);
-                analysisDB.saveMessage(
-                        programHash, chatId, i,
-                        "edited", "{}",
-                        msg.role, msg.content, "edited"
-                );
 
                 PersistedChatMessage persistedMsg = new PersistedChatMessage(
                         null, msg.role, msg.content,
@@ -1127,8 +1109,8 @@ public class TabController {
                 newMessageList.add(persistedMsg);
             }
 
-            // Update in-memory state
-            queryService.setMessages(newMessageList);
+            // Replace all messages in memory and database atomically
+            queryService.replaceAllMessages(newMessageList);
         }
 
         // Handle title changes
