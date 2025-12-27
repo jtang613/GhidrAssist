@@ -1,19 +1,26 @@
 package ghidrassist.agent.react;
 
+import ghidrassist.AnalysisDB;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.mcp2.tools.MCPTool;
 import ghidrassist.mcp2.tools.MCPToolManager;
+import ghidrassist.tools.api.Tool;
+import ghidrassist.tools.native_.NativeToolManager;
+import ghidrassist.tools.registry.ToolRegistry;
 
 import ghidra.util.Msg;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
  * ReAct orchestrator that adds Think-Act-Observe structure on top of
@@ -40,7 +47,8 @@ public class ReActOrchestrator {
 
     // Dependencies
     private final LlmApi llmApi;
-    private final MCPToolManager toolManager;
+    private final MCPToolManager mcpToolManager;
+    private final ToolRegistry toolRegistry;
     private final GhidrAssistPlugin plugin;
 
     // Conversation history manager (optional - for persistence)
@@ -75,7 +83,125 @@ public class ReActOrchestrator {
         this.contextSummaryThreshold = contextSummaryThreshold;
         this.maxToolRounds = maxToolRounds > 0 ? maxToolRounds : 10;  // Default to 10 if invalid
         this.llmApi = new LlmApi(providerConfig, plugin);
-        this.toolManager = MCPToolManager.getInstance();
+        this.mcpToolManager = MCPToolManager.getInstance();
+
+        // Initialize unified ToolRegistry with both native and MCP tools
+        this.toolRegistry = initializeToolRegistry();
+    }
+
+    /**
+     * Initialize the unified ToolRegistry with all tool providers.
+     */
+    private ToolRegistry initializeToolRegistry() {
+        ToolRegistry registry = new ToolRegistry();
+
+        try {
+            // Register native tools (semantic, actions)
+            AnalysisDB analysisDB = new AnalysisDB();
+            NativeToolManager nativeManager = new NativeToolManager(analysisDB);
+            registry.registerProvider(nativeManager);
+
+            // Register MCP tools
+            registry.registerProvider(mcpToolManager);
+
+            // Set program context for tools that need it
+            ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+            if (currentProgram != null) {
+                registry.setContext(currentProgram);
+            }
+
+            Msg.info(this, registry.getSummary());
+
+        } catch (Exception e) {
+            Msg.error(this, "Failed to initialize ToolRegistry: " + e.getMessage(), e);
+        }
+
+        return registry;
+    }
+
+    /**
+     * Update program context for all tools when program changes.
+     */
+    public void updateProgramContext(ghidra.program.model.listing.Program program) {
+        if (toolRegistry != null) {
+            toolRegistry.setContext(program);
+        }
+    }
+
+    /**
+     * Get all tools from ToolRegistry in LLM function calling format.
+     */
+    private List<Map<String, Object>> getToolsAsFunction() {
+        if (toolRegistry == null) {
+            return List.of();
+        }
+
+        return toolRegistry.getAllTools().stream()
+                .map(this::toolToFunctionSchema)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Convert a Tool to OpenAI function calling schema format.
+     */
+    private Map<String, Object> toolToFunctionSchema(Tool tool) {
+        Map<String, Object> function = new HashMap<>();
+        function.put("type", "function");
+
+        Map<String, Object> functionDef = new HashMap<>();
+        functionDef.put("name", tool.getName());
+        functionDef.put("description", tool.getDescription());
+
+        if (tool.getInputSchema() != null) {
+            // Convert JsonObject to Map for compatibility
+            functionDef.put("parameters", jsonObjectToMap(tool.getInputSchema()));
+        } else {
+            // Empty parameters schema
+            Map<String, Object> emptyParams = new HashMap<>();
+            emptyParams.put("type", "object");
+            emptyParams.put("properties", new HashMap<>());
+            functionDef.put("parameters", emptyParams);
+        }
+
+        function.put("function", functionDef);
+        return function;
+    }
+
+    /**
+     * Convert JsonObject to Map for function schema compatibility.
+     */
+    private Map<String, Object> jsonObjectToMap(com.google.gson.JsonObject jsonObject) {
+        Map<String, Object> map = new HashMap<>();
+        for (String key : jsonObject.keySet()) {
+            Object value = jsonElementToObject(jsonObject.get(key));
+            map.put(key, value);
+        }
+        return map;
+    }
+
+    /**
+     * Convert JsonElement to Java object.
+     */
+    private Object jsonElementToObject(com.google.gson.JsonElement element) {
+        if (element.isJsonPrimitive()) {
+            if (element.getAsJsonPrimitive().isString()) {
+                return element.getAsString();
+            } else if (element.getAsJsonPrimitive().isNumber()) {
+                return element.getAsNumber();
+            } else if (element.getAsJsonPrimitive().isBoolean()) {
+                return element.getAsBoolean();
+            }
+        } else if (element.isJsonObject()) {
+            return jsonObjectToMap(element.getAsJsonObject());
+        } else if (element.isJsonArray()) {
+            com.google.gson.JsonArray array = element.getAsJsonArray();
+            java.util.ArrayList<Object> list = new java.util.ArrayList<>();
+            for (int i = 0; i < array.size(); i++) {
+                list.add(jsonElementToObject(array.get(i)));
+            }
+            return list;
+        }
+        return null;
     }
 
     /**
@@ -144,10 +270,12 @@ public class ReActOrchestrator {
 
                 handler.onTodosUpdated(todoManager.formatForPrompt());
 
-                // Get available tools
-                List<Map<String, Object>> tools = toolManager.getToolsAsFunction();
+                // Get available tools from all providers via ToolRegistry
+                List<Map<String, Object>> tools = getToolsAsFunction();
                 if (tools.isEmpty()) {
-                    Msg.warn(this, "No MCP tools available - analysis may be limited");
+                    Msg.warn(this, "No tools available - analysis may be limited");
+                } else {
+                    Msg.info(this, "Loaded " + tools.size() + " tools from ToolRegistry");
                 }
 
                 // Track iteration count
@@ -327,7 +455,7 @@ public class ReActOrchestrator {
         };
 
         // Call the conversational tool handler
-        llmApi.sendConversationalToolRequest(prompt, tools, iterationHandler, maxToolRounds);
+        llmApi.sendConversationalToolRequest(prompt, tools, iterationHandler, maxToolRounds, toolRegistry);
     }
 
     /**

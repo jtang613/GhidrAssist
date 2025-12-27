@@ -3,12 +3,13 @@ package ghidrassist.mcp2.tools;
 import ghidrassist.mcp2.protocol.MCPClientAdapter;
 import ghidrassist.mcp2.server.MCPServerConfig;
 import ghidrassist.mcp2.server.MCPServerRegistry;
+import ghidrassist.tools.api.Tool;
+import ghidrassist.tools.api.ToolProvider;
+import ghidrassist.tools.api.ToolResult;
 import ghidra.program.model.listing.Program;
-import ghidra.framework.model.DomainObject;
 import ghidra.util.Msg;
 
 import com.google.gson.JsonObject;
-import com.google.gson.JsonElement;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -24,11 +25,15 @@ import java.util.stream.Collectors;
 /**
  * Manages MCP tools from multiple servers.
  * Handles tool discovery, aggregation, and execution routing.
+ *
+ * NOTE: This class now implements ToolProvider and handles ONLY MCP server tools.
+ * Native/internal tools (semantic, actions) are now handled by NativeToolManager.
  */
-public class MCPToolManager {
-    
+public class MCPToolManager implements ToolProvider {
+
+    private static final String PROVIDER_NAME = "MCP";
     private static MCPToolManager instance;
-    
+
     private final Map<String, MCPClientAdapter> clients = new ConcurrentHashMap<>();
     private final Map<String, MCPTool> allTools = new ConcurrentHashMap<>();
     private MCPToolManagerHandler handler;
@@ -43,11 +48,11 @@ public class MCPToolManager {
         void onServerDisconnected(String serverName);
         void onServerError(String serverName, Throwable error);
     }
-    
+
     private MCPToolManager() {
         // Private constructor for singleton
     }
-    
+
     /**
      * Get singleton instance
      */
@@ -57,14 +62,106 @@ public class MCPToolManager {
         }
         return instance;
     }
-    
+
     /**
      * Set event handler
      */
     public void setHandler(MCPToolManagerHandler handler) {
         this.handler = handler;
     }
+
+    // ==================== ToolProvider Interface Implementation ====================
+
+    @Override
+    public String getProviderName() {
+        return PROVIDER_NAME;
+    }
+
+    @Override
+    public List<Tool> getTools() {
+        // Create adapters with the prefixed names (keys from allTools map)
+        return allTools.entrySet().stream()
+                .map(entry -> new MCPToolAdapter(entry.getValue(), entry.getKey()))
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public CompletableFuture<ToolResult> executeTool(String name, JsonObject args) {
+        MCPTool tool = findTool(name);
+        if (tool == null) {
+            return CompletableFuture.completedFuture(
+                    ToolResult.error("MCP tool not found: " + name));
+        }
+
+        MCPClientAdapter client = clients.get(tool.getServerName());
+        if (client == null || !client.isReady()) {
+            return CompletableFuture.completedFuture(
+                    ToolResult.error("MCP server not available: " + tool.getServerName()));
+        }
+
+        // Use the original tool name (without server prefix) when calling the MCP server
+        String originalToolName = tool.getName();
+        Msg.debug(this, "Executing MCP tool: " + name + " (original: " + originalToolName + ") via server: " + tool.getServerName());
+        return client.executeTool(originalToolName, args)
+                .thenApply(result -> {
+                    String content = result != null ? result.toString() : "";
+                    return ToolResult.success(content);
+                })
+                .exceptionally(throwable -> {
+                    Msg.error(this, "MCP tool execution failed: " + throwable.getMessage());
+                    return ToolResult.error(throwable.getMessage());
+                });
+    }
+
+    @Override
+    public boolean handlesTool(String name) {
+        return findTool(name) != null;
+    }
+
+    @Override
+    public void setContext(Program program) {
+        // MCP tools don't need Ghidra program context
+        // This is a no-op for MCPToolManager
+    }
+
+    // ==================== Legacy MCP Tool Execution (for backwards compatibility) ====================
+
+    /**
+     * Execute an MCP tool and return MCPToolResult.
+     * This is the legacy method for backwards compatibility.
+     * @deprecated Use executeTool(String, JsonObject) from ToolProvider interface instead.
+     */
+    @Deprecated
+    public CompletableFuture<MCPToolResult> executeToolMCP(String toolName, JsonObject arguments) {
+        MCPTool tool = findTool(toolName);
+        if (tool == null) {
+            return CompletableFuture.completedFuture(
+                MCPToolResult.error("Tool not found: " + toolName));
+        }
+
+        MCPClientAdapter client = clients.get(tool.getServerName());
+        if (client == null || !client.isReady()) {
+            return CompletableFuture.completedFuture(
+                MCPToolResult.error("Server not available: " + tool.getServerName()));
+        }
+
+        // Use the original tool name (without server prefix) when calling the MCP server
+        String originalToolName = tool.getName();
+        Msg.debug(this, "MCPToolManager delegating to client: " + tool.getServerName() + " for tool: " + originalToolName);
+        return client.executeTool(originalToolName, arguments)
+            .thenApply(result -> {
+                Msg.debug(this, "MCPToolManager received result for tool: " + toolName);
+                String content = result != null ? result.toString() : "";
+                return MCPToolResult.success(content);
+            })
+            .exceptionally(throwable -> {
+                Msg.error(this, "MCPToolManager caught exception for tool " + toolName + ": " + throwable.getMessage());
+                return MCPToolResult.error(throwable.getMessage());
+            });
+    }
     
+    // ==================== MCP Server Connection Management ====================
+
     /**
      * Initialize connections to all enabled servers
      * This method is safe to call from any thread including the EDT
@@ -74,25 +171,25 @@ public class MCPToolManager {
             // Ensure all work happens off the EDT
             List<MCPServerConfig> enabledServers = MCPServerRegistry.getInstance().getEnabledServers();
             Msg.info(this, String.format("Starting initialization of %d enabled MCP servers", enabledServers.size()));
-            
+
             List<CompletableFuture<Void>> connectionFutures = new ArrayList<>();
-            
+
             for (MCPServerConfig config : enabledServers) {
                 Msg.info(this, "Starting connection to server: " + config.getName());
                 CompletableFuture<Void> connectionFuture = connectToServer(config);
                 connectionFutures.add(connectionFuture);
             }
-            
+
             try {
                 // Wait for all connections to complete
                 CompletableFuture.allOf(connectionFutures.toArray(new CompletableFuture[0])).get();
-                
+
                 initialized = true;
                 Msg.info(this, String.format("Initialized %d MCP servers", clients.size()));
-                
+
                 // Notify on EDT for UI updates
                 javax.swing.SwingUtilities.invokeLater(() -> notifyToolsUpdated());
-                
+
             } catch (Exception e) {
                 Msg.error(this, "Failed to initialize MCP servers: " + e.getMessage());
                 throw new RuntimeException("MCP server initialization failed", e);
@@ -179,34 +276,7 @@ public class MCPToolManager {
         });
     }
     
-    /**
-     * Execute a tool call
-     */
-    public CompletableFuture<MCPToolResult> executeTool(String toolName, JsonObject arguments) {
-        MCPTool tool = findTool(toolName);
-        if (tool == null) {
-            return CompletableFuture.failedFuture(
-                new IllegalArgumentException("Tool not found: " + toolName));
-        }
-        
-        MCPClientAdapter client = clients.get(tool.getServerName());
-        if (client == null || !client.isReady()) {
-            return CompletableFuture.failedFuture(
-                new IllegalStateException("Server not available: " + tool.getServerName()));
-        }
-        
-        Msg.debug(this, "MCPToolManager delegating to client: " + tool.getServerName() + " for tool: " + toolName);
-        return client.executeTool(toolName, arguments)
-            .thenApply(result -> {
-                Msg.debug(this, "MCPToolManager received result for tool: " + toolName);
-                String content = result != null ? result.toString() : "";
-                return MCPToolResult.success(content);
-            })
-            .exceptionally(throwable -> {
-                Msg.error(this, "MCPToolManager caught exception for tool " + toolName + ": " + throwable.getMessage());
-                return MCPToolResult.error(throwable.getMessage());
-            });
-    }
+    // ==================== Parallel Tool Execution ====================
 
     /**
      * Execute multiple tools in parallel for better performance.
@@ -238,7 +308,8 @@ public class MCPToolManager {
             for (ToolCallRequest toolCall : toolCalls) {
                 CompletableFuture<ToolCallResult> future = CompletableFuture.supplyAsync(() -> {
                     try {
-                        MCPToolResult result = executeTool(toolCall.getToolName(), toolCall.getArguments())
+                        // Use legacy executeToolMCP for backwards compatibility
+                        MCPToolResult result = executeToolMCP(toolCall.getToolName(), toolCall.getArguments())
                             .orTimeout(30, TimeUnit.SECONDS)
                             .get();
 
@@ -360,19 +431,29 @@ public class MCPToolManager {
         }
     }
 
+    // ==================== Tool Access Methods ====================
+
     /**
-     * Get all available tools from all servers
+     * Get all available MCP tools from all connected servers.
+     * NOTE: Native tools are now accessed via NativeToolManager.
      */
-    public List<MCPTool> getAllTools() {
+    public List<MCPTool> getAllMCPTools() {
         return new ArrayList<>(allTools.values());
     }
-    
+
     /**
-     * Get tools as function schemas for LLM function calling
+     * Get MCP tools as function schemas for LLM function calling.
+     * Tool names in the schema are prefixed with server name.
+     * NOTE: Native tools should be obtained from NativeToolManager via ToolRegistry.
      */
     public List<Map<String, Object>> getToolsAsFunction() {
-        return allTools.values().stream()
-            .map(MCPTool::toFunctionSchema)
+        return allTools.entrySet().stream()
+            .map(entry -> {
+                // Create schema with prefixed name
+                Map<String, Object> schema = entry.getValue().toFunctionSchema();
+                schema.put("name", entry.getKey()); // Override with prefixed name
+                return schema;
+            })
             .collect(Collectors.toList());
     }
     
@@ -447,7 +528,7 @@ public class MCPToolManager {
      */
     private void notifyToolsUpdated() {
         if (handler != null) {
-            handler.onToolsUpdated(getAllTools());
+            handler.onToolsUpdated(getAllMCPTools());
         }
     }
     
@@ -470,14 +551,14 @@ public class MCPToolManager {
         
         @Override
         public void onDisconnected(MCPClientAdapter client) {
-            // Remove tools from this server
-            allTools.entrySet().removeIf(entry -> 
-                entry.getValue().getServerName().equals(serverName));
-            
+            // Remove tools from this server (keys are prefixed with serverName.toLowerCase()_)
+            String prefix = serverName.toLowerCase() + "_";
+            allTools.entrySet().removeIf(entry -> entry.getKey().startsWith(prefix));
+
             // Notify on EDT for UI updates
             javax.swing.SwingUtilities.invokeLater(() -> {
                 notifyToolsUpdated();
-                
+
                 if (handler != null) {
                     handler.onServerDisconnected(serverName);
                 }
@@ -486,12 +567,16 @@ public class MCPToolManager {
         
         @Override
         public void onToolsDiscovered(MCPClientAdapter client, List<MCPTool> tools) {
-            
-            // Add tools from this server
+            // Add tools from this server with server name prefix
+            String prefix = serverName.toLowerCase() + "_";
             for (MCPTool tool : tools) {
-                allTools.put(tool.getName().toLowerCase(), tool);
+                // Create prefixed name for storage and lookup
+                String prefixedName = prefix + tool.getName().toLowerCase();
+                // Store with prefixed name, but keep original tool reference
+                allTools.put(prefixedName, tool);
+                Msg.debug(MCPToolManager.this, "Registered MCP tool: " + prefixedName);
             }
-            
+
             // Notify on EDT for UI updates
             javax.swing.SwingUtilities.invokeLater(() -> notifyToolsUpdated());
         }

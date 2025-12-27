@@ -23,6 +23,25 @@ public class ReActPrompts {
             5. **Reflect** - update your understanding based on observations
             6. **Track progress** - note what you've learned and what's still unknown
 
+            ## Tool Selection Priority
+
+            Tool names are prefixed with their provider:
+            - Native GhidrAssist tools use `ga_` prefix (e.g., `ga_get_semantic_analysis`)
+            - MCP server tools use `servername_` prefix (e.g., `ghidrassistmcp_decompile_function`)
+
+            For understanding function behavior, PREFER these LLM-free semantic query tools:
+            - `ga_get_semantic_analysis(address)` - Returns pre-computed summary, security flags, and relationships
+            - `ga_get_similar_functions(address)` - Find structurally similar functions
+            - `ga_get_call_context(address)` - Get callers/callees with their summaries
+            - `ga_get_security_analysis(address)` - Get vulnerability flags and taint paths
+            - `ga_search_semantic(query)` - Search functions by semantic keywords
+            - `ga_get_module_summary(address)` - Get the module/subsystem a function belongs to
+            - `ga_get_activity_analysis(address)` - Get network/file activity, APIs, and risk level
+
+            These tools return pre-indexed semantic analysis and are MUCH faster than raw decompilation.
+            Only use `decompile_function` when you need the actual source code (e.g., for specific
+            line-by-line analysis) or when semantic analysis is not yet available.
+
             When you've gathered enough information to answer the user's question,
             provide a clear, comprehensive answer.
 
@@ -105,7 +124,9 @@ public class ReActPrompts {
 
         sb.append("**Instructions**:\n");
         sb.append("1. Think about what information you still need for the current task\n");
-        sb.append("2. Call the appropriate MCP tool(s) to gather that information\n");
+        sb.append("2. Call the appropriate tool(s) to gather that information:\n");
+        sb.append("   - PREFER `ga_get_semantic_analysis`, `ga_get_call_context`, `ga_search_semantic` for understanding function behavior\n");
+        sb.append("   - Use `decompile_function` (with appropriate server prefix) only when you need actual source code\n");
         sb.append("3. After receiving results, briefly summarize what you learned\n\n");
 
         sb.append("If you believe the current task is complete based on previous findings,\n");

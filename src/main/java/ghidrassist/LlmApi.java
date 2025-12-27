@@ -7,6 +7,7 @@ import ghidrassist.core.LlmApiClient;
 import ghidrassist.core.LlmErrorHandler;
 import ghidrassist.core.LlmTaskExecutor;
 import ghidrassist.core.ResponseProcessor;
+import ghidrassist.tools.registry.ToolRegistry;
 
 import java.util.List;
 import java.util.Map;
@@ -90,7 +91,8 @@ public class LlmApi {
      * Send a conversational tool calling request that handles multiple turns
      * Monitors finish_reason to determine when to execute tools vs. complete
      */
-    public void sendConversationalToolRequest(String prompt, List<Map<String, Object>> functions, LlmResponseHandler responseHandler, int maxToolRounds) {
+    public void sendConversationalToolRequest(String prompt, List<Map<String, Object>> functions,
+            LlmResponseHandler responseHandler, int maxToolRounds, ToolRegistry toolRegistry) {
         if (!apiClient.isProviderAvailable()) {
             errorHandler.handleError(
                 new IllegalStateException("LLM provider is not initialized."),
@@ -107,7 +109,8 @@ public class LlmApi {
 
         // Create enhanced response handler for conversational tool calling
         ConversationalToolHandler toolHandler = new ConversationalToolHandler(
-            apiClient, functions, responseProcessor, responseHandler, errorHandler, onCompletion, maxToolRounds);
+            apiClient, functions, responseProcessor, responseHandler, errorHandler, onCompletion,
+            maxToolRounds, toolRegistry);
 
         // Store reference for cancellation
         activeConversationalHandler = toolHandler;

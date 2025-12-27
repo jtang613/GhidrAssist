@@ -473,6 +473,9 @@ public class TabController {
         ghidrassist.mcp2.tools.MCPToolManager toolManager =
             ghidrassist.mcp2.tools.MCPToolManager.getInstance();
 
+        // NOTE: Program context for semantic tools is now handled via ToolRegistry
+        // in ReActOrchestrator. MCPToolManager only handles MCP server tools.
+
         java.util.concurrent.CompletableFuture<Void> initFuture;
         if (!toolManager.isInitialized()) {
             Msg.info(this, "Initializing MCP servers for agentic analysis...");
@@ -905,9 +908,32 @@ public class TabController {
         }
         cancelActiveRenderTask();
 
-        boolean deleted = queryService.deleteCurrentSession();
+        // Get all selected rows from the table (supports multi-select)
+        int[] selectedRows = queryTab.getSelectedChatSessions();
+        java.util.List<ghidrassist.AnalysisDB.ChatSession> sessions = queryService.getChatSessions();
+
+        int deletedCount = 0;
+        if (selectedRows != null && selectedRows.length > 0) {
+            // Delete in reverse order to avoid index shifting issues
+            for (int i = selectedRows.length - 1; i >= 0; i--) {
+                int rowIndex = selectedRows[i];
+                if (rowIndex >= 0 && rowIndex < sessions.size()) {
+                    int sessionId = sessions.get(rowIndex).getId();
+                    if (queryService.deleteSession(sessionId)) {
+                        deletedCount++;
+                    }
+                }
+            }
+        } else {
+            // Fall back to deleting current session if no table selection
+            if (queryService.deleteCurrentSession()) {
+                deletedCount = 1;
+            }
+        }
+
+        final boolean anyDeleted = deletedCount > 0;
         SwingUtilities.invokeLater(() -> {
-            if (deleted) {
+            if (anyDeleted) {
                 queryTab.setResponseText("");
                 queryTab.clearChatSelection();
                 refreshChatHistory();

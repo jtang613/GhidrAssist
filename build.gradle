@@ -65,9 +65,12 @@ dependencies {
 	
 	// MCP SDK core dependency
 	implementation 'io.modelcontextprotocol.sdk:mcp:0.14.1'
-	
+
 	// Project Reactor dependency for async MCP client
 	implementation 'io.projectreactor:reactor-core:3.6.0'
+
+	// JGraphT - Graph algorithms for Graph-RAG (community detection, traversal)
+	implementation 'org.jgrapht:jgrapht-core:1.5.2'
 }
 
 // Exclude additional files from the built extension

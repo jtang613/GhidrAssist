@@ -78,7 +78,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
     @Override
     public String createChatCompletion(List<ChatMessage> messages) throws APIProviderException {
         JsonObject payload = buildMessagesPayload(messages, false);
-        
+
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
@@ -86,7 +86,21 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         try (Response response = executeWithRetry(request, "createChatCompletion")) {
             JsonObject responseObj = gson.fromJson(response.body().string(), JsonObject.class);
-            return responseObj.getAsJsonObject("content").get("text").getAsString();
+
+            // Anthropic returns content as an array of content blocks
+            // Extract text from all text blocks
+            StringBuilder textContent = new StringBuilder();
+            if (responseObj.has("content")) {
+                JsonArray contentArray = responseObj.getAsJsonArray("content");
+                for (JsonElement contentElement : contentArray) {
+                    JsonObject contentBlock = contentElement.getAsJsonObject();
+                    String type = contentBlock.get("type").getAsString();
+                    if ("text".equals(type) && contentBlock.has("text")) {
+                        textContent.append(contentBlock.get("text").getAsString());
+                    }
+                }
+            }
+            return textContent.toString();
         } catch (IOException e) {
             throw handleNetworkError(e, "createChatCompletion");
         }
@@ -784,10 +798,17 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                     
                     messageObj.add("content", contentArray);
                 } else {
-                    // Regular text message
-                    messageObj.addProperty("content", message.getContent());
+                    // Regular text message - ensure content is not null or empty
+                    String content = message.getContent();
+                    if (content == null || content.trim().isEmpty()) {
+                        // Skip messages with empty content (Anthropic rejects them)
+                        // This can happen on first load or with malformed conversation history
+                        Msg.debug(this, "Skipping message with empty content, role=" + message.getRole());
+                        continue;
+                    }
+                    messageObj.addProperty("content", content);
                 }
-                
+
                 messagesArray.add(messageObj);
             }
         }

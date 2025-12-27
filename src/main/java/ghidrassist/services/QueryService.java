@@ -18,6 +18,9 @@ import ghidrassist.chat.session.ChatSessionRepository;
 import ghidrassist.chat.util.RoleNormalizer;
 import ghidrassist.core.QueryProcessor;
 import ghidrassist.mcp2.tools.MCPToolManager;
+import ghidrassist.tools.native_.NativeToolManager;
+import ghidrassist.tools.registry.ToolRegistry;
+import ghidrassist.graphrag.GraphRAGService;
 
 import java.sql.Timestamp;
 import java.util.ArrayList;
@@ -40,6 +43,7 @@ public class QueryService {
     private final GhidrAssistPlugin plugin;
     private final AnalysisDB analysisDB;  // Keep for ReAct and backward compatibility
     private final AnalysisDataService analysisDataService;
+    private final ToolRegistry toolRegistry;
 
     // New architecture components
     private final MessageStore messageStore;
@@ -51,6 +55,15 @@ public class QueryService {
         this.plugin = plugin;
         this.analysisDB = new AnalysisDB();
         this.analysisDataService = new AnalysisDataService(plugin);
+
+        // Initialize tool registry with native tools
+        this.toolRegistry = new ToolRegistry();
+        try {
+            NativeToolManager nativeManager = new NativeToolManager(analysisDB);
+            toolRegistry.registerProvider(nativeManager);
+        } catch (Exception e) {
+            ghidra.util.Msg.warn(this, "Failed to initialize native tools: " + e.getMessage());
+        }
 
         // Initialize new architecture components
         TransactionManager transactionManager = new SqliteTransactionManager(analysisDB.getConnection());
@@ -103,7 +116,34 @@ public class QueryService {
         }
 
         LlmApi llmApi = new LlmApi(config, plugin);
+
+        // Initialize GraphRAGService with LLM provider for background semantic analysis
+        initializeGraphRAGService(config);
+
         executeQuery(request, llmApi, handler);
+    }
+
+    /**
+     * Initialize GraphRAGService with LLM provider and current program context.
+     * This enables background semantic analysis when queries trigger on-demand indexing.
+     */
+    private void initializeGraphRAGService(APIProviderConfig config) {
+        try {
+            GraphRAGService graphRAG = GraphRAGService.getInstance(analysisDB);
+
+            // Set LLM provider for background semantic analysis
+            if (config != null) {
+                graphRAG.setLLMProvider(config.createProvider());
+            }
+
+            // Set current program context
+            ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+            if (currentProgram != null) {
+                graphRAG.setCurrentProgram(currentProgram);
+            }
+        } catch (Exception e) {
+            ghidra.util.Msg.warn(this, "Failed to initialize GraphRAGService: " + e.getMessage());
+        }
     }
 
     /**
@@ -157,12 +197,28 @@ public class QueryService {
 
     private void executeMCPQuery(QueryRequest request, LlmApi llmApi, MCPToolManager toolManager,
                                   LlmApi.LlmResponseHandler handler) throws Exception {
-        java.util.List<java.util.Map<String, Object>> mcpFunctions = toolManager.getToolsAsFunction();
+        // Register MCP tool manager with the tool registry (if not already registered)
+        // This ensures both native and MCP tools are available
+        if (!toolRegistry.hasProvider(toolManager.getProviderName())) {
+            toolRegistry.registerProvider(toolManager);
+        }
 
-        if (!mcpFunctions.isEmpty()) {
+        // Set full context (program + address) for all tool providers
+        ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+        ghidra.program.model.address.Address currentAddress = plugin.getCurrentAddress();
+        if (currentProgram != null) {
+            toolRegistry.setFullContext(currentProgram, currentAddress);
+        }
+
+        // Get ALL tools from registry (includes native tools + MCP tools)
+        java.util.List<java.util.Map<String, Object>> allFunctions = toolRegistry.getToolsAsFunction();
+
+        ghidra.util.Msg.info(this, "Tool registry has " + allFunctions.size() + " tools available");
+
+        if (!allFunctions.isEmpty()) {
             int maxToolRounds = analysisDataService.getMaxToolCalls();
             llmApi.sendConversationalToolRequest(request.getFullConversation(),
-                mcpFunctions, handler, maxToolRounds);
+                allFunctions, handler, maxToolRounds, toolRegistry);
         } else {
             executeRegularQuery(request, llmApi, handler);
         }
@@ -406,6 +462,13 @@ public class QueryService {
      */
     public boolean deleteCurrentSession() {
         return sessionManager.deleteCurrentSession();
+    }
+
+    /**
+     * Delete a specific chat session by ID
+     */
+    public boolean deleteSession(int sessionId) {
+        return sessionManager.deleteSession(sessionId);
     }
 
     /**
