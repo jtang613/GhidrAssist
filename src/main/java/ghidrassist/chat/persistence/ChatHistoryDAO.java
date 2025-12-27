@@ -366,22 +366,26 @@ public class ChatHistoryDAO implements MessageRepository, ChatSessionRepository 
     }
 
     private int insertMessage(String programHash, int sessionId, PersistedChatMessage message) {
-        // Simplified INSERT without legacy columns (session_id, sequence_number)
+        // Include session_id and sequence_number for backward compatibility with databases
+        // that may have NOT NULL constraints on these legacy columns
         String sql = "INSERT INTO GHChatMessages " +
-                     "(program_hash, chat_id, message_order, provider_type, native_message_data, " +
-                     "role, content_text, message_type, created_at, updated_at) " +
-                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
+                     "(program_hash, chat_id, session_id, message_order, sequence_number, " +
+                     "provider_type, native_message_data, role, content_text, message_type, " +
+                     "created_at, updated_at) " +
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)";
 
         try (PreparedStatement pstmt = transactionManager.getConnection()
                 .prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
             pstmt.setString(1, programHash);
             pstmt.setInt(2, sessionId);
-            pstmt.setInt(3, message.getOrder());
-            pstmt.setString(4, message.getProviderType() != null ? message.getProviderType() : "unknown");
-            pstmt.setString(5, message.getNativeMessageData() != null ? message.getNativeMessageData() : "{}");
-            pstmt.setString(6, message.getRole());
-            pstmt.setString(7, message.getContent());
-            pstmt.setString(8, message.getMessageType() != null ? message.getMessageType() : "standard");
+            pstmt.setInt(3, sessionId);  // session_id = chat_id for compatibility
+            pstmt.setInt(4, message.getOrder());
+            pstmt.setInt(5, message.getOrder());  // sequence_number = message_order for compatibility
+            pstmt.setString(6, message.getProviderType() != null ? message.getProviderType() : "unknown");
+            pstmt.setString(7, message.getNativeMessageData() != null ? message.getNativeMessageData() : "{}");
+            pstmt.setString(8, message.getRole());
+            pstmt.setString(9, message.getContent());
+            pstmt.setString(10, message.getMessageType() != null ? message.getMessageType() : "standard");
             pstmt.executeUpdate();
 
             ResultSet rs = pstmt.getGeneratedKeys();

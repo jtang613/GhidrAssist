@@ -119,7 +119,7 @@ public class QueryTab extends JPanel {
         };
         
         chatHistoryTable = new JTable(chatHistoryModel);
-        chatHistoryTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        chatHistoryTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         chatHistoryTable.setRowHeight(20);
         chatHistoryTable.setTableHeader(null); // Completely remove header row
         
@@ -487,10 +487,17 @@ public class QueryTab extends JPanel {
     }
     
     /**
-     * Get the currently selected chat session row
+     * Get the currently selected chat session row (first selected if multiple)
      */
     public int getSelectedChatSession() {
         return chatHistoryTable.getSelectedRow();
+    }
+
+    /**
+     * Get all selected chat session rows (for bulk operations like delete)
+     */
+    public int[] getSelectedChatSessions() {
+        return chatHistoryTable.getSelectedRows();
     }
 
     /**

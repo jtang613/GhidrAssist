@@ -6,8 +6,8 @@ import ghidrassist.apiprovider.OpenAIProvider;
 import ghidrassist.apiprovider.LMStudioProvider;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.apiprovider.exceptions.RateLimitException;
-import ghidrassist.mcp2.tools.MCPToolManager;
-import ghidrassist.mcp2.tools.MCPToolResult;
+import ghidrassist.tools.api.ToolResult;
+import ghidrassist.tools.registry.ToolRegistry;
 import ghidra.util.Msg;
 
 import com.google.gson.JsonArray;
@@ -25,14 +25,15 @@ import java.util.concurrent.CompletableFuture;
  * Manages the turn-by-turn conversation flow with the LLM and MCP tool execution.
  */
 public class ConversationalToolHandler {
-    
+
     private final LlmApiClient apiClient;
     private final List<Map<String, Object>> availableFunctions;
     private final ResponseProcessor responseProcessor;
     private final LlmApi.LlmResponseHandler userHandler;
     private final LlmErrorHandler errorHandler;
     private final Runnable onCompletionCallback;
-    
+    private final ToolRegistry toolRegistry;
+
     private final List<ChatMessage> conversationHistory;
     private volatile boolean isConversationActive = false;
     private volatile boolean isCancelled = false;
@@ -50,7 +51,8 @@ public class ConversationalToolHandler {
             LlmApi.LlmResponseHandler userHandler,
             LlmErrorHandler errorHandler,
             Runnable onCompletionCallback,
-            int maxToolRounds) {
+            int maxToolRounds,
+            ToolRegistry toolRegistry) {
 
         this.apiClient = apiClient;
         this.availableFunctions = functions;
@@ -60,6 +62,7 @@ public class ConversationalToolHandler {
         this.onCompletionCallback = onCompletionCallback;
         this.conversationHistory = new ArrayList<>();
         this.maxToolRounds = maxToolRounds > 0 ? maxToolRounds : 10; // Default to 10 if invalid
+        this.toolRegistry = toolRegistry;
     }
     
     /**
@@ -70,13 +73,24 @@ public class ConversationalToolHandler {
             Msg.warn(this, "Conversation already active, ignoring new request");
             return;
         }
-        
+
+        // Validate prompt is not empty - this can happen on first load with stale state
+        if (userPrompt == null || userPrompt.trim().isEmpty()) {
+            Msg.warn(this, "Empty prompt received, cannot start conversation");
+            userHandler.onError(new IllegalArgumentException(
+                "Cannot process empty query. Please try again."));
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+            return;
+        }
+
         isConversationActive = true;
         isCancelled = false; // Reset cancellation flag
         conversationHistory.clear();
         rateLimitRetries = 0; // Reset retry counter
         toolCallRound = 0; // Reset tool call round counter
-        
+
         // Add initial user message
         conversationHistory.addAll(apiClient.createFunctionMessages(userPrompt));
         
@@ -1015,51 +1029,50 @@ public class ConversationalToolHandler {
             if (isCancelled) {
                 return CompletableFuture.failedFuture(new Exception("Execution cancelled"));
             }
-            
+
             String toolName = extractToolName(toolCall);
             JsonObject arguments = extractToolArguments(toolCall);
             String toolCallId = extractToolCallId(toolCall);
-            
+
             // Update UI with current tool execution including parameters
             String paramDisplay = formatToolParameters(arguments);
             String executingMessage = "🛠️ Tool call in progress: *" + toolName + "(" + paramDisplay + ")*\n";
             javax.swing.SwingUtilities.invokeLater(() -> {
                 userHandler.onUpdate(executingMessage);
             });
-            
-            // Execute via MCP with proper transaction handling
-            MCPToolManager toolManager = MCPToolManager.getInstance();
-            return executeToolWithTransaction(toolManager, toolName, arguments)
-                .thenApply(mcpResult -> {
+
+            // Execute via ToolRegistry with proper transaction handling
+            return executeToolWithTransaction(toolName, arguments)
+                .thenApply(result -> {
                     // Check cancellation before processing result
                     if (isCancelled) {
                         throw new RuntimeException("Execution cancelled");
                     }
-                    
+
                     // Debug logging for development (keep for troubleshooting)
-                    Msg.debug(this, String.format("MCP Tool '%s' completed: success=%s, length=%d", 
-                        toolName, mcpResult.isSuccess(), 
-                        mcpResult.getResultText() != null ? mcpResult.getResultText().length() : 0));
-                    
+                    Msg.debug(this, String.format("Tool '%s' completed: success=%s, length=%d",
+                        toolName, result.isSuccess(),
+                        result.getContent() != null ? result.getContent().length() : 0));
+
                     // Don't show verbose tool results to user - they'll be included in LLM response
                     String paramDisplayComplete = formatToolParameters(arguments);
                     String completionMessage = "✓ Completed: *" + toolName + "(" + paramDisplayComplete + ")*\n";
-                    
+
                     javax.swing.SwingUtilities.invokeLater(() -> {
                         if (!isCancelled) {
                             userHandler.onUpdate(completionMessage);
                         }
                     });
-                    
+
                     // Create tool result for conversation
                     JsonObject toolResult = new JsonObject();
                     toolResult.addProperty("tool_call_id", toolCallId);
                     toolResult.addProperty("role", "tool");
-                    toolResult.addProperty("content", mcpResult.getResultText());
-                    
+                    toolResult.addProperty("content", result.getContent());
+
                     return toolResult;
                 });
-            
+
         } catch (Exception e) {
             return CompletableFuture.failedFuture(e);
         }
@@ -1328,33 +1341,33 @@ public class ConversationalToolHandler {
     }
     
     /**
-     * Execute MCP tool with proper Ghidra transaction handling
+     * Execute tool with proper Ghidra transaction handling via ToolRegistry
      * Run transaction on Swing EDT to match how Actions tab works
      */
-    private CompletableFuture<MCPToolResult> executeToolWithTransaction(MCPToolManager toolManager, String toolName, JsonObject arguments) {
-        CompletableFuture<MCPToolResult> future = new CompletableFuture<>();
-        
+    private CompletableFuture<ToolResult> executeToolWithTransaction(String toolName, JsonObject arguments) {
+        CompletableFuture<ToolResult> future = new CompletableFuture<>();
+
         ghidra.program.model.listing.Program program = apiClient.getPlugin().getCurrentProgram();
-        
+
         if (program == null) {
-            // If no program is loaded, execute without transaction off EDT
-            return toolManager.executeTool(toolName, arguments);
+            // If no program is loaded, execute without transaction
+            return toolRegistry.execute(toolName, arguments);
         }
-        
-        // Execute MCP call on background thread to avoid blocking EDT
+
+        // Execute tool call on background thread to avoid blocking EDT
         CompletableFuture.runAsync(() -> {
             // Start transaction on EDT
             final int[] transaction = new int[1];
             try {
                 javax.swing.SwingUtilities.invokeAndWait(() -> {
-                    transaction[0] = program.startTransaction("MCP Tool: " + toolName);
+                    transaction[0] = program.startTransaction("Tool: " + toolName);
                 });
             } catch (Exception e) {
                 throw new RuntimeException("Failed to start transaction", e);
             }
-            
-            // Execute MCP call on background thread
-            toolManager.executeTool(toolName, arguments)
+
+            // Execute tool via ToolRegistry
+            toolRegistry.execute(toolName, arguments)
                 .thenAccept(result -> {
                     // End transaction on EDT
                     javax.swing.SwingUtilities.invokeLater(() -> {
@@ -1367,18 +1380,18 @@ public class ConversationalToolHandler {
                     // End transaction on EDT with failure
                     javax.swing.SwingUtilities.invokeLater(() -> {
                         program.endTransaction(transaction[0], false);
-                        Msg.error(this, "MCP tool execution failed: " + throwable.getMessage());
-                        future.complete(MCPToolResult.error("Tool execution failed: " + throwable.getMessage()));
+                        Msg.error(this, "Tool execution failed: " + throwable.getMessage());
+                        future.complete(ToolResult.error("Tool execution failed: " + throwable.getMessage()));
                     });
                     return null;
                 });
-                
+
         }).exceptionally(throwable -> {
             Msg.error(this, "Failed to start transaction: " + throwable.getMessage());
-            future.complete(MCPToolResult.error("Failed to start transaction: " + throwable.getMessage()));
+            future.complete(ToolResult.error("Failed to start transaction: " + throwable.getMessage()));
             return null;
         });
-        
+
         return future;
     }
 

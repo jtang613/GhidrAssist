@@ -7,6 +7,7 @@ import ghidrassist.apiprovider.APIProvider;
 import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.apiprovider.exceptions.APIProviderException;
+import ghidrassist.graphrag.GraphRAGService;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,11 +39,36 @@ public class LlmApiClient {
         this.provider = config.createProvider();
         this.analysisDB = new AnalysisDB();
         this.plugin = plugin;
-        
+
         // Get the global API timeout and set it if the provider doesn't have one
         if (provider != null && provider.getTimeout() == null) {
             Integer timeout = GhidrAssistPlugin.getGlobalApiTimeout();
             provider.setTimeout(timeout);
+        }
+
+        // Initialize GraphRAGService with LLM provider for background semantic analysis
+        initializeGraphRAGService();
+    }
+
+    /**
+     * Initialize GraphRAGService with the LLM provider.
+     * This enables background semantic analysis when tools trigger on-demand indexing.
+     */
+    private void initializeGraphRAGService() {
+        try {
+            GraphRAGService graphRAG = GraphRAGService.getInstance(analysisDB);
+
+            // Set LLM provider for background semantic analysis
+            if (provider != null) {
+                graphRAG.setLLMProvider(provider);
+            }
+
+            // Set current program context if available
+            if (plugin != null && plugin.getCurrentProgram() != null) {
+                graphRAG.setCurrentProgram(plugin.getCurrentProgram());
+            }
+        } catch (Exception e) {
+            ghidra.util.Msg.warn(this, "Failed to initialize GraphRAGService: " + e.getMessage());
         }
     }
 

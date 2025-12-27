@@ -137,6 +137,29 @@ public class ChatSessionManager {
     }
 
     /**
+     * Delete a specific session by ID.
+     * If deleting the current session, also clears the message store and resets session ID.
+     *
+     * @param sessionId The session ID to delete
+     * @return true if deleted successfully
+     */
+    public boolean deleteSession(int sessionId) {
+        synchronized (sessionLock) {
+            if (sessionId == NO_SESSION) {
+                return false;
+            }
+
+            boolean deleted = sessionRepository.deleteSession(sessionId);
+            if (deleted && sessionId == currentSessionId.get()) {
+                // If we deleted the current session, clear state
+                messageStore.clear();
+                currentSessionId.set(NO_SESSION);
+            }
+            return deleted;
+        }
+    }
+
+    /**
      * Clear the current session without deleting from database.
      * Used when starting fresh conversation.
      */

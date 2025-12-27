@@ -4,14 +4,20 @@ import ghidra.framework.preferences.Preferences;
 import ghidra.program.model.address.Address;
 import ghidra.util.Msg;
 import ghidrassist.chat.PersistedChatMessage;
+import ghidrassist.graphrag.BinaryKnowledgeGraph;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class AnalysisDB {
     private static final String DB_PATH_PROPERTY = "GhidrAssist.AnalysisDBPath";
     private static final String DEFAULT_DB_PATH = "ghidrassist_analysis.db";
     private Connection connection;
+
+    // Cache of BinaryKnowledgeGraph instances per program hash
+    private final Map<String, BinaryKnowledgeGraph> graphCache = new ConcurrentHashMap<>();
 
     public AnalysisDB() {
         String dbPath = Preferences.getProperty(DB_PATH_PROPERTY, DEFAULT_DB_PATH);
@@ -143,6 +149,241 @@ public class AnalysisDB {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_react_chunks_lookup "
                     + "ON GHReActIterationChunks(program_hash, session_id, iteration_number)");
         }
+
+        // ========================================
+        // Graph-RAG Knowledge Backend Tables
+        // ========================================
+
+        // Graph nodes table (5 types: STATEMENT, BLOCK, FUNCTION, MODULE, BINARY)
+        String createGraphNodesTableSQL = "CREATE TABLE IF NOT EXISTS graph_nodes ("
+                + "id TEXT PRIMARY KEY,"
+                + "type TEXT NOT NULL,"              // STATEMENT, BLOCK, FUNCTION, MODULE, BINARY
+                + "address INTEGER,"                  // Ghidra address (null for MODULE/BINARY)
+                + "binary_id TEXT NOT NULL,"          // Program hash
+                + "name TEXT,"                        // Function/symbol name if applicable
+                + "raw_content TEXT,"                 // Decompiled code / assembly
+                + "llm_summary TEXT,"                 // Semantic explanation from LLM
+                + "confidence REAL DEFAULT 0.0,"      // Summary confidence 0.0 - 1.0
+                + "embedding BLOB,"                   // Serialized float array for vector search
+                + "security_flags TEXT,"              // JSON array of security annotations
+                + "analysis_depth INTEGER DEFAULT 0," // How many times analyzed
+                + "created_at INTEGER,"
+                + "updated_at INTEGER,"
+                + "is_stale INTEGER DEFAULT 0"        // Needs re-summarization
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createGraphNodesTableSQL);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_address ON graph_nodes(address)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type ON graph_nodes(type)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_binary ON graph_nodes(binary_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_name ON graph_nodes(name)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_stale ON graph_nodes(binary_id, is_stale)");
+        }
+
+        // Graph edges table (adjacency list for relationships)
+        String createGraphEdgesTableSQL = "CREATE TABLE IF NOT EXISTS graph_edges ("
+                + "id TEXT PRIMARY KEY,"
+                + "source_id TEXT NOT NULL,"
+                + "target_id TEXT NOT NULL,"
+                + "type TEXT NOT NULL,"               // CALLS, CONTAINS, FLOWS_TO, REFERENCES, etc.
+                + "weight REAL DEFAULT 1.0,"
+                + "metadata TEXT,"                    // JSON for additional edge attributes
+                + "created_at INTEGER,"
+                + "FOREIGN KEY (source_id) REFERENCES graph_nodes(id) ON DELETE CASCADE,"
+                + "FOREIGN KEY (target_id) REFERENCES graph_nodes(id) ON DELETE CASCADE"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createGraphEdgesTableSQL);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_edges_type ON graph_edges(type)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_edges_source_type ON graph_edges(source_id, type)");
+        }
+
+        // Graph communities table (Leiden-detected clusters)
+        String createGraphCommunitiesTableSQL = "CREATE TABLE IF NOT EXISTS graph_communities ("
+                + "id TEXT PRIMARY KEY,"
+                + "level INTEGER NOT NULL,"           // 0=functions, 1=modules, 2=subsystems, etc.
+                + "binary_id TEXT NOT NULL,"
+                + "parent_community_id TEXT,"         // For hierarchical communities
+                + "name TEXT,"                        // Auto-generated or user-provided name
+                + "summary TEXT,"                     // LLM-generated community summary
+                + "member_count INTEGER DEFAULT 0,"
+                + "is_stale INTEGER DEFAULT 1,"       // Needs re-summarization
+                + "created_at INTEGER,"
+                + "updated_at INTEGER,"
+                + "FOREIGN KEY (parent_community_id) REFERENCES graph_communities(id) ON DELETE SET NULL"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createGraphCommunitiesTableSQL);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_communities_binary ON graph_communities(binary_id)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_communities_level ON graph_communities(level)");
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_communities_parent ON graph_communities(parent_community_id)");
+        }
+
+        // Community membership table (many-to-many relationship)
+        String createCommunityMembersTableSQL = "CREATE TABLE IF NOT EXISTS community_members ("
+                + "community_id TEXT NOT NULL,"
+                + "node_id TEXT NOT NULL,"
+                + "membership_score REAL DEFAULT 1.0," // How strongly the node belongs
+                + "PRIMARY KEY (community_id, node_id),"
+                + "FOREIGN KEY (community_id) REFERENCES graph_communities(id) ON DELETE CASCADE,"
+                + "FOREIGN KEY (node_id) REFERENCES graph_nodes(id) ON DELETE CASCADE"
+                + ")";
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute(createCommunityMembersTableSQL);
+            stmt.execute("CREATE INDEX IF NOT EXISTS idx_community_members_node ON community_members(node_id)");
+        }
+
+        // Full-text search virtual table for semantic search on summaries
+        // Note: FTS5 table creation doesn't support IF NOT EXISTS, so we check first
+        try (Statement stmt = connection.createStatement()) {
+            ResultSet rs = stmt.executeQuery(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='node_fts'");
+            if (!rs.next()) {
+                stmt.execute("CREATE VIRTUAL TABLE node_fts USING fts5("
+                        + "id, "
+                        + "name, "
+                        + "llm_summary, "
+                        + "security_flags, "
+                        + "content='graph_nodes', "
+                        + "content_rowid='rowid'"
+                        + ")");
+            }
+        }
+
+        // Triggers to keep FTS index synchronized with graph_nodes
+        try (Statement stmt = connection.createStatement()) {
+            // Insert trigger
+            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN "
+                    + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
+                    + "END");
+            // Delete trigger
+            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN "
+                    + "INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.llm_summary, OLD.security_flags); "
+                    + "END");
+            // Update trigger
+            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN "
+                    + "INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.llm_summary, OLD.security_flags); "
+                    + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
+                    + "END");
+        }
+    }
+
+    /**
+     * Repair or recreate the FTS table when it's corrupt.
+     * This properly handles severe corruption by:
+     * 1. Dropping triggers
+     * 2. Removing FTS entries from sqlite_master
+     * 3. Running VACUUM to rebuild the database
+     * 4. Recreating FTS table and triggers
+     * 5. Rebuilding the index from existing data
+     *
+     * @return true if repair was successful
+     */
+    public boolean repairFtsTable() {
+        Msg.info(this, "Attempting full FTS table repair...");
+        try (Statement stmt = connection.createStatement()) {
+            // Step 1: Drop triggers first (this always works)
+            stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ai");
+            stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ad");
+            stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_au");
+            Msg.info(this, "Triggers dropped");
+
+            // Step 2: Try normal drop
+            boolean normalDropWorked = false;
+            try {
+                stmt.execute("DROP TABLE IF EXISTS node_fts");
+                normalDropWorked = true;
+                Msg.info(this, "FTS table dropped normally");
+            } catch (SQLException e) {
+                Msg.warn(this, "Normal DROP failed: " + e.getMessage());
+            }
+
+            // Step 3: If normal drop failed, use writable_schema + VACUUM
+            if (!normalDropWorked) {
+                Msg.info(this, "Using writable_schema to remove corrupt FTS entries...");
+                stmt.execute("PRAGMA writable_schema = ON");
+                stmt.execute("DELETE FROM sqlite_master WHERE type = 'table' AND name = 'node_fts'");
+                stmt.execute("DELETE FROM sqlite_master WHERE type = 'table' AND name LIKE 'node_fts_%'");
+                stmt.execute("DELETE FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'graph_nodes_%'");
+                stmt.execute("PRAGMA writable_schema = OFF");
+
+                // VACUUM rebuilds the database file, clearing stale state
+                Msg.info(this, "Running VACUUM to rebuild database...");
+                stmt.execute("VACUUM");
+                Msg.info(this, "VACUUM completed");
+            }
+
+            // Step 4: Recreate the FTS table
+            Msg.info(this, "Creating fresh FTS table...");
+            stmt.execute("CREATE VIRTUAL TABLE IF NOT EXISTS node_fts USING fts5("
+                    + "id, "
+                    + "name, "
+                    + "llm_summary, "
+                    + "security_flags, "
+                    + "content='graph_nodes', "
+                    + "content_rowid='rowid'"
+                    + ")");
+
+            // Step 5: Recreate triggers
+            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN "
+                    + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
+                    + "END");
+            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN "
+                    + "INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.llm_summary, OLD.security_flags); "
+                    + "END");
+            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN "
+                    + "INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.llm_summary, OLD.security_flags); "
+                    + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
+                    + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
+                    + "END");
+
+            // Step 6: Rebuild FTS index from existing graph_nodes data
+            Msg.info(this, "Rebuilding FTS index from existing data...");
+            stmt.execute("INSERT INTO node_fts(node_fts) VALUES('rebuild')");
+
+            Msg.info(this, "FTS table repaired successfully!");
+            return true;
+
+        } catch (SQLException e) {
+            Msg.error(this, "FTS repair failed: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Check if FTS is healthy by running a simple test query.
+     * @return true if FTS is working
+     */
+    public boolean isFtsHealthy() {
+        try (Statement stmt = connection.createStatement()) {
+            // Try a simple FTS query
+            ResultSet rs = stmt.executeQuery("SELECT 1 FROM node_fts LIMIT 1");
+            rs.close();
+            return true;
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Check if an SQLException indicates FTS table corruption.
+     */
+    public static boolean isFtsCorruptionError(SQLException e) {
+        String message = e.getMessage();
+        return message != null && (
+                message.contains("SQLITE_CORRUPT_VTAB") ||
+                message.contains("vtable constructor failed") ||
+                message.contains("node_fts")
+        );
     }
 
     /**
@@ -177,8 +418,6 @@ public class AnalysisDB {
             Msg.error(this, "Failed to get GHChatMessages columns: " + e.getMessage());
             return;
         }
-
-        Msg.info(this, "GHChatMessages existing columns: " + existingColumns);
 
         // Define columns to add with their definitions
         // Note: SQLite ALTER TABLE cannot use non-constant defaults like CURRENT_TIMESTAMP
@@ -763,6 +1002,104 @@ public class AnalysisDB {
      */
     public Connection getConnection() {
         return connection;
+    }
+
+    // ========================================
+    // Graph-RAG Knowledge Graph Methods
+    // ========================================
+
+    /**
+     * Get or create a BinaryKnowledgeGraph for a program.
+     * The graph is cached per program hash for efficiency.
+     *
+     * @param programHash The program hash identifying the binary
+     * @return BinaryKnowledgeGraph instance for the program
+     */
+    public BinaryKnowledgeGraph getKnowledgeGraph(String programHash) {
+        return graphCache.computeIfAbsent(programHash,
+                hash -> new BinaryKnowledgeGraph(connection, hash, this));
+    }
+
+    /**
+     * Check if a knowledge graph exists for a program (has any nodes).
+     *
+     * @param programHash The program hash
+     * @return true if the graph has been populated
+     */
+    public boolean hasKnowledgeGraph(String programHash) {
+        String sql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ?";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, programHash);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1) > 0;
+            }
+        } catch (SQLException e) {
+            Msg.warn(this, "Error checking knowledge graph: " + e.getMessage());
+        }
+        return false;
+    }
+
+    /**
+     * Get statistics about a program's knowledge graph.
+     *
+     * @param programHash The program hash
+     * @return Map with "nodes" and "edges" counts
+     */
+    public Map<String, Integer> getKnowledgeGraphStats(String programHash) {
+        Map<String, Integer> stats = new java.util.HashMap<>();
+        stats.put("nodes", 0);
+        stats.put("edges", 0);
+        stats.put("stale_nodes", 0);
+
+        String nodesSql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ?";
+        String staleSql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ? AND is_stale = 1";
+        String edgesSql = "SELECT COUNT(*) FROM graph_edges e "
+                + "INNER JOIN graph_nodes n ON e.source_id = n.id WHERE n.binary_id = ?";
+
+        try (PreparedStatement nodesStmt = connection.prepareStatement(nodesSql);
+             PreparedStatement staleStmt = connection.prepareStatement(staleSql);
+             PreparedStatement edgesStmt = connection.prepareStatement(edgesSql)) {
+
+            nodesStmt.setString(1, programHash);
+            staleStmt.setString(1, programHash);
+            edgesStmt.setString(1, programHash);
+
+            ResultSet rs1 = nodesStmt.executeQuery();
+            if (rs1.next()) {
+                stats.put("nodes", rs1.getInt(1));
+            }
+
+            ResultSet rs2 = staleStmt.executeQuery();
+            if (rs2.next()) {
+                stats.put("stale_nodes", rs2.getInt(1));
+            }
+
+            ResultSet rs3 = edgesStmt.executeQuery();
+            if (rs3.next()) {
+                stats.put("edges", rs3.getInt(1));
+            }
+        } catch (SQLException e) {
+            Msg.warn(this, "Error getting knowledge graph stats: " + e.getMessage());
+        }
+        return stats;
+    }
+
+    /**
+     * Clear the cached BinaryKnowledgeGraph for a program.
+     * Call this when switching programs or when the graph needs to be reloaded.
+     *
+     * @param programHash The program hash
+     */
+    public void invalidateKnowledgeGraphCache(String programHash) {
+        graphCache.remove(programHash);
+    }
+
+    /**
+     * Clear all cached BinaryKnowledgeGraph instances.
+     */
+    public void invalidateAllKnowledgeGraphCaches() {
+        graphCache.clear();
     }
 
     public void close() {
