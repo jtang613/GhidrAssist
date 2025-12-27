@@ -538,11 +538,40 @@ public class TabController {
                 refreshChatHistory();
             });
         }).exceptionally(error -> {
-            // Handle errors on EDT
-            Msg.error(this, "Agentic analysis failed: " + error.getMessage(), error);
+            // Handle errors on EDT - but SAVE progress first!
+            String errorMsg = error.getMessage() != null ? error.getMessage() : "Unknown error";
+            Msg.error(this, "Agentic analysis failed: " + errorMsg, error);
+
             SwingUtilities.invokeLater(() -> {
-                Msg.showError(getClass(), queryTab, "Agentic Analysis Error",
-                    "Analysis failed: " + error.getMessage());
+                // Save partial progress even on error/cancellation
+                String partialHistory = historyContainer[0].toString();
+                if (partialHistory != null && !partialHistory.isEmpty()) {
+                    // Determine if this was a cancellation or error
+                    boolean isCancellation = errorMsg.toLowerCase().contains("cancel");
+
+                    String suffix = isCancellation ?
+                        "\n\n---\n\n**[Analysis cancelled by user]**" :
+                        "\n\n---\n\n**[Analysis failed: " + errorMsg + "]**";
+
+                    // Save the partial investigation to database
+                    queryService.saveReActAnalysis(
+                        query,
+                        partialHistory + suffix,
+                        isCancellation ? "[Cancelled]" : "[Error: " + errorMsg + "]"
+                    );
+
+                    // Show partial progress in UI
+                    String html = markdownHelper.markdownToHtml(partialHistory + suffix);
+                    queryTab.setResponseText(html);
+
+                    // Refresh chat history to show the saved session
+                    refreshChatHistory();
+                }
+
+                if (!errorMsg.toLowerCase().contains("cancel")) {
+                    Msg.showError(getClass(), queryTab, "Agentic Analysis Error",
+                        "Analysis failed: " + errorMsg);
+                }
 
                 // Clear the orchestrator reference
                 currentOrchestrator = null;
@@ -1495,6 +1524,18 @@ public class TabController {
                 // Cancel periodic render task
                 cancelActiveRenderTask();
 
+                // Save partial response if we have content before the error
+                synchronized (bufferLock) {
+                    if (responseBuffer.length() > 0) {
+                        final String partialResponse = responseBuffer.toString();
+                        SwingUtilities.invokeLater(() -> {
+                            // Save partial response as assistant message before the error
+                            queryService.addAssistantMessage(partialResponse + "\n\n[Incomplete - Error occurred]",
+                                queryService.getCurrentProviderType(), null);
+                        });
+                    }
+                }
+
                 SwingUtilities.invokeLater(() -> {
                     queryService.addError(error.getMessage());
                     String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
@@ -1506,7 +1547,42 @@ public class TabController {
 
             @Override
             public boolean shouldContinue() {
+                // Check if we should continue - if not, save partial progress
+                if (!isQueryRunning) {
+                    savePartialResponseOnCancel();
+                }
                 return isQueryRunning;
+            }
+
+            /**
+             * Save partial response when cancellation is detected.
+             * This ensures we don't lose work even if the user cancels.
+             */
+            private void savePartialResponseOnCancel() {
+                synchronized (bufferLock) {
+                    if (responseBuffer.length() > 0) {
+                        final String partialResponse = responseBuffer.toString();
+                        // Clear buffer to prevent duplicate saves
+                        responseBuffer.setLength(0);
+
+                        SwingUtilities.invokeLater(() -> {
+                            // Cancel the render task
+                            cancelActiveRenderTask();
+
+                            // Save partial response
+                            queryService.addAssistantMessage(partialResponse + "\n\n[Cancelled by user]",
+                                queryService.getCurrentProviderType(), null);
+
+                            // Update UI with saved content
+                            String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                            queryTab.setResponseText(html);
+                            setUIState(false, "Submit", null);
+                            currentLlmApi = null;
+
+                            refreshChatHistory();
+                        });
+                    }
+                }
             }
         };
     }
