@@ -442,6 +442,48 @@ public class BinaryKnowledgeGraph {
         return callees;
     }
 
+    /**
+     * Check if a node has any edges of a specific type (outgoing).
+     *
+     * @param nodeId The node ID
+     * @param edgeType The edge type to check for
+     * @return true if the node has at least one edge of this type
+     */
+    public boolean hasEdgesOfType(String nodeId, EdgeType edgeType) {
+        String sql = "SELECT 1 FROM graph_edges WHERE source_id = ? AND type = ? LIMIT 1";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, nodeId);
+            stmt.setString(2, edgeType.name());
+            ResultSet rs = stmt.executeQuery();
+            return rs.next();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to check edges of type: " + e.getMessage(), e);
+        }
+        return false;
+    }
+
+    /**
+     * Check if a node has any incoming edges of a specific type.
+     *
+     * @param nodeId The node ID
+     * @param edgeType The edge type to check for
+     * @return true if the node has at least one incoming edge of this type
+     */
+    public boolean hasIncomingEdgesOfType(String nodeId, EdgeType edgeType) {
+        String sql = "SELECT 1 FROM graph_edges WHERE target_id = ? AND type = ? LIMIT 1";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, nodeId);
+            stmt.setString(2, edgeType.name());
+            ResultSet rs = stmt.executeQuery();
+            return rs.next();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to check incoming edges of type: " + e.getMessage(), e);
+        }
+        return false;
+    }
+
     // ========================================
     // Search Operations
     // ========================================

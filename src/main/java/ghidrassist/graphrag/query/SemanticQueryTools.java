@@ -204,6 +204,77 @@ public class SemanticQueryTools {
                 )
         ));
 
+        // 9. ga.index_binary
+        tools.add(createTool(
+                TOOL_PREFIX + "index_binary",
+                "Trigger full binary indexing to populate the knowledge graph. Extracts all functions, " +
+                "call graph, cross-references (REFERENCES edges), data dependencies (DATA_DEPENDS edges), " +
+                "and vulnerable call edges (CALLS_VULNERABLE edges). This is required for comprehensive " +
+                "graph queries. NO LLM call - uses Ghidra analysis only. May take time for large binaries.",
+                createSchema(
+                        Map.of(
+                                "include_blocks", Map.of("type", "boolean", "description", "Include basic block extraction (increases graph size, default: false)"),
+                                "force", Map.of("type", "boolean", "description", "Force re-indexing even if already indexed (default: false)")
+                        ),
+                        List.of() // None required
+                )
+        ));
+
+        // 10. ga.record_vulnerability
+        tools.add(createTool(
+                TOOL_PREFIX + "record_vulnerability",
+                "Record a discovered vulnerability or security finding for a function. " +
+                "Use this when you identify potential security issues like buffer overflows, " +
+                "command injection, format string bugs, use-after-free, etc. during analysis. " +
+                "This persists findings to the knowledge graph and propagates vulnerability markers to callers.",
+                createSchema(
+                        Map.of(
+                                "address", Map.of("type", "string", "description", "Function address (hex)"),
+                                "function_name", Map.of("type", "string", "description", "Function name (alternative to address)"),
+                                "vulnerability_type", Map.of("type", "string", "description",
+                                        "Type: BUFFER_OVERFLOW, COMMAND_INJECTION, FORMAT_STRING, USE_AFTER_FREE, " +
+                                        "INTEGER_OVERFLOW, PATH_TRAVERSAL, SQL_INJECTION, RACE_CONDITION, " +
+                                        "MEMORY_LEAK, NULL_DEREF, INFO_DISCLOSURE, AUTH_BYPASS, CRYPTO_WEAKNESS, OTHER"),
+                                "severity", Map.of("type", "string", "description", "Severity: LOW, MEDIUM, HIGH, CRITICAL"),
+                                "description", Map.of("type", "string", "description", "Brief description of the vulnerability"),
+                                "evidence", Map.of("type", "string", "description", "Code snippet or reasoning that supports this finding")
+                        ),
+                        List.of("vulnerability_type", "severity", "description") // Required fields
+                )
+        ));
+
+        // 11. ga.add_security_flag
+        tools.add(createTool(
+                TOOL_PREFIX + "add_security_flag",
+                "Add a security-relevant flag to a function's node in the knowledge graph. " +
+                "Use this to mark functions with security-relevant properties you discover during analysis. " +
+                "Common flags: HANDLES_USER_INPUT, PARSES_NETWORK_DATA, CRYPTO_OPERATION, " +
+                "PRIVILEGE_CHECK, AUTHENTICATION, SENSITIVE_DATA, MEMORY_ALLOCATOR, ERROR_HANDLER",
+                createSchema(
+                        Map.of(
+                                "address", Map.of("type", "string", "description", "Function address (hex)"),
+                                "function_name", Map.of("type", "string", "description", "Function name (alternative to address)"),
+                                "flag", Map.of("type", "string", "description", "Security flag to add (e.g., HANDLES_USER_INPUT)")
+                        ),
+                        List.of("flag") // flag is required
+                )
+        ));
+
+        // 12. ga.refresh_names
+        tools.add(createTool(
+                TOOL_PREFIX + "refresh_names",
+                "Refresh function names in the knowledge graph to match current Ghidra names. " +
+                "Use this after renaming functions in Ghidra to update the graph. " +
+                "Can refresh a single function or all functions in the binary. NO LLM call.",
+                createSchema(
+                        Map.of(
+                                "address", Map.of("type", "string", "description", "Function address (hex, optional - if omitted refreshes all)"),
+                                "function_name", Map.of("type", "string", "description", "Function name (alternative to address)")
+                        ),
+                        List.of() // None required - omitting all refreshes entire binary
+                )
+        ));
+
         return tools;
     }
 
@@ -244,6 +315,14 @@ public class SemanticQueryTools {
                         return executeGetActivityAnalysis(arguments);
                     case "ga_update_security_flags":
                         return executeUpdateSecurityFlags(arguments);
+                    case "ga_index_binary":
+                        return executeIndexBinary(arguments);
+                    case "ga_record_vulnerability":
+                        return executeRecordVulnerability(arguments);
+                    case "ga_add_security_flag":
+                        return executeAddSecurityFlag(arguments);
+                    case "ga_refresh_names":
+                        return executeRefreshNames(arguments);
                     default:
                         return MCPToolResult.error("Unknown tool: " + toolName);
                 }
@@ -267,7 +346,11 @@ public class SemanticQueryTools {
                lowerName.equals("ga_search_semantic") ||
                lowerName.equals("ga_get_module_summary") ||
                lowerName.equals("ga_get_activity_analysis") ||
-               lowerName.equals("ga_update_security_flags");
+               lowerName.equals("ga_update_security_flags") ||
+               lowerName.equals("ga_index_binary") ||
+               lowerName.equals("ga_record_vulnerability") ||
+               lowerName.equals("ga_add_security_flag") ||
+               lowerName.equals("ga_refresh_names");
     }
 
     // ========================================
@@ -331,12 +414,14 @@ public class SemanticQueryTools {
             queueFunctionForSemanticAnalysis(func);
         }
 
-        // Auto-detect and update missing security flags
+        // Auto-detect and update missing security flags, edges, and stale names
         if (func == null) {
             func = lookupFunction(address, functionName);
         }
         if (func != null) {
+            ensureNodeNameFresh(func);
             ensureSecurityFlags(func);
+            ensureFunctionEdges(func);
         }
 
         String output = result.toToolOutput();
@@ -611,6 +696,93 @@ public class SemanticQueryTools {
         }
     }
 
+    /**
+     * Ensure all edge types are extracted for a function.
+     * If the function node exists but is missing new edge types, triggers edge extraction.
+     *
+     * @param function The function to check and update
+     */
+    private void ensureFunctionEdges(Function function) {
+        if (function == null || graph == null || currentProgram == null) {
+            return;
+        }
+
+        try {
+            KnowledgeNode node = graph.getNodeByAddress(function.getEntryPoint().getOffset());
+            if (node == null) {
+                return; // Node doesn't exist, will be created by indexFunctionOnDemand
+            }
+
+            // Check if any of the new edge types are missing
+            boolean needsUpdate = !graph.hasEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.REFERENCES) ||
+                                  !graph.hasEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.DATA_DEPENDS);
+
+            // Also check for CALLS_VULNERABLE (either direction)
+            if (!needsUpdate) {
+                needsUpdate = !graph.hasEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.CALLS_VULNERABLE) &&
+                              !graph.hasIncomingEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.CALLS_VULNERABLE);
+            }
+
+            if (needsUpdate) {
+                Msg.debug(this, "Auto-updating edges for: " + function.getName());
+                StructureExtractor extractor = new StructureExtractor(currentProgram, graph, TaskMonitor.DUMMY);
+                try {
+                    extractor.updateFunctionEdges(function, node);
+                } finally {
+                    extractor.dispose();
+                }
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Failed to auto-update edges: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Ensure node name matches the current Ghidra function name.
+     * If the user has renamed the function, update the node to reflect the new name.
+     * The FTS index is automatically updated via database triggers.
+     *
+     * @param function The Ghidra function with the current name
+     * @param node The knowledge node to check and update
+     * @return true if the name was updated
+     */
+    private boolean ensureNodeNameFresh(Function function, KnowledgeNode node) {
+        if (function == null || node == null || graph == null) {
+            return false;
+        }
+
+        String currentName = function.getName();
+        String storedName = node.getName();
+
+        if (currentName != null && !currentName.equals(storedName)) {
+            Msg.info(this, "Updating stale function name: " + storedName + " -> " + currentName);
+            node.setName(currentName);
+            graph.upsertNode(node);  // FTS index auto-updates via trigger
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Ensure node name is fresh for a function, looking up the node if needed.
+     *
+     * @param function The Ghidra function
+     */
+    private void ensureNodeNameFresh(Function function) {
+        if (function == null || graph == null) {
+            return;
+        }
+
+        try {
+            KnowledgeNode node = graph.getNodeByAddress(function.getEntryPoint().getOffset());
+            if (node != null) {
+                ensureNodeNameFresh(function, node);
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Failed to check node name freshness: " + e.getMessage());
+        }
+    }
+
     private MCPToolResult executeGetSimilarFunctions(JsonObject arguments) {
         if (!arguments.has("address")) {
             return MCPToolResult.error("'address' is required");
@@ -671,10 +843,12 @@ public class SemanticQueryTools {
         } else if (arguments.has("address")) {
             long address = parseAddress(arguments.get("address").getAsString());
 
-            // Auto-detect and update missing security flags before querying
+            // Auto-detect and update stale names, missing security flags and edges before querying
             Function func = lookupFunction(address, null);
             if (func != null) {
+                ensureNodeNameFresh(func);
                 ensureSecurityFlags(func);
+                ensureFunctionEdges(func);
             }
 
             result = engine.getSecurityAnalysis(address);
@@ -726,8 +900,10 @@ public class SemanticQueryTools {
                     Long.toHexString(address) + " or name: " + functionName);
         }
 
-        // Ensure security flags are populated
+        // Ensure name is fresh, security flags and edges are populated
+        ensureNodeNameFresh(function);
         ensureSecurityFlags(function);
+        ensureFunctionEdges(function);
 
         // First, try to get cached activity analysis from the knowledge graph
         KnowledgeNode node = graph.getNodeByAddress(function.getEntryPoint().getOffset());
@@ -944,6 +1120,459 @@ public class SemanticQueryTools {
         sb.append("  \"scope\": \"binary\",\n");
         sb.append("  \"functions_updated\": ").append(updatedCount).append(",\n");
         sb.append("  \"message\": \"Updated security flags for ").append(updatedCount).append(" functions\"\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Execute the ga_index_binary tool.
+     * Triggers full binary indexing to populate the knowledge graph with all edge types.
+     */
+    private MCPToolResult executeIndexBinary(JsonObject arguments) {
+        boolean includeBlocks = arguments.has("include_blocks") && arguments.get("include_blocks").getAsBoolean();
+        boolean force = arguments.has("force") && arguments.get("force").getAsBoolean();
+
+        if (currentProgram == null) {
+            return MCPToolResult.error("No program loaded");
+        }
+
+        String programHash = currentProgram.getExecutableSHA256();
+
+        // Check if already indexed (unless force)
+        if (!force && graph != null) {
+            int existingFunctions = graph.getNodesByType(ghidrassist.graphrag.nodes.NodeType.FUNCTION).size();
+            if (existingFunctions > 0) {
+                return MCPToolResult.success(buildIndexSkippedOutput(existingFunctions));
+            }
+        }
+
+        try {
+            // Run synchronous structure extraction
+            GraphRAGService service = GraphRAGService.getInstance(analysisDB);
+            service.setCurrentProgram(currentProgram);
+
+            StructureExtractor.ExtractionResult result = service.indexStructureSync(
+                    currentProgram, TaskMonitor.DUMMY, includeBlocks);
+
+            return MCPToolResult.success(buildIndexResultOutput(result));
+        } catch (Exception e) {
+            Msg.error(this, "Failed to index binary: " + e.getMessage(), e);
+            return MCPToolResult.error("Failed to index binary: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Build JSON output when indexing is skipped (already indexed).
+     */
+    private String buildIndexSkippedOutput(int existingFunctions) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"skipped\",\n");
+        sb.append("  \"reason\": \"Binary already indexed\",\n");
+        sb.append("  \"existing_functions\": ").append(existingFunctions).append(",\n");
+        sb.append("  \"hint\": \"Use force=true to re-index\"\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Build JSON output for indexing result.
+     */
+    private String buildIndexResultOutput(StructureExtractor.ExtractionResult result) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"completed\",\n");
+        sb.append("  \"functions_extracted\": ").append(result.functionsExtracted).append(",\n");
+        sb.append("  \"call_edges\": ").append(result.callEdgesCreated).append(",\n");
+        sb.append("  \"reference_edges\": ").append(result.refEdgesCreated).append(",\n");
+        sb.append("  \"data_dependency_edges\": ").append(result.dataDepEdgesCreated).append(",\n");
+        sb.append("  \"vulnerable_call_edges\": ").append(result.vulnEdgesCreated).append(",\n");
+        sb.append("  \"elapsed_ms\": ").append(result.elapsedMs).append("\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Execute the ga_record_vulnerability tool.
+     * Records a vulnerability discovered by LLM analysis and propagates to callers.
+     */
+    private MCPToolResult executeRecordVulnerability(JsonObject arguments) {
+        // Parse arguments
+        long address = 0;
+        String functionName = null;
+
+        if (arguments.has("address")) {
+            address = parseAddress(arguments.get("address").getAsString());
+        }
+        if (arguments.has("function_name")) {
+            functionName = arguments.get("function_name").getAsString();
+        }
+
+        // Required fields
+        if (!arguments.has("vulnerability_type")) {
+            return MCPToolResult.error("'vulnerability_type' is required");
+        }
+        if (!arguments.has("severity")) {
+            return MCPToolResult.error("'severity' is required");
+        }
+        if (!arguments.has("description")) {
+            return MCPToolResult.error("'description' is required");
+        }
+
+        String vulnType = arguments.get("vulnerability_type").getAsString().toUpperCase();
+        String severity = arguments.get("severity").getAsString().toUpperCase();
+        String description = arguments.get("description").getAsString();
+        String evidence = arguments.has("evidence") ? arguments.get("evidence").getAsString() : null;
+
+        // Validate vulnerability type
+        if (!isValidVulnerabilityType(vulnType)) {
+            return MCPToolResult.error("Invalid vulnerability_type: " + vulnType +
+                ". Valid types: BUFFER_OVERFLOW, COMMAND_INJECTION, FORMAT_STRING, USE_AFTER_FREE, " +
+                "INTEGER_OVERFLOW, PATH_TRAVERSAL, SQL_INJECTION, RACE_CONDITION, " +
+                "MEMORY_LEAK, NULL_DEREF, INFO_DISCLOSURE, AUTH_BYPASS, CRYPTO_WEAKNESS, OTHER");
+        }
+
+        // Validate severity
+        if (!isValidSeverity(severity)) {
+            return MCPToolResult.error("Invalid severity: " + severity +
+                ". Valid values: LOW, MEDIUM, HIGH, CRITICAL");
+        }
+
+        // Look up function
+        Function function = lookupFunction(address, functionName);
+        if (function == null) {
+            return MCPToolResult.error("Function not found. Provide valid 'address' or 'function_name'");
+        }
+
+        address = function.getEntryPoint().getOffset();
+
+        // Get or create node
+        KnowledgeNode node = graph.getNodeByAddress(address);
+        if (node == null) {
+            // Index the function first
+            boolean indexed = indexFunctionOnDemand(function);
+            if (!indexed) {
+                return MCPToolResult.error("Failed to index function: " + function.getName());
+            }
+            node = graph.getNodeByAddress(address);
+            if (node == null) {
+                return MCPToolResult.error("Failed to create node for function: " + function.getName());
+            }
+        }
+
+        // Add vulnerability as security flag (e.g., "VULN_BUFFER_OVERFLOW")
+        String vulnFlag = "VULN_" + vulnType;
+        node.addSecurityFlag(vulnFlag);
+
+        // Add severity flag (e.g., "SEVERITY_HIGH")
+        String severityFlag = "SEVERITY_" + severity;
+        node.addSecurityFlag(severityFlag);
+
+        // Mark as LLM-discovered vulnerability
+        node.addSecurityFlag("LLM_DISCOVERED_VULN");
+
+        // Store description in node metadata (append to existing llm_summary or create new)
+        String existingSummary = node.getLlmSummary();
+        String vulnNote = String.format("\n\n[VULNERABILITY] %s (%s): %s%s",
+            vulnType, severity, description,
+            evidence != null ? "\nEvidence: " + evidence : "");
+
+        if (existingSummary != null && !existingSummary.isEmpty() && !existingSummary.equals("pending")) {
+            node.setLlmSummary(existingSummary + vulnNote);
+        } else {
+            node.setLlmSummary(vulnNote.trim());
+        }
+
+        // Save the updated node
+        graph.upsertNode(node);
+
+        // Propagate vulnerability to callers (Phase B.2)
+        int callersUpdated = propagateVulnerabilityToCallers(node, vulnType, severity);
+
+        Msg.info(this, String.format("Recorded vulnerability %s (%s) for %s at 0x%x, propagated to %d callers",
+            vulnType, severity, function.getName(), address, callersUpdated));
+
+        return MCPToolResult.success(buildVulnerabilityRecordOutput(
+            function.getName(), address, vulnType, severity, description, callersUpdated));
+    }
+
+    /**
+     * Propagate vulnerability information to all functions that call the vulnerable function.
+     * Creates CALLS_VULNERABLE edges and adds CALLS_VULNERABLE_FUNCTION flag to callers.
+     *
+     * @param vulnerableNode The node with the vulnerability
+     * @param vulnType The type of vulnerability
+     * @param severity The severity level
+     * @return Number of callers updated
+     */
+    private int propagateVulnerabilityToCallers(KnowledgeNode vulnerableNode, String vulnType, String severity) {
+        if (vulnerableNode == null || graph == null) {
+            return 0;
+        }
+
+        int callersUpdated = 0;
+        List<KnowledgeNode> callers = graph.getCallers(vulnerableNode.getId());
+
+        for (KnowledgeNode caller : callers) {
+            // Add CALLS_VULNERABLE edge from caller to vulnerable function
+            // Check if edge already exists
+            if (!graph.hasEdgesOfType(caller.getId(), ghidrassist.graphrag.nodes.EdgeType.CALLS_VULNERABLE)) {
+                String metadata = String.format("{\"vuln_type\":\"%s\",\"severity\":\"%s\"}", vulnType, severity);
+                graph.addEdge(caller.getId(), vulnerableNode.getId(),
+                    ghidrassist.graphrag.nodes.EdgeType.CALLS_VULNERABLE, 1.0, metadata);
+            }
+
+            // Add flag to caller indicating it calls a vulnerable function
+            String callerFlag = "CALLS_VULN_" + vulnType;
+            if (!caller.getSecurityFlags().contains(callerFlag)) {
+                caller.addSecurityFlag(callerFlag);
+                caller.addSecurityFlag("CALLS_VULNERABLE_FUNCTION");
+                graph.upsertNode(caller);
+                callersUpdated++;
+            }
+        }
+
+        return callersUpdated;
+    }
+
+    /**
+     * Execute the ga_add_security_flag tool.
+     * Adds a security-relevant flag to a function's knowledge graph node.
+     */
+    private MCPToolResult executeAddSecurityFlag(JsonObject arguments) {
+        // Parse arguments
+        long address = 0;
+        String functionName = null;
+
+        if (arguments.has("address")) {
+            address = parseAddress(arguments.get("address").getAsString());
+        }
+        if (arguments.has("function_name")) {
+            functionName = arguments.get("function_name").getAsString();
+        }
+
+        // Required field
+        if (!arguments.has("flag")) {
+            return MCPToolResult.error("'flag' is required");
+        }
+
+        String flag = arguments.get("flag").getAsString().toUpperCase().replace(" ", "_");
+
+        // Look up function
+        Function function = lookupFunction(address, functionName);
+        if (function == null) {
+            return MCPToolResult.error("Function not found. Provide valid 'address' or 'function_name'");
+        }
+
+        address = function.getEntryPoint().getOffset();
+
+        // Get or create node
+        KnowledgeNode node = graph.getNodeByAddress(address);
+        if (node == null) {
+            // Index the function first
+            boolean indexed = indexFunctionOnDemand(function);
+            if (!indexed) {
+                return MCPToolResult.error("Failed to index function: " + function.getName());
+            }
+            node = graph.getNodeByAddress(address);
+            if (node == null) {
+                return MCPToolResult.error("Failed to create node for function: " + function.getName());
+            }
+        }
+
+        // Check if flag already exists
+        boolean alreadyExists = node.getSecurityFlags().contains(flag);
+
+        if (!alreadyExists) {
+            // Add the flag
+            node.addSecurityFlag(flag);
+            graph.upsertNode(node);
+            Msg.info(this, String.format("Added security flag '%s' to %s at 0x%x",
+                flag, function.getName(), address));
+        }
+
+        return MCPToolResult.success(buildSecurityFlagAddOutput(
+            function.getName(), address, flag, !alreadyExists, node.getSecurityFlags()));
+    }
+
+    /**
+     * Check if a vulnerability type is valid.
+     */
+    private boolean isValidVulnerabilityType(String type) {
+        return type.equals("BUFFER_OVERFLOW") ||
+               type.equals("COMMAND_INJECTION") ||
+               type.equals("FORMAT_STRING") ||
+               type.equals("USE_AFTER_FREE") ||
+               type.equals("INTEGER_OVERFLOW") ||
+               type.equals("PATH_TRAVERSAL") ||
+               type.equals("SQL_INJECTION") ||
+               type.equals("RACE_CONDITION") ||
+               type.equals("MEMORY_LEAK") ||
+               type.equals("NULL_DEREF") ||
+               type.equals("INFO_DISCLOSURE") ||
+               type.equals("AUTH_BYPASS") ||
+               type.equals("CRYPTO_WEAKNESS") ||
+               type.equals("OTHER");
+    }
+
+    /**
+     * Check if a severity level is valid.
+     */
+    private boolean isValidSeverity(String severity) {
+        return severity.equals("LOW") ||
+               severity.equals("MEDIUM") ||
+               severity.equals("HIGH") ||
+               severity.equals("CRITICAL");
+    }
+
+    /**
+     * Build JSON output for vulnerability record.
+     */
+    private String buildVulnerabilityRecordOutput(String functionName, long address,
+            String vulnType, String severity, String description, int callersUpdated) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"recorded\",\n");
+        sb.append("  \"function_name\": \"").append(escapeJson(functionName)).append("\",\n");
+        sb.append("  \"address\": \"0x").append(Long.toHexString(address)).append("\",\n");
+        sb.append("  \"vulnerability_type\": \"").append(escapeJson(vulnType)).append("\",\n");
+        sb.append("  \"severity\": \"").append(escapeJson(severity)).append("\",\n");
+        sb.append("  \"description\": \"").append(escapeJson(description)).append("\",\n");
+        sb.append("  \"callers_updated\": ").append(callersUpdated).append(",\n");
+        sb.append("  \"message\": \"Vulnerability recorded and propagated to ").append(callersUpdated);
+        sb.append(" caller(s)\"\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Build JSON output for security flag add.
+     */
+    private String buildSecurityFlagAddOutput(String functionName, long address,
+            String flag, boolean wasAdded, List<String> allFlags) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"").append(wasAdded ? "added" : "already_exists").append("\",\n");
+        sb.append("  \"function_name\": \"").append(escapeJson(functionName)).append("\",\n");
+        sb.append("  \"address\": \"0x").append(Long.toHexString(address)).append("\",\n");
+        sb.append("  \"flag\": \"").append(escapeJson(flag)).append("\",\n");
+        sb.append("  \"all_flags\": ").append(toJsonArray(allFlags)).append("\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Execute the ga_refresh_names tool.
+     * Refreshes function names in the knowledge graph to match current Ghidra names.
+     */
+    private MCPToolResult executeRefreshNames(JsonObject arguments) {
+        // Parse arguments
+        long address = 0;
+        String functionName = null;
+
+        if (arguments.has("address")) {
+            address = parseAddress(arguments.get("address").getAsString());
+        }
+        if (arguments.has("function_name")) {
+            functionName = arguments.get("function_name").getAsString();
+        }
+
+        // Single function refresh
+        if (address != 0 || functionName != null) {
+            Function function = lookupFunction(address, functionName);
+            if (function == null) {
+                return MCPToolResult.error("Function not found. Provide valid 'address' or 'function_name'");
+            }
+
+            address = function.getEntryPoint().getOffset();
+            KnowledgeNode node = graph.getNodeByAddress(address);
+            if (node == null) {
+                return MCPToolResult.error("Function not indexed in knowledge graph: " + function.getName());
+            }
+
+            String oldName = node.getName();
+            boolean wasUpdated = ensureNodeNameFresh(function, node);
+
+            return MCPToolResult.success(buildNameRefreshOutput(
+                function.getName(), address, oldName, wasUpdated));
+        }
+
+        // Batch refresh all functions in binary
+        int updated = refreshAllNames();
+        return MCPToolResult.success(buildBatchNameRefreshOutput(updated));
+    }
+
+    /**
+     * Refresh all function names in the knowledge graph.
+     * Compares each indexed function's name with the current Ghidra name.
+     *
+     * @return Number of names updated
+     */
+    private int refreshAllNames() {
+        if (graph == null || currentProgram == null) {
+            return 0;
+        }
+
+        FunctionManager funcMgr = currentProgram.getFunctionManager();
+        int updated = 0;
+
+        // Get all function nodes from the graph
+        List<KnowledgeNode> functionNodes = graph.getNodesByType(ghidrassist.graphrag.nodes.NodeType.FUNCTION);
+
+        for (KnowledgeNode node : functionNodes) {
+            try {
+                // Look up the function in Ghidra by address
+                Address addr = currentProgram.getAddressFactory()
+                    .getDefaultAddressSpace().getAddress(node.getAddress());
+                Function func = funcMgr.getFunctionAt(addr);
+
+                if (func != null) {
+                    if (ensureNodeNameFresh(func, node)) {
+                        updated++;
+                    }
+                }
+            } catch (Exception e) {
+                Msg.debug(this, "Failed to refresh name for node " + node.getId() + ": " + e.getMessage());
+            }
+        }
+
+        Msg.info(this, String.format("Refreshed %d function names out of %d total", updated, functionNodes.size()));
+        return updated;
+    }
+
+    /**
+     * Build JSON output for single function name refresh.
+     */
+    private String buildNameRefreshOutput(String currentName, long address, String oldName, boolean wasUpdated) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"").append(wasUpdated ? "updated" : "unchanged").append("\",\n");
+        sb.append("  \"address\": \"0x").append(Long.toHexString(address)).append("\",\n");
+        sb.append("  \"current_name\": \"").append(escapeJson(currentName)).append("\",\n");
+        if (wasUpdated) {
+            sb.append("  \"old_name\": \"").append(escapeJson(oldName)).append("\",\n");
+        }
+        sb.append("  \"message\": \"");
+        if (wasUpdated) {
+            sb.append("Name updated from '").append(escapeJson(oldName)).append("' to '").append(escapeJson(currentName)).append("'");
+        } else {
+            sb.append("Name is already current");
+        }
+        sb.append("\"\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Build JSON output for batch name refresh.
+     */
+    private String buildBatchNameRefreshOutput(int updatedCount) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"completed\",\n");
+        sb.append("  \"scope\": \"binary\",\n");
+        sb.append("  \"names_updated\": ").append(updatedCount).append(",\n");
+        sb.append("  \"message\": \"Updated ").append(updatedCount).append(" stale function name(s)\"\n");
         sb.append("}");
         return sb.toString();
     }
