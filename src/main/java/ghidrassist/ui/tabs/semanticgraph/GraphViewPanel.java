@@ -4,6 +4,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.MouseWheelEvent;
+import java.awt.event.MouseWheelListener;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +45,12 @@ public class GraphViewPanel extends JPanel {
     private JCheckBox showRefsCheckbox;
     private JCheckBox showDataDepCheckbox;
     private JCheckBox showVulnCheckbox;
+
+    // Zoom controls
+    private JButton zoomInButton;
+    private JButton zoomOutButton;
+    private JButton zoomFitButton;
+    private JLabel zoomLabel;
 
     // Selected node info panel
     private JLabel selectedNodeLabel;
@@ -98,31 +106,92 @@ public class GraphViewPanel extends JPanel {
         graph.setEdgeLabelsMovable(false);
         graph.setCellsResizable(false);
 
-        // Setup styles
+        // Setup styles with theme colors
         setupStyles();
 
         // Create graph component
         graphComponent = new mxGraphComponent(graph);
         graphComponent.setConnectable(false);
         graphComponent.getViewport().setOpaque(true);
-        graphComponent.getViewport().setBackground(Color.WHITE);
-        graphComponent.setWheelScrollingEnabled(true);
 
-        // Enable zoom with mouse wheel
-        graphComponent.setZoomPolicy(mxGraphComponent.ZOOM_POLICY_WIDTH);
+        // Use theme-aware background color
+        Color bgColor = UIManager.getColor("Panel.background");
+        if (bgColor == null) {
+            bgColor = getBackground();
+        }
+        graphComponent.getViewport().setBackground(bgColor);
+        graphComponent.setBackground(bgColor);
+
+        // Disable default wheel scrolling so we can use CTRL+Wheel for zoom
+        graphComponent.setWheelScrollingEnabled(false);
+
+        // Add CTRL+Wheel zoom support
+        graphComponent.addMouseWheelListener(new MouseWheelListener() {
+            @Override
+            public void mouseWheelMoved(MouseWheelEvent e) {
+                if (e.isControlDown()) {
+                    // CTRL+Wheel = zoom
+                    if (e.getWheelRotation() < 0) {
+                        graphComponent.zoomIn();
+                    } else {
+                        graphComponent.zoomOut();
+                    }
+                    updateZoomLabel();
+                } else {
+                    // Normal wheel = scroll
+                    JScrollBar vBar = graphComponent.getVerticalScrollBar();
+                    if (vBar != null) {
+                        int amount = e.getWheelRotation() * vBar.getUnitIncrement();
+                        vBar.setValue(vBar.getValue() + amount);
+                    }
+                }
+            }
+        });
     }
 
     private void setupStyles() {
         mxStylesheet stylesheet = graph.getStylesheet();
 
-        // Center node style (highlighted)
+        // Get theme colors from UIManager for light/dark mode support
+        Color selectionBg = UIManager.getColor("List.selectionBackground");
+        Color selectionFg = UIManager.getColor("List.selectionForeground");
+        Color panelBg = UIManager.getColor("Panel.background");
+        Color textColor = UIManager.getColor("Label.foreground");
+        Color borderColor = UIManager.getColor("Component.borderColor");
+
+        // Determine if we're in dark mode by checking text brightness
+        boolean isDarkMode = isColorDark(panelBg);
+
+        // Fallback colors if UIManager doesn't provide them
+        if (selectionBg == null) selectionBg = new Color(74, 144, 217);
+        if (selectionFg == null) selectionFg = Color.WHITE;
+        if (textColor == null) textColor = isDarkMode ? Color.WHITE : Color.BLACK;
+        if (borderColor == null) borderColor = isDarkMode ? new Color(100, 100, 100) : new Color(128, 128, 128);
+
+        // Normal node colors based on theme
+        Color normalNodeBg = isDarkMode ? new Color(60, 63, 65) : new Color(232, 232, 232);
+        Color normalNodeBorder = borderColor;
+        Color normalNodeText = textColor;
+
+        // Vulnerable node colors - red tint that works in both modes
+        Color vulnNodeBg = isDarkMode ? new Color(80, 40, 40) : new Color(255, 204, 204);
+        Color vulnNodeBorder = isDarkMode ? new Color(200, 80, 80) : new Color(204, 0, 0);
+        Color vulnNodeText = isDarkMode ? new Color(255, 120, 120) : new Color(204, 0, 0);
+
+        // Edge colors
+        Color callsEdgeColor = selectionBg;
+        Color refsEdgeColor = borderColor;
+        Color dataEdgeColor = isDarkMode ? new Color(80, 180, 80) : new Color(0, 153, 0);
+        Color vulnEdgeColor = vulnNodeBorder;
+
+        // Center node style (highlighted with selection color)
         Map<String, Object> centerStyle = new HashMap<>();
         centerStyle.put(mxConstants.STYLE_SHAPE, mxConstants.SHAPE_RECTANGLE);
         centerStyle.put(mxConstants.STYLE_ROUNDED, true);
-        centerStyle.put(mxConstants.STYLE_FILLCOLOR, "#4A90D9");
-        centerStyle.put(mxConstants.STYLE_STROKECOLOR, "#2060A0");
+        centerStyle.put(mxConstants.STYLE_FILLCOLOR, colorToHex(selectionBg));
+        centerStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(selectionBg.darker()));
         centerStyle.put(mxConstants.STYLE_STROKEWIDTH, 3);
-        centerStyle.put(mxConstants.STYLE_FONTCOLOR, "#FFFFFF");
+        centerStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(selectionFg));
         centerStyle.put(mxConstants.STYLE_FONTSIZE, 11);
         centerStyle.put(mxConstants.STYLE_FONTSTYLE, mxConstants.FONT_BOLD);
         centerStyle.put(mxConstants.STYLE_VERTICAL_ALIGN, mxConstants.ALIGN_MIDDLE);
@@ -132,10 +201,10 @@ public class GraphViewPanel extends JPanel {
         Map<String, Object> normalStyle = new HashMap<>();
         normalStyle.put(mxConstants.STYLE_SHAPE, mxConstants.SHAPE_RECTANGLE);
         normalStyle.put(mxConstants.STYLE_ROUNDED, true);
-        normalStyle.put(mxConstants.STYLE_FILLCOLOR, "#E8E8E8");
-        normalStyle.put(mxConstants.STYLE_STROKECOLOR, "#808080");
+        normalStyle.put(mxConstants.STYLE_FILLCOLOR, colorToHex(normalNodeBg));
+        normalStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(normalNodeBorder));
         normalStyle.put(mxConstants.STYLE_STROKEWIDTH, 1);
-        normalStyle.put(mxConstants.STYLE_FONTCOLOR, "#000000");
+        normalStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(normalNodeText));
         normalStyle.put(mxConstants.STYLE_FONTSIZE, 10);
         normalStyle.put(mxConstants.STYLE_VERTICAL_ALIGN, mxConstants.ALIGN_MIDDLE);
         stylesheet.putCellStyle(STYLE_NORMAL, normalStyle);
@@ -144,10 +213,10 @@ public class GraphViewPanel extends JPanel {
         Map<String, Object> vulnStyle = new HashMap<>();
         vulnStyle.put(mxConstants.STYLE_SHAPE, mxConstants.SHAPE_RECTANGLE);
         vulnStyle.put(mxConstants.STYLE_ROUNDED, true);
-        vulnStyle.put(mxConstants.STYLE_FILLCOLOR, "#FFCCCC");
-        vulnStyle.put(mxConstants.STYLE_STROKECOLOR, "#CC0000");
+        vulnStyle.put(mxConstants.STYLE_FILLCOLOR, colorToHex(vulnNodeBg));
+        vulnStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(vulnNodeBorder));
         vulnStyle.put(mxConstants.STYLE_STROKEWIDTH, 2);
-        vulnStyle.put(mxConstants.STYLE_FONTCOLOR, "#CC0000");
+        vulnStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(vulnNodeText));
         vulnStyle.put(mxConstants.STYLE_FONTSIZE, 10);
         vulnStyle.put(mxConstants.STYLE_FONTSTYLE, mxConstants.FONT_BOLD);
         vulnStyle.put(mxConstants.STYLE_VERTICAL_ALIGN, mxConstants.ALIGN_MIDDLE);
@@ -155,34 +224,55 @@ public class GraphViewPanel extends JPanel {
 
         // Edge styles
         Map<String, Object> callsEdgeStyle = new HashMap<>();
-        callsEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, "#4A90D9");
+        callsEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(callsEdgeColor));
         callsEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 2);
         callsEdgeStyle.put(mxConstants.STYLE_ENDARROW, mxConstants.ARROW_CLASSIC);
         callsEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
+        callsEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
         stylesheet.putCellStyle(STYLE_EDGE_CALLS, callsEdgeStyle);
 
         Map<String, Object> refsEdgeStyle = new HashMap<>();
-        refsEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, "#808080");
+        refsEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(refsEdgeColor));
         refsEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 1);
         refsEdgeStyle.put(mxConstants.STYLE_DASHED, true);
         refsEdgeStyle.put(mxConstants.STYLE_ENDARROW, mxConstants.ARROW_CLASSIC);
         refsEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
+        refsEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
         stylesheet.putCellStyle(STYLE_EDGE_REFS, refsEdgeStyle);
 
         Map<String, Object> dataEdgeStyle = new HashMap<>();
-        dataEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, "#009900");
+        dataEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(dataEdgeColor));
         dataEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 1);
         dataEdgeStyle.put(mxConstants.STYLE_DASHED, true);
         dataEdgeStyle.put(mxConstants.STYLE_ENDARROW, mxConstants.ARROW_OVAL);
         dataEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
+        dataEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
         stylesheet.putCellStyle(STYLE_EDGE_DATA, dataEdgeStyle);
 
         Map<String, Object> vulnEdgeStyle = new HashMap<>();
-        vulnEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, "#CC0000");
+        vulnEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(vulnEdgeColor));
         vulnEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 2);
         vulnEdgeStyle.put(mxConstants.STYLE_ENDARROW, mxConstants.ARROW_CLASSIC);
         vulnEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
+        vulnEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
         stylesheet.putCellStyle(STYLE_EDGE_VULN, vulnEdgeStyle);
+    }
+
+    /**
+     * Check if a color is dark (for determining light vs dark mode).
+     */
+    private boolean isColorDark(Color color) {
+        if (color == null) return false;
+        // Use perceived brightness formula
+        double brightness = (color.getRed() * 299 + color.getGreen() * 587 + color.getBlue() * 114) / 1000.0;
+        return brightness < 128;
+    }
+
+    /**
+     * Convert Color to hex string for JGraphX styles.
+     */
+    private String colorToHex(Color color) {
+        return String.format("#%02X%02X%02X", color.getRed(), color.getGreen(), color.getBlue());
     }
 
     private void initializeComponents() {
@@ -197,10 +287,26 @@ public class GraphViewPanel extends JPanel {
         showDataDepCheckbox = new JCheckBox("DATA_DEP", false);
         showVulnCheckbox = new JCheckBox("VULN", true);
 
+        // Zoom controls
+        zoomInButton = new JButton("+");
+        zoomInButton.setToolTipText("Zoom In");
+        zoomInButton.setMargin(new Insets(2, 6, 2, 6));
+
+        zoomOutButton = new JButton("-");
+        zoomOutButton.setToolTipText("Zoom Out");
+        zoomOutButton.setMargin(new Insets(2, 6, 2, 6));
+
+        zoomFitButton = new JButton("Fit");
+        zoomFitButton.setToolTipText("Fit to View (1:1)");
+        zoomFitButton.setMargin(new Insets(2, 6, 2, 6));
+
+        zoomLabel = new JLabel("100%");
+        zoomLabel.setToolTipText("Current zoom level (CTRL+Wheel to zoom)");
+
         // Selected node info
         selectedNodeLabel = new JLabel("Selected: None");
         selectedSummaryLabel = new JLabel("");
-        selectedSummaryLabel.setForeground(Color.GRAY);
+        selectedSummaryLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
 
         goToButton = new JButton("Go To");
         goToButton.setEnabled(false);
@@ -250,17 +356,29 @@ public class GraphViewPanel extends JPanel {
         mainContent.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
         // ===== Top controls =====
-        JPanel controlsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 5));
+        JPanel controlsPanel = new JPanel(new BorderLayout());
 
-        controlsPanel.add(new JLabel("N-Hops:"));
-        controlsPanel.add(nHopsSpinner);
+        // Left side: N-Hops and Edge Types
+        JPanel leftControls = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 5));
+        leftControls.add(new JLabel("N-Hops:"));
+        leftControls.add(nHopsSpinner);
+        leftControls.add(Box.createHorizontalStrut(10));
+        leftControls.add(new JLabel("Edge Types:"));
+        leftControls.add(showCallsCheckbox);
+        leftControls.add(showRefsCheckbox);
+        leftControls.add(showDataDepCheckbox);
+        leftControls.add(showVulnCheckbox);
 
-        controlsPanel.add(Box.createHorizontalStrut(20));
-        controlsPanel.add(new JLabel("Edge Types:"));
-        controlsPanel.add(showCallsCheckbox);
-        controlsPanel.add(showRefsCheckbox);
-        controlsPanel.add(showDataDepCheckbox);
-        controlsPanel.add(showVulnCheckbox);
+        // Right side: Zoom controls
+        JPanel zoomControls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 5));
+        zoomControls.add(new JLabel("Zoom:"));
+        zoomControls.add(zoomOutButton);
+        zoomControls.add(zoomLabel);
+        zoomControls.add(zoomInButton);
+        zoomControls.add(zoomFitButton);
+
+        controlsPanel.add(leftControls, BorderLayout.WEST);
+        controlsPanel.add(zoomControls, BorderLayout.EAST);
 
         mainContent.add(controlsPanel, BorderLayout.NORTH);
 
@@ -302,6 +420,23 @@ public class GraphViewPanel extends JPanel {
         showRefsCheckbox.addActionListener(e -> refresh());
         showDataDepCheckbox.addActionListener(e -> refresh());
         showVulnCheckbox.addActionListener(e -> refresh());
+
+        // Zoom button handlers
+        zoomInButton.addActionListener(e -> {
+            graphComponent.zoomIn();
+            updateZoomLabel();
+        });
+
+        zoomOutButton.addActionListener(e -> {
+            graphComponent.zoomOut();
+            updateZoomLabel();
+        });
+
+        zoomFitButton.addActionListener(e -> {
+            graphComponent.zoomActual();
+            graphComponent.zoomAndCenter();
+            updateZoomLabel();
+        });
 
         // Graph click handler
         graphComponent.getGraphControl().addMouseListener(new MouseAdapter() {
@@ -437,6 +572,15 @@ public class GraphViewPanel extends JPanel {
             types.add(EdgeType.CALLS_VULNERABLE);
         }
         return types;
+    }
+
+    /**
+     * Update the zoom label to show current zoom percentage.
+     */
+    private void updateZoomLabel() {
+        double scale = graphComponent.getGraph().getView().getScale();
+        int percentage = (int) Math.round(scale * 100);
+        zoomLabel.setText(percentage + "%");
     }
 
     private String formatNodeLabel(KnowledgeNode node) {
