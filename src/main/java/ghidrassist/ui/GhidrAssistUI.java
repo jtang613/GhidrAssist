@@ -56,9 +56,9 @@ public class GhidrAssistUI extends JPanel {
         tabbedPane.addTab("Explain", explainTab);
         tabbedPane.addTab("Custom Query", queryTab);
         tabbedPane.addTab("Actions", actionsTab);
+        tabbedPane.addTab("Semantic Graph", semanticGraphTab);
         tabbedPane.addTab("RAG Management", ragManagementTab);
         tabbedPane.addTab("Analysis Options", analysisOptionsTab);
-        tabbedPane.addTab("Semantic Graph", semanticGraphTab);
         
         add(tabbedPane, BorderLayout.CENTER);
         

@@ -6,12 +6,14 @@ import java.awt.*;
 import ghidrassist.core.TabController;
 import ghidrassist.ui.tabs.semanticgraph.ListViewPanel;
 import ghidrassist.ui.tabs.semanticgraph.GraphViewPanel;
+import ghidrassist.ui.tabs.semanticgraph.SearchViewPanel;
 
 /**
  * Semantic Graph tab for viewing and editing knowledge graph data.
- * Provides two sub-views:
+ * Provides three sub-views:
  * - List View: Table/list-based display of callers, callees, edges, and security flags
  * - Visual Graph: Interactive node-edge diagram with configurable N-hop depth
+ * - Search: Query interface for testing semantic search and graph queries
  */
 public class SemanticGraphTab extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -27,6 +29,7 @@ public class SemanticGraphTab extends JPanel {
     private JTabbedPane subTabbedPane;
     private ListViewPanel listViewPanel;
     private GraphViewPanel graphViewPanel;
+    private SearchViewPanel searchViewPanel;
 
     // Bottom panel components
     private JButton resetGraphButton;
@@ -63,6 +66,7 @@ public class SemanticGraphTab extends JPanel {
         // Create sub-panels
         listViewPanel = new ListViewPanel(controller, this);
         graphViewPanel = new GraphViewPanel(controller, this);
+        searchViewPanel = new SearchViewPanel(controller, this);
 
         // Bottom action buttons
         resetGraphButton = new JButton("Reset Graph");
@@ -94,9 +98,10 @@ public class SemanticGraphTab extends JPanel {
 
         add(headerPanel, BorderLayout.NORTH);
 
-        // ===== Sub-tabbed pane (List View / Visual Graph) =====
+        // ===== Sub-tabbed pane (List View / Visual Graph / Search) =====
         subTabbedPane.addTab("List View", listViewPanel);
         subTabbedPane.addTab("Visual Graph", graphViewPanel);
+        subTabbedPane.addTab("Search", searchViewPanel);
 
         add(subTabbedPane, BorderLayout.CENTER);
 
@@ -135,8 +140,11 @@ public class SemanticGraphTab extends JPanel {
         // Sub-tab change listener
         subTabbedPane.addChangeListener(e -> {
             // Refresh the selected view when switching tabs
-            if (subTabbedPane.getSelectedComponent() == graphViewPanel) {
+            Component selected = subTabbedPane.getSelectedComponent();
+            if (selected == graphViewPanel) {
                 graphViewPanel.refresh();
+            } else if (selected == searchViewPanel) {
+                searchViewPanel.refresh();
             }
         });
     }

@@ -2288,6 +2288,70 @@ public class TabController {
         }
     }
 
+    /**
+     * Handle semantic graph search query.
+     * Executes a semantic query tool and returns the result via callback.
+     *
+     * @param queryType The tool name (e.g., "ga_search_semantic")
+     * @param args The query arguments as JsonObject
+     * @param resultCallback Callback to receive the JSON result string
+     */
+    public void handleSemanticGraphSearchQuery(String queryType, com.google.gson.JsonObject args,
+                                                java.util.function.Consumer<String> resultCallback) {
+        if (plugin.getCurrentProgram() == null) {
+            resultCallback.accept("{\"error\": \"No program loaded\"}");
+            return;
+        }
+
+        Task task = new Task("Semantic Query", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    monitor.setMessage("Executing " + queryType + "...");
+
+                    // Create query tools instance
+                    ghidrassist.graphrag.query.SemanticQueryTools tools =
+                            new ghidrassist.graphrag.query.SemanticQueryTools(analysisDB);
+                    tools.setCurrentProgram(plugin.getCurrentProgram());
+
+                    // Execute the query
+                    ghidrassist.mcp2.tools.MCPToolResult result = tools.executeTool(queryType, args).join();
+
+                    // Return result via callback on EDT
+                    final String resultJson;
+                    if (!result.isSuccess()) {
+                        resultJson = "{\"error\": \"" + escapeJsonString(result.getError()) + "\"}";
+                    } else {
+                        resultJson = result.getContent();
+                    }
+
+                    SwingUtilities.invokeLater(() -> resultCallback.accept(resultJson));
+
+                } catch (Exception e) {
+                    Msg.error(this, "Failed to execute semantic query: " + e.getMessage(), e);
+                    final String errorJson = "{\"error\": \"" + escapeJsonString(e.getMessage()) + "\"}";
+                    SwingUtilities.invokeLater(() -> resultCallback.accept(errorJson));
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Escape a string for safe inclusion in JSON.
+     */
+    private String escapeJsonString(String input) {
+        if (input == null) {
+            return "";
+        }
+        return input
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
+    }
+
     // ==== Cleanup ====
 
     public void dispose() {
