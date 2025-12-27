@@ -1,5 +1,6 @@
 package ghidrassist.core;
 
+import ghidra.app.services.GoToService;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.util.ProgramLocation;
@@ -82,6 +83,10 @@ public class TabController {
     private ActionsTab actionsTab;
     private RAGManagementTab ragManagementTab;
     private AnalysisOptionsTab analysisOptionsTab;
+    private SemanticGraphTab semanticGraphTab;
+
+    // Database for semantic graph operations
+    private final AnalysisDB analysisDB;
 
     public TabController(GhidrAssistPlugin plugin) {
         this.plugin = plugin;
@@ -97,7 +102,8 @@ public class TabController {
         this.ragManagementService = new RAGManagementService();
         this.analysisDataService = new AnalysisDataService(plugin);
         this.feedbackService = new FeedbackService(plugin);
-        
+        this.analysisDB = new AnalysisDB();
+
         new UIState();
     }
 
@@ -112,12 +118,13 @@ public class TabController {
     }
 
     public void setExplainTab(ExplainTab tab) { this.explainTab = tab; }
-    public void setQueryTab(QueryTab tab) { 
-        this.queryTab = tab; 
+    public void setQueryTab(QueryTab tab) {
+        this.queryTab = tab;
     }
     public void setActionsTab(ActionsTab tab) { this.actionsTab = tab; }
     public void setRAGManagementTab(RAGManagementTab tab) { this.ragManagementTab = tab; }
     public void setAnalysisOptionsTab(AnalysisOptionsTab tab) { this.analysisOptionsTab = tab; }
+    public void setSemanticGraphTab(SemanticGraphTab tab) { this.semanticGraphTab = tab; }
 
     // ==== Reasoning Configuration ====
 
@@ -1846,8 +1853,443 @@ public class TabController {
         };
     }
     
+    // ==== Semantic Graph Tab Handlers ====
+
+    /**
+     * Update the semantic graph tab when the Ghidra cursor location changes.
+     */
+    public void updateSemanticGraphLocation(ProgramLocation loc) {
+        if (semanticGraphTab == null || loc == null || loc.getAddress() == null) {
+            return;
+        }
+
+        long address = loc.getAddress().getOffset();
+        Function function = plugin.getCurrentFunction();
+        String functionName = function != null ? function.getName() : null;
+
+        SwingUtilities.invokeLater(() -> {
+            semanticGraphTab.updateLocation(address, functionName);
+        });
+    }
+
+    /**
+     * Handle navigation to a function/address in the semantic graph tab.
+     */
+    public void handleSemanticGraphGo(String text) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        try {
+            // Try to parse as address
+            long address = 0;
+            text = text.trim();
+            if (text.startsWith("0x") || text.startsWith("0X")) {
+                address = Long.parseLong(text.substring(2), 16);
+            } else if (text.matches("[0-9a-fA-F]+")) {
+                address = Long.parseLong(text, 16);
+            } else {
+                // Try to find function by name
+                ghidra.program.model.listing.FunctionManager fm = plugin.getCurrentProgram().getFunctionManager();
+                for (Function func : fm.getFunctions(true)) {
+                    if (func.getName().equalsIgnoreCase(text) ||
+                        text.contains(func.getName())) {
+                        address = func.getEntryPoint().getOffset();
+                        break;
+                    }
+                }
+            }
+
+            if (address != 0) {
+                Address addr = plugin.getCurrentProgram().getAddressFactory()
+                        .getDefaultAddressSpace().getAddress(address);
+                navigateToAddress(addr);
+            }
+        } catch (NumberFormatException e) {
+            Msg.showWarn(this, null, "Invalid Address", "Could not parse address: " + text);
+        }
+    }
+
+    /**
+     * Handle navigation to a specific address.
+     */
+    public void handleSemanticGraphNavigate(long address) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        Address addr = plugin.getCurrentProgram().getAddressFactory()
+                .getDefaultAddressSpace().getAddress(address);
+        navigateToAddress(addr);
+    }
+
+    /**
+     * Navigate to an address using GoToService.
+     */
+    private void navigateToAddress(Address addr) {
+        GoToService goToService = plugin.getTool().getService(GoToService.class);
+        if (goToService != null) {
+            goToService.goTo(addr);
+        }
+    }
+
+    /**
+     * Handle reset graph button.
+     */
+    public void handleSemanticGraphReset() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
+
+        Task task = new Task("Reset Graph", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    ghidrassist.graphrag.GraphRAGService service =
+                            ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
+                    service.clearGraph(plugin.getCurrentProgram());
+
+                    SwingUtilities.invokeLater(() -> {
+                        semanticGraphTab.refreshCurrentView();
+                        semanticGraphTab.updateStats(0, 0, 0, null);
+                        Msg.showInfo(this, null, "Graph Reset", "Knowledge graph has been cleared.");
+                    });
+                } catch (Exception e) {
+                    Msg.showError(this, null, "Error", "Failed to reset graph: " + e.getMessage());
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle reindex button with background progress.
+     */
+    public void handleSemanticGraphReindex() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
+
+        Task task = new Task("ReIndex Binary", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    monitor.setMessage("Indexing binary structure...");
+                    ghidrassist.graphrag.GraphRAGService service =
+                            ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
+                    service.setCurrentProgram(plugin.getCurrentProgram());
+
+                    ghidrassist.graphrag.extraction.StructureExtractor.ExtractionResult result =
+                            service.indexStructureSync(plugin.getCurrentProgram(), monitor, false);
+
+                    SwingUtilities.invokeLater(() -> {
+                        semanticGraphTab.refreshCurrentView();
+                        semanticGraphTab.updateStats(result.functionsExtracted, result.callEdgesCreated, 0, "just now");
+                        Msg.showInfo(this, null, "Indexing Complete",
+                                String.format("Indexed %d functions, %d edges",
+                                        result.functionsExtracted, result.callEdgesCreated));
+                    });
+                } catch (Exception e) {
+                    Msg.showError(this, null, "Error", "Failed to index binary: " + e.getMessage());
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle refresh names button.
+     */
+    public void handleSemanticGraphRefreshNames() {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        Task task = new Task("Refresh Names", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    // Use the ga_refresh_names tool via SemanticQueryTools
+                    ghidrassist.graphrag.query.SemanticQueryTools tools =
+                            new ghidrassist.graphrag.query.SemanticQueryTools(analysisDB);
+                    tools.setCurrentProgram(plugin.getCurrentProgram());
+
+                    com.google.gson.JsonObject args = new com.google.gson.JsonObject();
+                    tools.executeTool("ga_refresh_names", args).join();
+
+                    SwingUtilities.invokeLater(() -> {
+                        semanticGraphTab.refreshCurrentView();
+                        Msg.showInfo(this, null, "Names Refreshed", "Function names have been refreshed.");
+                    });
+                } catch (Exception e) {
+                    Msg.showError(this, null, "Error", "Failed to refresh names: " + e.getMessage());
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle index single function button.
+     */
+    public void handleSemanticGraphIndexFunction(long address) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        Task task = new Task("Index Function", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    Address addr = plugin.getCurrentProgram().getAddressFactory()
+                            .getDefaultAddressSpace().getAddress(address);
+                    Function function = plugin.getCurrentProgram().getFunctionManager()
+                            .getFunctionContaining(addr);
+
+                    if (function == null) {
+                        Msg.showWarn(this, null, "No Function", "No function at this address");
+                        return;
+                    }
+
+                    ghidrassist.graphrag.GraphRAGService service =
+                            ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
+                    service.setCurrentProgram(plugin.getCurrentProgram());
+
+                    // Index just this function
+                    ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                            analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+                    ghidrassist.graphrag.extraction.StructureExtractor extractor =
+                            new ghidrassist.graphrag.extraction.StructureExtractor(
+                                    plugin.getCurrentProgram(), graph, monitor);
+                    try {
+                        extractor.extractFunction(function);
+                    } finally {
+                        extractor.dispose();
+                    }
+
+                    SwingUtilities.invokeLater(() -> {
+                        semanticGraphTab.refreshCurrentView();
+                        Msg.showInfo(this, null, "Function Indexed",
+                                "Function " + function.getName() + " has been indexed.");
+                    });
+                } catch (Exception e) {
+                    Msg.showError(this, null, "Error", "Failed to index function: " + e.getMessage());
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle list view refresh.
+     */
+    public void handleSemanticGraphListViewRefresh(
+            ghidrassist.ui.tabs.semanticgraph.ListViewPanel listView, long address) {
+        if (plugin.getCurrentProgram() == null) {
+            listView.showNotIndexed();
+            return;
+        }
+
+        SwingUtilities.invokeLater(() -> {
+            try {
+                ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                        analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+
+                ghidrassist.graphrag.nodes.KnowledgeNode node = graph.getNodeByAddress(address);
+
+                if (node == null) {
+                    listView.showNotIndexed();
+                    semanticGraphTab.updateStatus(false, 0, 0, 0);
+                    return;
+                }
+
+                listView.showContent();
+
+                // Get callers and callees
+                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> callers = graph.getCallers(node.getId());
+                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> callees = graph.getCallees(node.getId());
+                java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> outgoing = graph.getOutgoingEdges(node.getId());
+                java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> incoming = graph.getIncomingEdges(node.getId());
+
+                // Combine all edges
+                java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> allEdges = new java.util.ArrayList<>();
+                allEdges.addAll(outgoing);
+                allEdges.addAll(incoming);
+
+                listView.setCallers(callers);
+                listView.setCallees(callees);
+                listView.setEdges(allEdges);
+                listView.setSecurityFlags(node.getSecurityFlags());
+                listView.setSummary(node.getLlmSummary());
+
+                semanticGraphTab.setCurrentNodeId(node.getId());
+                semanticGraphTab.updateStatus(true, callers.size(), callees.size(),
+                        node.getSecurityFlags().size());
+
+                // Update stats
+                int nodeCount = graph.getNodeCount();
+                int edgeCount = graph.getEdgeCount();
+                semanticGraphTab.updateStats(nodeCount, edgeCount, 0, null);
+
+            } catch (Exception e) {
+                Msg.error(this, "Failed to refresh list view: " + e.getMessage(), e);
+                listView.showNotIndexed();
+            }
+        });
+    }
+
+    /**
+     * Handle visual graph refresh.
+     */
+    public void handleSemanticGraphVisualRefresh(
+            ghidrassist.ui.tabs.semanticgraph.GraphViewPanel graphView,
+            long address, int nHops, java.util.Set<ghidrassist.graphrag.nodes.EdgeType> edgeTypes) {
+        if (plugin.getCurrentProgram() == null) {
+            graphView.showNotIndexed();
+            return;
+        }
+
+        SwingUtilities.invokeLater(() -> {
+            try {
+                ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                        analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+
+                ghidrassist.graphrag.nodes.KnowledgeNode centerNode = graph.getNodeByAddress(address);
+
+                if (centerNode == null) {
+                    graphView.showNotIndexed();
+                    return;
+                }
+
+                graphView.showContent();
+
+                // Get N-hop neighborhood
+                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> neighbors =
+                        graph.getNeighbors(centerNode.getId(), nHops);
+
+                // Include center node in the list
+                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> allNodes = new java.util.ArrayList<>();
+                allNodes.add(centerNode);
+                allNodes.addAll(neighbors);
+
+                // Collect all edges between these nodes
+                java.util.Set<String> nodeIds = new java.util.HashSet<>();
+                for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
+                    nodeIds.add(node.getId());
+                }
+
+                java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> allEdges = new java.util.ArrayList<>();
+                for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
+                    for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getOutgoingEdges(node.getId())) {
+                        if (nodeIds.contains(edge.getTargetId()) && edgeTypes.contains(edge.getType())) {
+                            allEdges.add(edge);
+                        }
+                    }
+                }
+
+                graphView.buildGraph(centerNode, allNodes, allEdges);
+
+            } catch (Exception e) {
+                Msg.error(this, "Failed to refresh visual graph: " + e.getMessage(), e);
+                graphView.showNotIndexed();
+            }
+        });
+    }
+
+    /**
+     * Handle adding a security flag.
+     */
+    public void handleSemanticGraphAddFlag(long address, String flag) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        try {
+            ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                    analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+            ghidrassist.graphrag.nodes.KnowledgeNode node = graph.getNodeByAddress(address);
+
+            if (node != null) {
+                node.addSecurityFlag(flag);
+                graph.upsertNode(node);
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Failed to add security flag: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Handle removing a security flag.
+     */
+    public void handleSemanticGraphRemoveFlag(long address, String flag) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        try {
+            ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                    analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+            ghidrassist.graphrag.nodes.KnowledgeNode node = graph.getNodeByAddress(address);
+
+            if (node != null) {
+                java.util.List<String> flags = new java.util.ArrayList<>(node.getSecurityFlags());
+                flags.remove(flag);
+                node.setSecurityFlags(flags);
+                graph.upsertNode(node);
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Failed to remove security flag: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Handle saving LLM summary.
+     */
+    public void handleSemanticGraphSaveSummary(long address, String summary) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        try {
+            ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                    analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+            ghidrassist.graphrag.nodes.KnowledgeNode node = graph.getNodeByAddress(address);
+
+            if (node != null) {
+                node.setLlmSummary(summary);
+                graph.upsertNode(node);
+                Msg.info(this, "Summary saved for node at 0x" + Long.toHexString(address));
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Failed to save summary: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Handle edge click in list view.
+     */
+    public void handleSemanticGraphEdgeClick(String targetId) {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        try {
+            ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                    analysisDB.getKnowledgeGraph(plugin.getCurrentProgram().getExecutableSHA256());
+            ghidrassist.graphrag.nodes.KnowledgeNode node = graph.getNode(targetId);
+
+            if (node != null) {
+                handleSemanticGraphNavigate(node.getAddress());
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Failed to navigate to edge target: " + e.getMessage(), e);
+        }
+    }
+
     // ==== Cleanup ====
-    
+
     public void dispose() {
         codeAnalysisService.close();
         analysisDataService.close();

@@ -20,6 +20,7 @@ public class GhidrAssistUI extends JPanel {
     private final ActionsTab actionsTab;
     private final RAGManagementTab ragManagementTab;
     private final AnalysisOptionsTab analysisOptionsTab;
+    private final SemanticGraphTab semanticGraphTab;
 
     public GhidrAssistUI(GhidrAssistPlugin plugin) {
         super(new BorderLayout());
@@ -35,13 +36,15 @@ public class GhidrAssistUI extends JPanel {
         this.actionsTab = new ActionsTab(controller);
         this.ragManagementTab = new RAGManagementTab(controller);
         this.analysisOptionsTab = new AnalysisOptionsTab(controller);
-        
+        this.semanticGraphTab = new SemanticGraphTab(controller);
+
         // Set tab references in controller
         controller.setExplainTab(explainTab);
         controller.setQueryTab(queryTab);
         controller.setActionsTab(actionsTab);
         controller.setRAGManagementTab(ragManagementTab);
         controller.setAnalysisOptionsTab(analysisOptionsTab);
+        controller.setSemanticGraphTab(semanticGraphTab);
         
         initializeUI();
     }
@@ -55,6 +58,7 @@ public class GhidrAssistUI extends JPanel {
         tabbedPane.addTab("Actions", actionsTab);
         tabbedPane.addTab("RAG Management", ragManagementTab);
         tabbedPane.addTab("Analysis Options", analysisOptionsTab);
+        tabbedPane.addTab("Semantic Graph", semanticGraphTab);
         
         add(tabbedPane, BorderLayout.CENTER);
         
@@ -79,6 +83,7 @@ public class GhidrAssistUI extends JPanel {
         if (loc != null && loc.getAddress() != null) {
             explainTab.updateOffset(loc.getAddress().toString());
             controller.updateAnalysis(loc);
+            controller.updateSemanticGraphLocation(loc);
         }
     }
 

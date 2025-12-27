@@ -2,18 +2,16 @@
 <projectDescription>
 	<name>GhidrAssist</name>
 	<comment></comment>
-	<projects>
-	</projects>
-	<buildSpec>
-		<buildCommand>
-			<name>org.eclipse.jdt.core.javabuilder</name>
-			<arguments>
-			</arguments>
-		</buildCommand>
-	</buildSpec>
+	<projects/>
 	<natures>
 		<nature>org.eclipse.jdt.core.javanature</nature>
 	</natures>
+	<buildSpec>
+		<buildCommand>
+			<name>org.eclipse.jdt.core.javabuilder</name>
+			<arguments/>
+		</buildCommand>
+	</buildSpec>
 	<linkedResources>
 		<link>
 			<name>Ghidra</name>
@@ -21,4 +19,5 @@
 			<location>/home/jtang613/tools/ghidra_12.0_PUBLIC</location>
 		</link>
 	</linkedResources>
+	<filteredResources/>
 </projectDescription>
