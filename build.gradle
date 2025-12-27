@@ -41,10 +41,11 @@ else {
 //----------------------END "DO NOT MODIFY" SECTION-------------------------------
 
 repositories {
-	// Declare dependency repositories here.  This is not needed if dependencies are manually 
+	// Declare dependency repositories here.  This is not needed if dependencies are manually
 	// dropped into the lib/ directory.
 	// See https://docs.gradle.org/current/userguide/declaring_repositories.html for more info.
 	mavenCentral()
+	maven { url 'https://jitpack.io' }
 }
 
 dependencies {
@@ -71,6 +72,9 @@ dependencies {
 
 	// JGraphT - Graph algorithms for Graph-RAG (community detection, traversal)
 	implementation 'org.jgrapht:jgrapht-core:1.5.2'
+
+	// JGraphX - Visual graph rendering for Semantic Graph tab
+	implementation 'com.github.vlsi.mxgraph:jgraphx:4.2.2'
 }
 
 // Exclude additional files from the built extension
