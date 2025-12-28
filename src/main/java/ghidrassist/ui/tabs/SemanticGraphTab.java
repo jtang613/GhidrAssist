@@ -35,6 +35,7 @@ public class SemanticGraphTab extends JPanel {
     private JButton resetGraphButton;
     private JButton reindexButton;
     private JButton semanticAnalysisButton;
+    private JButton securityAnalysisButton;
     private JButton refreshNamesButton;
     private JLabel statsLabel;
 
@@ -79,6 +80,9 @@ public class SemanticGraphTab extends JPanel {
         semanticAnalysisButton = new JButton("Semantic Analysis");
         semanticAnalysisButton.setToolTipText("Use LLM to generate summaries for all stale/unsummarized nodes");
 
+        securityAnalysisButton = new JButton("Security Analysis");
+        securityAnalysisButton.setToolTipText("Run taint analysis and create vulnerability edges (source→sink paths)");
+
         refreshNamesButton = new JButton("Refresh Names");
         refreshNamesButton.setToolTipText("Update function names in graph to match current Ghidra names");
 
@@ -118,6 +122,7 @@ public class SemanticGraphTab extends JPanel {
         buttonRow.add(resetGraphButton);
         buttonRow.add(reindexButton);
         buttonRow.add(semanticAnalysisButton);
+        buttonRow.add(securityAnalysisButton);
         buttonRow.add(refreshNamesButton);
 
         bottomPanel.add(buttonRow, BorderLayout.NORTH);
@@ -141,6 +146,9 @@ public class SemanticGraphTab extends JPanel {
 
         // Semantic Analysis button
         semanticAnalysisButton.addActionListener(e -> handleSemanticAnalysis());
+
+        // Security Analysis button
+        securityAnalysisButton.addActionListener(e -> handleSecurityAnalysis());
 
         // Refresh names button
         refreshNamesButton.addActionListener(e -> handleRefreshNames());
@@ -306,6 +314,23 @@ public class SemanticGraphTab extends JPanel {
 
         if (result == JOptionPane.YES_OPTION) {
             controller.handleSemanticGraphSemanticAnalysis();
+        }
+    }
+
+    private void handleSecurityAnalysis() {
+        int result = JOptionPane.showConfirmDialog(this,
+                "Run Security Analysis?\n" +
+                "This will:\n" +
+                "• Find taint paths from sources (input) to sinks (dangerous functions)\n" +
+                "• Create TAINT_FLOWS_TO edges along discovered paths\n" +
+                "• Create VULNERABLE_VIA edges from entry points to vulnerable sinks\n\n" +
+                "This requires an indexed binary.",
+                "Security Analysis",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (result == JOptionPane.YES_OPTION) {
+            controller.handleSemanticGraphSecurityAnalysis();
         }
     }
 

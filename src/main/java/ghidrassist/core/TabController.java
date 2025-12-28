@@ -2079,6 +2079,67 @@ public class TabController {
     }
 
     /**
+     * Handle security analysis button - taint analysis + VULNERABLE_VIA edges.
+     */
+    public void handleSemanticGraphSecurityAnalysis() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
+
+        Task task = new Task("Security Analysis", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+                    ghidrassist.graphrag.BinaryKnowledgeGraph graph =
+                            analysisDB.getKnowledgeGraph(programHash);
+
+                    if (graph == null) {
+                        SwingUtilities.invokeLater(() -> {
+                            Msg.showError(this, null, "Not Indexed",
+                                    "Binary is not indexed. Please run ReIndex first.");
+                        });
+                        return;
+                    }
+
+                    monitor.setMessage("Running taint analysis...");
+                    monitor.setIndeterminate(true);
+
+                    // Run taint analysis with edge creation
+                    ghidrassist.graphrag.analysis.TaintAnalyzer taintAnalyzer =
+                            new ghidrassist.graphrag.analysis.TaintAnalyzer(graph);
+
+                    // Find taint paths and create TAINT_FLOWS_TO edges
+                    java.util.List<ghidrassist.graphrag.analysis.TaintAnalyzer.TaintPath> taintPaths =
+                            taintAnalyzer.findTaintPaths(100, true); // max 100 paths, create edges
+
+                    monitor.setMessage("Creating VULNERABLE_VIA edges...");
+
+                    // Create VULNERABLE_VIA edges from entry points to vulnerable sinks
+                    int vulnerableViaEdges = taintAnalyzer.createVulnerableViaEdges();
+
+                    // Invalidate cache
+                    analysisDB.invalidateKnowledgeGraphCache(programHash);
+
+                    final int pathCount = taintPaths.size();
+                    final int vulnEdges = vulnerableViaEdges;
+
+                    SwingUtilities.invokeLater(() -> {
+                        semanticGraphTab.refreshCurrentView();
+                        Msg.showInfo(this, null, "Security Analysis Complete",
+                                String.format("Found %d taint paths\nCreated %d VULNERABLE_VIA edges",
+                                        pathCount, vulnEdges));
+                    });
+                } catch (Exception e) {
+                    Msg.showError(this, null, "Error", "Failed to run security analysis: " + e.getMessage());
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
      * Handle index single function button.
      */
     public void handleSemanticGraphIndexFunction(long address) {
