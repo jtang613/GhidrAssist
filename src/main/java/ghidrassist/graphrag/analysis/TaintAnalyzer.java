@@ -413,6 +413,174 @@ public class TaintAnalyzer {
     }
 
     /**
+     * Create VULNERABLE_VIA edges from entry points to vulnerable sinks.
+     * Entry points are functions that are:
+     * - Exported
+     * - Named "main", "WinMain", "DllMain", etc.
+     * - Have the ENTRY_POINT security flag
+     *
+     * Vulnerable sinks are functions with *_RISK or VULN_* security flags.
+     *
+     * @return Number of VULNERABLE_VIA edges created
+     */
+    public int createVulnerableViaEdges() {
+        Msg.info(this, "Creating VULNERABLE_VIA edges from entry points to vulnerable sinks...");
+
+        int edgesCreated = 0;
+
+        // Find entry points
+        List<KnowledgeNode> entryPoints = findEntryPoints();
+        Msg.info(this, String.format("Found %d entry points", entryPoints.size()));
+
+        // Find vulnerable nodes (nodes with vulnerability flags)
+        List<KnowledgeNode> vulnerableNodes = findVulnerableNodes();
+        Msg.info(this, String.format("Found %d vulnerable nodes", vulnerableNodes.size()));
+
+        if (entryPoints.isEmpty() || vulnerableNodes.isEmpty()) {
+            Msg.info(this, "No entry points or vulnerable nodes found - no VULNERABLE_VIA edges to create");
+            return 0;
+        }
+
+        // Use JGraphT to check path existence
+        Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
+
+        for (KnowledgeNode entry : entryPoints) {
+            for (KnowledgeNode vulnerable : vulnerableNodes) {
+                if (entry.getId().equals(vulnerable.getId())) {
+                    continue; // Skip self
+                }
+
+                // Check if both vertices exist in memory graph
+                if (!memGraph.containsVertex(entry.getId()) ||
+                    !memGraph.containsVertex(vulnerable.getId())) {
+                    continue;
+                }
+
+                // Check if there's a path from entry to vulnerable
+                try {
+                    AllDirectedPaths<String, LabeledEdge> pathFinder = new AllDirectedPaths<>(memGraph);
+                    List<GraphPath<String, LabeledEdge>> paths = pathFinder.getAllPaths(
+                            entry.getId(), vulnerable.getId(), true, MAX_PATH_LENGTH);
+
+                    if (!paths.isEmpty()) {
+                        // Path exists - create VULNERABLE_VIA edge
+                        if (!graph.hasEdgeBetween(entry.getId(), vulnerable.getId(), EdgeType.VULNERABLE_VIA)) {
+                            // Get the vulnerability type from the vulnerable node's flags
+                            String vulnType = getVulnerabilityType(vulnerable);
+                            String metadata = String.format("{\"path_length\":%d,\"vuln_type\":\"%s\"}",
+                                    paths.get(0).getLength(), vulnType);
+
+                            graph.addEdge(entry.getId(), vulnerable.getId(),
+                                    EdgeType.VULNERABLE_VIA, 1.0, metadata);
+                            edgesCreated++;
+                        }
+                    }
+                } catch (Exception e) {
+                    // Path finding can throw on disconnected graphs - ignore
+                    Msg.debug(this, "No path from " + entry.getName() + " to " + vulnerable.getName());
+                }
+            }
+        }
+
+        Msg.info(this, String.format("Created %d VULNERABLE_VIA edges", edgesCreated));
+        return edgesCreated;
+    }
+
+    /**
+     * Find entry point nodes (exported functions, main, etc.)
+     */
+    private List<KnowledgeNode> findEntryPoints() {
+        List<KnowledgeNode> entryPoints = new ArrayList<>();
+
+        // Common entry point names
+        Set<String> entryPointNames = new HashSet<>(Arrays.asList(
+                "main", "_main", "wmain", "_wmain",
+                "WinMain", "wWinMain", "_WinMain@16", "_wWinMain@16",
+                "DllMain", "_DllMain@12", "DllEntryPoint",
+                "start", "_start", "entry", "_entry",
+                "mainCRTStartup", "wmainCRTStartup",
+                "WinMainCRTStartup", "wWinMainCRTStartup"
+        ));
+
+        for (KnowledgeNode node : graph.getNodesByType(NodeType.FUNCTION)) {
+            boolean isEntryPoint = false;
+
+            // Check security flags for ENTRY_POINT
+            List<String> flags = node.getSecurityFlags();
+            if (flags != null && flags.contains("ENTRY_POINT")) {
+                isEntryPoint = true;
+            }
+
+            // Check for known entry point names
+            String name = node.getName();
+            if (name != null && entryPointNames.contains(name)) {
+                isEntryPoint = true;
+            }
+
+            // Check if function is exported (has EXPORTED flag or is in symbol table as exported)
+            if (flags != null && flags.contains("EXPORTED")) {
+                isEntryPoint = true;
+            }
+
+            if (isEntryPoint && !entryPoints.contains(node)) {
+                entryPoints.add(node);
+            }
+        }
+
+        return entryPoints;
+    }
+
+    /**
+     * Find nodes with vulnerability flags (*_RISK, VULN_*, etc.)
+     */
+    private List<KnowledgeNode> findVulnerableNodes() {
+        List<KnowledgeNode> vulnerableNodes = new ArrayList<>();
+
+        for (KnowledgeNode node : graph.getNodesByType(NodeType.FUNCTION)) {
+            List<String> flags = node.getSecurityFlags();
+            if (flags == null || flags.isEmpty()) {
+                continue;
+            }
+
+            // Check for vulnerability-indicating flags
+            for (String flag : flags) {
+                if (flag.endsWith("_RISK") || flag.startsWith("VULN_")) {
+                    if (!vulnerableNodes.contains(node)) {
+                        vulnerableNodes.add(node);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return vulnerableNodes;
+    }
+
+    /**
+     * Extract the primary vulnerability type from a node's security flags.
+     */
+    private String getVulnerabilityType(KnowledgeNode node) {
+        List<String> flags = node.getSecurityFlags();
+        if (flags == null || flags.isEmpty()) {
+            return "UNKNOWN";
+        }
+
+        // Prefer VULN_* flags, then *_RISK flags
+        for (String flag : flags) {
+            if (flag.startsWith("VULN_")) {
+                return flag.substring(5); // Remove "VULN_" prefix
+            }
+        }
+        for (String flag : flags) {
+            if (flag.endsWith("_RISK")) {
+                return flag.replace("_RISK", "");
+            }
+        }
+
+        return "UNKNOWN";
+    }
+
+    /**
      * Get statistics about taint sources and sinks.
      */
     public Map<String, Object> getTaintStats() {

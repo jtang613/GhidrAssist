@@ -310,6 +310,30 @@ public class SemanticQueryTools {
                 )
         ));
 
+        // 15. ga.create_edge
+        tools.add(createTool(
+                TOOL_PREFIX + "create_edge",
+                "Create a semantic relationship edge between two functions based on your analysis. " +
+                "Use this to record relationships you discover during code review that aren't captured " +
+                "by the structural call graph. Edge types: SIMILAR_PURPOSE (functions with similar behavior), " +
+                "RELATED_TO (general semantic relationship), DEPENDS_ON (functional dependency), " +
+                "IMPLEMENTS (implements a concept like 'authentication' or 'encryption'). " +
+                "Edges are persisted to the knowledge graph. NO LLM call.",
+                createSchema(
+                        Map.of(
+                                "source_address", Map.of("type", "string", "description", "Source function address (hex)"),
+                                "source_name", Map.of("type", "string", "description", "Source function name (alternative to address)"),
+                                "target_address", Map.of("type", "string", "description", "Target function address (hex)"),
+                                "target_name", Map.of("type", "string", "description", "Target function name (alternative to address)"),
+                                "edge_type", Map.of("type", "string", "description",
+                                        "Edge type: SIMILAR_PURPOSE, RELATED_TO, DEPENDS_ON, IMPLEMENTS"),
+                                "confidence", Map.of("type", "number", "description", "Confidence score 0.0-1.0 (default: 0.8)"),
+                                "reason", Map.of("type", "string", "description", "Brief explanation of the relationship")
+                        ),
+                        List.of("edge_type") // edge_type is required
+                )
+        ));
+
         return tools;
     }
 
@@ -362,6 +386,8 @@ public class SemanticQueryTools {
                         return executeGlobalQuery(arguments);
                     case "ga_find_taint_paths":
                         return executeFindTaintPaths(arguments);
+                    case "ga_create_edge":
+                        return executeCreateEdge(arguments);
                     default:
                         return MCPToolResult.error("Unknown tool: " + toolName);
                 }
@@ -391,7 +417,8 @@ public class SemanticQueryTools {
                lowerName.equals("ga_add_security_flag") ||
                lowerName.equals("ga_detect_communities") ||
                lowerName.equals("ga_global_query") ||
-               lowerName.equals("ga_find_taint_paths");
+               lowerName.equals("ga_find_taint_paths") ||
+               lowerName.equals("ga_create_edge");
     }
 
     // ========================================
@@ -1854,6 +1881,167 @@ public class SemanticQueryTools {
         Msg.info(this, String.format("Taint path analysis complete: %d paths found", paths.size()));
 
         return MCPToolResult.success(sb.toString());
+    }
+
+    /**
+     * Execute the ga_create_edge tool.
+     * Creates a semantic relationship edge between two functions.
+     */
+    private MCPToolResult executeCreateEdge(JsonObject arguments) {
+        // Parse source function
+        long sourceAddress = 0;
+        String sourceName = null;
+        if (arguments.has("source_address")) {
+            sourceAddress = parseAddress(arguments.get("source_address").getAsString());
+        }
+        if (arguments.has("source_name")) {
+            sourceName = arguments.get("source_name").getAsString();
+        }
+
+        // Parse target function
+        long targetAddress = 0;
+        String targetName = null;
+        if (arguments.has("target_address")) {
+            targetAddress = parseAddress(arguments.get("target_address").getAsString());
+        }
+        if (arguments.has("target_name")) {
+            targetName = arguments.get("target_name").getAsString();
+        }
+
+        // Required field: edge_type
+        if (!arguments.has("edge_type")) {
+            return MCPToolResult.error("'edge_type' is required");
+        }
+        String edgeTypeStr = arguments.get("edge_type").getAsString().toUpperCase();
+
+        // Optional fields
+        double confidence = 0.8; // Default confidence
+        if (arguments.has("confidence")) {
+            confidence = arguments.get("confidence").getAsDouble();
+            confidence = Math.max(0.0, Math.min(1.0, confidence)); // Clamp to 0-1
+        }
+        String reason = arguments.has("reason") ? arguments.get("reason").getAsString() : null;
+
+        // Validate edge type
+        ghidrassist.graphrag.nodes.EdgeType edgeType;
+        try {
+            edgeType = ghidrassist.graphrag.nodes.EdgeType.valueOf(edgeTypeStr);
+        } catch (IllegalArgumentException e) {
+            return MCPToolResult.error("Invalid edge_type: " + edgeTypeStr +
+                ". Valid types: SIMILAR_PURPOSE, RELATED_TO, DEPENDS_ON, IMPLEMENTS");
+        }
+
+        // Validate that this is a semantic edge type (not structural)
+        if (!isSemanticEdgeType(edgeType)) {
+            return MCPToolResult.error("Edge type " + edgeTypeStr + " is not a semantic edge type. " +
+                "Use: SIMILAR_PURPOSE, RELATED_TO, DEPENDS_ON, IMPLEMENTS");
+        }
+
+        // Look up source function
+        Function sourceFunc = lookupFunction(sourceAddress, sourceName);
+        if (sourceFunc == null) {
+            return MCPToolResult.error("Source function not found. Provide valid 'source_address' or 'source_name'");
+        }
+
+        // Look up target function
+        Function targetFunc = lookupFunction(targetAddress, targetName);
+        if (targetFunc == null) {
+            return MCPToolResult.error("Target function not found. Provide valid 'target_address' or 'target_name'");
+        }
+
+        sourceAddress = sourceFunc.getEntryPoint().getOffset();
+        targetAddress = targetFunc.getEntryPoint().getOffset();
+
+        // Get or create source node
+        KnowledgeNode sourceNode = graph.getNodeByAddress(sourceAddress);
+        if (sourceNode == null) {
+            boolean indexed = indexFunctionOnDemand(sourceFunc);
+            if (!indexed) {
+                return MCPToolResult.error("Failed to index source function: " + sourceFunc.getName());
+            }
+            sourceNode = graph.getNodeByAddress(sourceAddress);
+        }
+
+        // Get or create target node
+        KnowledgeNode targetNode = graph.getNodeByAddress(targetAddress);
+        if (targetNode == null) {
+            boolean indexed = indexFunctionOnDemand(targetFunc);
+            if (!indexed) {
+                return MCPToolResult.error("Failed to index target function: " + targetFunc.getName());
+            }
+            targetNode = graph.getNodeByAddress(targetAddress);
+        }
+
+        if (sourceNode == null || targetNode == null) {
+            return MCPToolResult.error("Failed to get nodes for source or target function");
+        }
+
+        // Check if edge already exists
+        if (graph.hasEdgeBetween(sourceNode.getId(), targetNode.getId(), edgeType)) {
+            return MCPToolResult.success(buildEdgeExistsOutput(
+                sourceFunc.getName(), targetFunc.getName(), edgeTypeStr));
+        }
+
+        // Create the edge with metadata
+        String metadata = reason != null ?
+            String.format("{\"reason\":\"%s\",\"source\":\"llm_analysis\"}", escapeJson(reason)) :
+            "{\"source\":\"llm_analysis\"}";
+
+        graph.addEdge(sourceNode.getId(), targetNode.getId(), edgeType, confidence, metadata);
+
+        Msg.info(this, String.format("Created %s edge from %s to %s (confidence: %.2f)",
+            edgeTypeStr, sourceFunc.getName(), targetFunc.getName(), confidence));
+
+        return MCPToolResult.success(buildEdgeCreatedOutput(
+            sourceFunc.getName(), sourceAddress, targetFunc.getName(), targetAddress,
+            edgeTypeStr, confidence, reason));
+    }
+
+    /**
+     * Check if an edge type is a semantic (LLM-creatable) edge type.
+     */
+    private boolean isSemanticEdgeType(ghidrassist.graphrag.nodes.EdgeType edgeType) {
+        return edgeType == ghidrassist.graphrag.nodes.EdgeType.SIMILAR_PURPOSE ||
+               edgeType == ghidrassist.graphrag.nodes.EdgeType.RELATED_TO ||
+               edgeType == ghidrassist.graphrag.nodes.EdgeType.DEPENDS_ON ||
+               edgeType == ghidrassist.graphrag.nodes.EdgeType.IMPLEMENTS;
+    }
+
+    /**
+     * Build output for edge already exists case.
+     */
+    private String buildEdgeExistsOutput(String sourceName, String targetName, String edgeType) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"exists\",\n");
+        sb.append("  \"message\": \"Edge already exists\",\n");
+        sb.append("  \"source\": \"").append(escapeJson(sourceName)).append("\",\n");
+        sb.append("  \"target\": \"").append(escapeJson(targetName)).append("\",\n");
+        sb.append("  \"edge_type\": \"").append(edgeType).append("\"\n");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    /**
+     * Build output for successfully created edge.
+     */
+    private String buildEdgeCreatedOutput(String sourceName, long sourceAddr,
+                                           String targetName, long targetAddr,
+                                           String edgeType, double confidence, String reason) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"created\",\n");
+        sb.append("  \"source\": \"").append(escapeJson(sourceName)).append("\",\n");
+        sb.append("  \"source_address\": \"0x").append(Long.toHexString(sourceAddr)).append("\",\n");
+        sb.append("  \"target\": \"").append(escapeJson(targetName)).append("\",\n");
+        sb.append("  \"target_address\": \"0x").append(Long.toHexString(targetAddr)).append("\",\n");
+        sb.append("  \"edge_type\": \"").append(edgeType).append("\",\n");
+        sb.append("  \"confidence\": ").append(String.format("%.2f", confidence));
+        if (reason != null) {
+            sb.append(",\n  \"reason\": \"").append(escapeJson(reason)).append("\"");
+        }
+        sb.append("\n}");
+        return sb.toString();
     }
 
     /**
