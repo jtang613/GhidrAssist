@@ -43,8 +43,8 @@ public class AnalysisOptionsTab extends JPanel {
         SpinnerNumberModel spinnerModel = new SpinnerNumberModel(10, 1, 50, 1);
         maxToolCallsSpinner = new JSpinner(spinnerModel);
         maxToolCallsSpinner.setToolTipText("Maximum tool calls per iteration (default: 10)");
-        // Set preferred width to make it compact
-        maxToolCallsSpinner.setPreferredSize(new Dimension(60, maxToolCallsSpinner.getPreferredSize().height));
+        // Set preferred width to display 2 digits comfortably
+        maxToolCallsSpinner.setPreferredSize(new Dimension(75, maxToolCallsSpinner.getPreferredSize().height));
     }
 
     private void layoutComponents() {
