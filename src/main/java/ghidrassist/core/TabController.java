@@ -517,13 +517,13 @@ public class TabController {
                 progressHandler
             );
         }).thenAccept(result -> {
-            // Display result on EDT - append to iteration history
+            // Display result on EDT
             SwingUtilities.invokeLater(() -> {
-                // Build final display: iteration history + final result
-                StringBuilder finalDisplay = new StringBuilder();
-                finalDisplay.append(historyContainer[0]);  // All the iteration history
-                finalDisplay.append("# Final Result\n\n");
-                finalDisplay.append(result.toMarkdown());
+                // historyContainer[0] now contains the complete investigation including:
+                // - All iterations and tool calls
+                // - The final synthesis (streamed answer)
+                // - Completion metadata (status, iterations, duration)
+                // No need to append result.toMarkdown() which would duplicate the answer
 
                 // Save ReAct analysis with proper chunking to database
                 // Pass the FULL chronological history, not just summaries
@@ -533,8 +533,8 @@ public class TabController {
                     result.getAnswer()
                 );
 
-                // Show in UI - display the full chronological history that was streamed
-                String html = markdownHelper.markdownToHtml(finalDisplay.toString());
+                // Show in UI - display the full chronological history
+                String html = markdownHelper.markdownToHtml(historyContainer[0].toString());
                 queryTab.setResponseText(html);
 
                 // Clear the orchestrator reference
@@ -1688,9 +1688,23 @@ public class TabController {
                     if (synthesisBuffer.length() > 0) {
                         chronologicalHistory.append(synthesisBuffer).append("\n\n");
                     }
+
+                    // Add completion metadata
+                    chronologicalHistory.append("---\n\n");
+                    chronologicalHistory.append("**Status**: ").append(result.isSuccess() ? "✓ Complete" : result.getStatus()).append("\n");
+                    chronologicalHistory.append("**Iterations**: ").append(result.getIterationCount()).append("\n");
+                    chronologicalHistory.append("**Tool Calls**: ").append(result.getToolCallCount()).append("\n");
+                    if (result.getDuration() != null) {
+                        long seconds = result.getDuration().getSeconds();
+                        chronologicalHistory.append("**Duration**: ").append(seconds).append("s\n");
+                    }
+                    chronologicalHistory.append("\n");
+
                     historyContainer[0] = chronologicalHistory;
                 }
-                // Final render happens in handleAgenticQuery's thenAccept handler
+
+                // Do a final render immediately to ensure complete content is shown
+                renderCurrentContent();
             }
 
             @Override
@@ -1976,13 +1990,21 @@ public class TabController {
             @Override
             public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
                 try {
-                    monitor.setMessage("Indexing binary structure...");
                     ghidrassist.graphrag.GraphRAGService service =
                             ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
                     service.setCurrentProgram(plugin.getCurrentProgram());
 
+                    // Clear existing graph data before reindexing
+                    monitor.setMessage("Clearing existing graph data...");
+                    service.clearGraph(plugin.getCurrentProgram());
+
+                    monitor.setMessage("Indexing binary structure...");
                     ghidrassist.graphrag.extraction.StructureExtractor.ExtractionResult result =
                             service.indexStructureSync(plugin.getCurrentProgram(), monitor, false);
+
+                    // Invalidate cache so UI gets a fresh graph instance that loads from DB
+                    analysisDB.invalidateKnowledgeGraphCache(
+                            plugin.getCurrentProgram().getExecutableSHA256());
 
                     SwingUtilities.invokeLater(() -> {
                         semanticGraphTab.refreshCurrentView();
@@ -2025,6 +2047,67 @@ public class TabController {
                     });
                 } catch (Exception e) {
                     Msg.showError(this, null, "Error", "Failed to refresh names: " + e.getMessage());
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle semantic analysis button - LLM summarization of stale nodes.
+     */
+    public void handleSemanticGraphSemanticAnalysis() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
+
+        Task task = new Task("Semantic Analysis", true, true, true) {
+            @Override
+            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
+                try {
+                    ghidrassist.graphrag.GraphRAGService service =
+                            ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
+                    service.setCurrentProgram(plugin.getCurrentProgram());
+
+                    // Check if LLM provider is configured
+                    if (!service.hasLlmProvider()) {
+                        SwingUtilities.invokeLater(() -> {
+                            Msg.showError(this, null, "No LLM Provider",
+                                    "No LLM provider configured. Please configure an API provider in Analysis Options.");
+                        });
+                        return;
+                    }
+
+                    monitor.setMessage("Running semantic analysis...");
+
+                    // Run semantic extraction with progress callback
+                    ghidrassist.graphrag.extraction.SemanticExtractor.ExtractionResult result =
+                            service.summarizeStaleNodes(plugin.getCurrentProgram(), 0,
+                                    (processed, total, summarized, errors) -> {
+                                        monitor.setProgress(processed);
+                                        monitor.setMaximum(total);
+                                        monitor.setMessage(String.format("Summarizing... %d/%d (%d errors)",
+                                                processed, total, errors));
+                                        if (monitor.isCancelled()) {
+                                            throw new RuntimeException("Cancelled");
+                                        }
+                                    });
+
+                    // Invalidate cache so UI gets fresh data
+                    analysisDB.invalidateKnowledgeGraphCache(
+                            plugin.getCurrentProgram().getExecutableSHA256());
+
+                    SwingUtilities.invokeLater(() -> {
+                        semanticGraphTab.refreshCurrentView();
+                        Msg.showInfo(this, null, "Semantic Analysis Complete",
+                                String.format("Summarized %d nodes (%d errors) in %.1fs",
+                                        result.summarized, result.errors, result.elapsedMs / 1000.0));
+                    });
+                } catch (Exception e) {
+                    if (!e.getMessage().contains("Cancelled")) {
+                        Msg.showError(this, null, "Error", "Failed to run semantic analysis: " + e.getMessage());
+                    }
                 }
             }
         };

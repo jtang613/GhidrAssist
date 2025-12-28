@@ -681,27 +681,43 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
         //payload.addProperty("max_tokens", 64000);
         payload.addProperty("stream", stream);
 
-        // Add thinking configuration if enabled
+        // Check if thinking can be enabled - all assistant messages must have valid thinking data
+        // Anthropic requires that when thinking is enabled, ALL assistant messages MUST start with
+        // a thinking block. If any assistant message lacks thinking data (e.g., old conversations
+        // before thinking persistence was implemented), we must disable thinking for this request.
         ReasoningConfig reasoning = getReasoningConfig();
-        Msg.info(this, "DEBUG [AnthropicProvider]: Retrieved reasoning config: " +
-            (reasoning != null ? reasoning.getEffort() + ", enabled=" + reasoning.isEnabled() : "NULL"));
+        boolean canEnableThinking = reasoning != null && reasoning.isEnabled();
 
-        if (reasoning != null && reasoning.isEnabled()) {
+        if (canEnableThinking) {
+            // Scan messages to check if all assistant messages have valid thinking data
+            for (ChatMessage message : messages) {
+                if (message.getRole().equals(ChatMessage.ChatMessageRole.ASSISTANT)) {
+                    String thinkingContent = message.getThinkingContent();
+                    String thinkingSignature = message.getThinkingSignature();
+
+                    // If ANY assistant message lacks valid thinking data, we cannot use thinking
+                    if (thinkingContent == null || thinkingContent.isEmpty() ||
+                        thinkingSignature == null || thinkingSignature.isEmpty()) {
+                        Msg.debug(this, "Disabling thinking for this request - an assistant message " +
+                            "lacks valid thinking content/signature (may be from older conversation)");
+                        canEnableThinking = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (canEnableThinking) {
             int budget = reasoning.getAnthropicBudget();
-            Msg.info(this, "DEBUG [AnthropicProvider]: Reasoning is enabled, budget=" + budget);
             // Ensure budget_tokens is less than max_tokens
             Integer maxTokens = super.getMaxTokens();
             if (maxTokens != null && budget >= maxTokens) {
                 budget = Math.max(1024, maxTokens - 1000);
-                Msg.info(this, "DEBUG [AnthropicProvider]: Adjusted budget to " + budget + " (maxTokens=" + maxTokens + ")");
             }
             JsonObject thinking = new JsonObject();
             thinking.addProperty("type", "enabled");
             thinking.addProperty("budget_tokens", budget);
             payload.add("thinking", thinking);
-            Msg.info(this, "DEBUG [AnthropicProvider]: Added thinking object to payload");
-        } else {
-            Msg.info(this, "DEBUG [AnthropicProvider]: Reasoning is NOT enabled, skipping thinking parameter");
         }
 
         // Convert the messages to Anthropic's format
@@ -728,28 +744,22 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                     // Assistant message with tool calls - need to convert to content blocks
                     JsonArray contentArray = new JsonArray();
 
-                    // When thinking is enabled, assistant messages must start with a thinking block
-                    if (reasoning != null && reasoning.isEnabled()) {
-                        JsonObject thinkingBlock = new JsonObject();
-                        thinkingBlock.addProperty("type", "thinking");
-                        // Use stored thinking content and signature if available, otherwise use placeholder
+                    // When thinking is enabled AND valid for all messages (canEnableThinking),
+                    // include thinking blocks from the original API response.
+                    if (canEnableThinking) {
                         String thinkingContent = message.getThinkingContent();
                         String thinkingSignature = message.getThinkingSignature();
 
-                        if (thinkingContent != null && !thinkingContent.isEmpty()) {
+                        // We already verified all messages have valid thinking data in the pre-check,
+                        // so we can safely add the thinking block here
+                        if (thinkingContent != null && !thinkingContent.isEmpty() &&
+                            thinkingSignature != null && !thinkingSignature.isEmpty()) {
+                            JsonObject thinkingBlock = new JsonObject();
+                            thinkingBlock.addProperty("type", "thinking");
                             thinkingBlock.addProperty("thinking", thinkingContent);
-                            if (thinkingSignature != null && !thinkingSignature.isEmpty()) {
-                                thinkingBlock.addProperty("signature", thinkingSignature);
-                            } else {
-                                // If we have thinking but no signature, use empty signature
-                                thinkingBlock.addProperty("signature", "");
-                            }
-                        } else {
-                            // Placeholder thinking content to satisfy Anthropic's requirement
-                            thinkingBlock.addProperty("thinking", "Processing request and preparing tool calls.");
-                            thinkingBlock.addProperty("signature", "");
+                            thinkingBlock.addProperty("signature", thinkingSignature);
+                            contentArray.add(thinkingBlock);
                         }
-                        contentArray.add(thinkingBlock);
                     }
 
                     // Add text content if present

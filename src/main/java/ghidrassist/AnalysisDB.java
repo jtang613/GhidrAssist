@@ -1053,7 +1053,9 @@ public class AnalysisDB {
         stats.put("stale_nodes", 0);
 
         String nodesSql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ?";
-        String staleSql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ? AND is_stale = 1";
+        // Count nodes that need summarization: stale OR missing summary
+        String staleSql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ? " +
+                "AND (is_stale = 1 OR llm_summary IS NULL OR llm_summary = '')";
         String edgesSql = "SELECT COUNT(*) FROM graph_edges e "
                 + "INNER JOIN graph_nodes n ON e.source_id = n.id WHERE n.binary_id = ?";
 

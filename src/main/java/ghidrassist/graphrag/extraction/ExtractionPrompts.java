@@ -34,9 +34,15 @@ public class ExtractionPrompts {
                                                 List<String> callers, List<String> callees) {
         StringBuilder prompt = new StringBuilder();
 
-        prompt.append("Analyze this decompiled function and provide a concise summary.\n\n");
+        // Analyze complexity to determine appropriate summary length
+        ComplexityMetrics complexity = analyzeComplexity(decompiledCode);
+
+        prompt.append("Analyze this decompiled function and provide a summary.\n\n");
 
         prompt.append("## Function: ").append(functionName).append("\n\n");
+
+        // Include complexity info for the LLM
+        prompt.append("**Complexity:** ").append(complexity.toString()).append("\n");
 
         if (!callers.isEmpty()) {
             prompt.append("**Called by:** ").append(String.join(", ", callers)).append("\n");
@@ -46,11 +52,33 @@ public class ExtractionPrompts {
         }
         prompt.append("\n");
 
-        prompt.append("```c\n").append(truncateCode(decompiledCode, 2000)).append("\n```\n\n");
+        // Use larger truncation limit for complex functions
+        int truncateLimit = complexity.level.equals("very_complex") ? 4000 :
+                           complexity.level.equals("complex") ? 3000 : 2000;
+        prompt.append("```c\n").append(truncateCode(decompiledCode, truncateLimit)).append("\n```\n\n");
+
+        // Complexity-scaled guidance
+        prompt.append("**Summary Length Guidance:** ").append(complexity.summaryGuidance).append("\n\n");
 
         prompt.append("Provide a summary in the following format:\n\n");
-        prompt.append("**Purpose:** [1-2 sentences describing what this function does]\n\n");
-        prompt.append("**Behavior:** [Key operations, data transformations, control flow]\n\n");
+
+        // Scale Purpose section based on complexity
+        if (complexity.level.equals("very_complex") || complexity.level.equals("complex")) {
+            prompt.append("**Purpose:** [A thorough description of what this function does, ");
+            prompt.append("its role in the larger system, and its key responsibilities. ");
+            prompt.append("For complex functions, this should be a full paragraph.]\n\n");
+
+            prompt.append("**Behavior:** [Detailed explanation of the function's logic including:\n");
+            prompt.append("- Main code paths and control flow\n");
+            prompt.append("- Key data transformations and algorithms\n");
+            prompt.append("- Important state changes and side effects\n");
+            prompt.append("- Error handling patterns\n");
+            prompt.append("For complex functions, use multiple paragraphs as needed.]\n\n");
+        } else {
+            prompt.append("**Purpose:** [1-3 sentences describing what this function does]\n\n");
+            prompt.append("**Behavior:** [Key operations, data transformations, control flow]\n\n");
+        }
+
         prompt.append("**Security Notes:** [Any potential security concerns: buffer handling, ");
         prompt.append("input validation, crypto usage, privilege operations. Write 'None identified' if none.]\n\n");
         prompt.append("**Category:** [One of: initialization, data_processing, io_operations, ");
@@ -60,16 +88,27 @@ public class ExtractionPrompts {
     }
 
     /**
-     * Generate a brief one-line summary prompt (for batch processing).
+     * Generate a complexity-scaled summary prompt for individual function processing.
+     * Summary length scales with function complexity.
      */
     public static String functionBriefSummaryPrompt(String functionName, String decompiledCode) {
-        return String.format(
-                "Summarize this function in ONE sentence (max 100 chars):\n\n" +
-                "Function: %s\n```c\n%s\n```\n\n" +
-                "Summary:",
-                functionName,
-                truncateCode(decompiledCode, 1500)
-        );
+        ComplexityMetrics complexity = analyzeComplexity(decompiledCode);
+        StringBuilder prompt = new StringBuilder();
+
+        prompt.append("Summarize this decompiled function.\n\n");
+        prompt.append("Function: ").append(functionName).append("\n");
+        prompt.append("Complexity: ").append(complexity.toString()).append("\n\n");
+
+        // Scale truncation limit with complexity
+        int truncateLimit = complexity.level.equals("very_complex") ? 4000 :
+                           complexity.level.equals("complex") ? 3000 :
+                           complexity.level.equals("moderate") ? 2000 : 1500;
+        prompt.append("```c\n").append(truncateCode(decompiledCode, truncateLimit)).append("\n```\n\n");
+
+        prompt.append(complexity.summaryGuidance).append("\n\n");
+        prompt.append("Summary:");
+
+        return prompt.toString();
     }
 
     // ========================================
@@ -235,7 +274,7 @@ public class ExtractionPrompts {
 
     /**
      * Generate a batch prompt for summarizing multiple functions at once.
-     * More efficient for LLM API calls.
+     * Summary length scales with each function's complexity.
      *
      * @param nodes List of KnowledgeNodes to summarize
      * @return Prompt string for batch processing
@@ -243,15 +282,28 @@ public class ExtractionPrompts {
     public static String batchFunctionSummaryPrompt(List<KnowledgeNode> nodes) {
         StringBuilder prompt = new StringBuilder();
 
-        prompt.append("Summarize each of these functions in ONE sentence (max 80 chars each).\n");
+        prompt.append("Summarize each of these functions. Scale your summary length based on complexity:\n");
+        prompt.append("- Simple functions (few lines, no loops/branches): 1-2 sentences\n");
+        prompt.append("- Moderate functions: 3-5 sentences\n");
+        prompt.append("- Complex functions (many branches, loops, calls): 1-2 paragraphs\n");
+        prompt.append("- Very complex functions: 2-3 paragraphs covering all major code paths\n\n");
         prompt.append("Format your response as a numbered list matching the input.\n\n");
 
         for (int i = 0; i < nodes.size(); i++) {
             KnowledgeNode node = nodes.get(i);
-            prompt.append(String.format("%d. **%s**\n```c\n%s\n```\n\n",
+            String code = node.getRawContent();
+            ComplexityMetrics complexity = analyzeComplexity(code);
+
+            // Scale truncation based on complexity
+            int truncateLimit = complexity.level.equals("very_complex") ? 2000 :
+                               complexity.level.equals("complex") ? 1500 :
+                               complexity.level.equals("moderate") ? 1000 : 800;
+
+            prompt.append(String.format("%d. **%s** [%s]\n```c\n%s\n```\n\n",
                     i + 1,
                     node.getName() != null ? node.getName() : "unknown",
-                    truncateCode(node.getRawContent(), 800)
+                    complexity.level,
+                    truncateCode(code, truncateLimit)
             ));
         }
 
@@ -294,6 +346,102 @@ public class ExtractionPrompts {
         if (end == -1) end = response.length();
 
         return response.substring(start, end).trim();
+    }
+
+    // ========================================
+    // Complexity Analysis
+    // ========================================
+
+    /**
+     * Complexity metrics for a function.
+     */
+    public static class ComplexityMetrics {
+        public final int lineCount;
+        public final int branchCount;     // if, while, for, switch, case
+        public final int callCount;       // function calls
+        public final int loopCount;       // while, for, do
+        public final String level;        // "simple", "moderate", "complex", "very_complex"
+        public final String summaryGuidance;
+
+        public ComplexityMetrics(int lines, int branches, int calls, int loops) {
+            this.lineCount = lines;
+            this.branchCount = branches;
+            this.callCount = calls;
+            this.loopCount = loops;
+
+            // Calculate complexity level
+            int score = 0;
+            score += lines > 50 ? 2 : (lines > 20 ? 1 : 0);
+            score += branches > 10 ? 2 : (branches > 5 ? 1 : 0);
+            score += calls > 8 ? 2 : (calls > 4 ? 1 : 0);
+            score += loops > 3 ? 2 : (loops > 1 ? 1 : 0);
+
+            if (score >= 6) {
+                this.level = "very_complex";
+                this.summaryGuidance = "This is a very complex function. Provide a detailed multi-paragraph summary (3-5 paragraphs) covering all major code paths, data transformations, and behaviors.";
+            } else if (score >= 4) {
+                this.level = "complex";
+                this.summaryGuidance = "This is a complex function. Provide a thorough summary (2-3 paragraphs) explaining the main logic, key operations, and any notable patterns.";
+            } else if (score >= 2) {
+                this.level = "moderate";
+                this.summaryGuidance = "This is a moderately complex function. Provide a detailed summary (1-2 paragraphs) explaining its purpose and key operations.";
+            } else {
+                this.level = "simple";
+                this.summaryGuidance = "This is a simple function. Provide a concise summary (2-4 sentences) capturing its purpose and behavior.";
+            }
+        }
+
+        @Override
+        public String toString() {
+            return String.format("%d lines, %d branches, %d calls, %d loops (%s)",
+                    lineCount, branchCount, callCount, loopCount, level);
+        }
+    }
+
+    /**
+     * Analyze code complexity metrics.
+     *
+     * @param code Decompiled C code
+     * @return Complexity metrics
+     */
+    public static ComplexityMetrics analyzeComplexity(String code) {
+        if (code == null || code.isEmpty()) {
+            return new ComplexityMetrics(0, 0, 0, 0);
+        }
+
+        // Count lines
+        int lines = code.split("\n").length;
+
+        // Count branches (if, else if, switch, case, ? ternary)
+        int branches = 0;
+        branches += countOccurrences(code, "\\bif\\s*\\(");
+        branches += countOccurrences(code, "\\bswitch\\s*\\(");
+        branches += countOccurrences(code, "\\bcase\\s+");
+        branches += countOccurrences(code, "\\?.*:");  // ternary
+
+        // Count loops (while, for, do)
+        int loops = 0;
+        loops += countOccurrences(code, "\\bwhile\\s*\\(");
+        loops += countOccurrences(code, "\\bfor\\s*\\(");
+        loops += countOccurrences(code, "\\bdo\\s*\\{");
+
+        // Count function calls (identifier followed by parenthesis)
+        int calls = countOccurrences(code, "\\b[a-zA-Z_][a-zA-Z0-9_]*\\s*\\(");
+        // Subtract control structures which also match the pattern
+        calls -= branches + loops;
+        calls = Math.max(0, calls);
+
+        return new ComplexityMetrics(lines, branches, calls, loops);
+    }
+
+    private static int countOccurrences(String text, String regex) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(regex);
+        java.util.regex.Matcher matcher = pattern.matcher(text);
+        int count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 
     // ========================================

@@ -187,25 +187,52 @@ public class SemanticExtractor {
     }
 
     private void processFunctionBatch(List<KnowledgeNode> functions) {
-        // Try batch processing first (more efficient)
-        if (functions.size() > 1) {
+        // Separate complex functions from simple ones
+        // Complex functions need individual detailed processing for thorough summaries
+        List<KnowledgeNode> complexFunctions = new ArrayList<>();
+        List<KnowledgeNode> simpleFunctions = new ArrayList<>();
+
+        for (KnowledgeNode func : functions) {
+            ExtractionPrompts.ComplexityMetrics complexity =
+                    ExtractionPrompts.analyzeComplexity(func.getRawContent());
+            if (complexity.level.equals("complex") || complexity.level.equals("very_complex")) {
+                complexFunctions.add(func);
+            } else {
+                simpleFunctions.add(func);
+            }
+        }
+
+        // Process complex functions individually for detailed summaries
+        for (KnowledgeNode func : complexFunctions) {
+            if (cancelled) break;
+            processSingleFunction(func);
+        }
+
+        // Try batch processing for simple/moderate functions (more efficient)
+        if (!simpleFunctions.isEmpty() && simpleFunctions.size() > 1 && !cancelled) {
             try {
-                String batchPrompt = ExtractionPrompts.batchFunctionSummaryPrompt(functions);
+                String batchPrompt = ExtractionPrompts.batchFunctionSummaryPrompt(simpleFunctions);
                 String response = callLLM(batchPrompt);
 
                 if (response != null) {
-                    parseBatchResponse(response, functions);
+                    parseBatchResponse(response, simpleFunctions);
                     return;
                 }
             } catch (Exception e) {
                 Msg.warn(this, "Batch processing failed, falling back to individual: " + e.getMessage());
             }
-        }
 
-        // Fall back to individual processing
-        for (KnowledgeNode func : functions) {
-            if (cancelled) break;
-            processSingleFunction(func);
+            // Fall back to individual processing for simple functions
+            for (KnowledgeNode func : simpleFunctions) {
+                if (cancelled) break;
+                processSingleFunction(func);
+            }
+        } else {
+            // Process remaining simple functions individually
+            for (KnowledgeNode func : simpleFunctions) {
+                if (cancelled) break;
+                processSingleFunction(func);
+            }
         }
     }
 

@@ -5,6 +5,10 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
 
+import ghidrassist.apiprovider.ChatMessage;
+import ghidrassist.chat.message.ThreadSafeMessageStore;
+import ghidrassist.chat.util.RoleNormalizer;
+
 /**
  * Represents a single message in a chat conversation with persistence support.
  * Used for per-message storage and chunk-based editing.
@@ -191,6 +195,55 @@ public class PersistedChatMessage {
 
     public void setMessageType(String messageType) {
         this.messageType = messageType;
+    }
+
+    // ==================== API Conversion Methods ====================
+
+    /**
+     * Convert this persisted message to a ChatMessage for API calls.
+     * Restores thinking content, tool calls, and other metadata from nativeMessageData.
+     *
+     * @return A ChatMessage with all metadata restored
+     */
+    public ChatMessage toChatMessage() {
+        String apiRole = normalizeRoleForApi(this.role);
+        return ThreadSafeMessageStore.deserializeNativeData(
+                this.nativeMessageData,
+                apiRole,
+                this.content
+        );
+    }
+
+    /**
+     * Normalize display/internal role to API role format.
+     * Maps tool_call, tool_response, error etc. to standard API roles.
+     *
+     * @param displayRole The role as stored/displayed
+     * @return The role in API format (user, assistant, tool, system)
+     */
+    private String normalizeRoleForApi(String displayRole) {
+        if (displayRole == null) {
+            return ChatMessage.ChatMessageRole.USER;
+        }
+
+        String normalized = RoleNormalizer.normalize(displayRole);
+        switch (normalized) {
+            case RoleNormalizer.ROLE_USER:
+                return ChatMessage.ChatMessageRole.USER;
+            case RoleNormalizer.ROLE_ASSISTANT:
+                return ChatMessage.ChatMessageRole.ASSISTANT;
+            case RoleNormalizer.ROLE_TOOL_CALL:
+            case RoleNormalizer.ROLE_TOOL_RESPONSE:
+                return ChatMessage.ChatMessageRole.TOOL;
+            case RoleNormalizer.ROLE_ERROR:
+                // Errors are typically assistant messages
+                return ChatMessage.ChatMessageRole.ASSISTANT;
+            case RoleNormalizer.ROLE_EDITED:
+                // Edited messages retain original role, default to user
+                return ChatMessage.ChatMessageRole.USER;
+            default:
+                return ChatMessage.ChatMessageRole.USER;
+        }
     }
 
     // Utility methods

@@ -1,5 +1,9 @@
 package ghidrassist.chat.message;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+
+import ghidra.util.Msg;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.chat.PersistedChatMessage;
 import ghidrassist.chat.util.RoleNormalizer;
@@ -190,6 +194,20 @@ public class ThreadSafeMessageStore implements MessageStore {
         this.currentProviderType = providerType != null ? providerType : "unknown";
     }
 
+    @Override
+    public List<ChatMessage> getMessagesForApi() {
+        lock.readLock().lock();
+        try {
+            List<ChatMessage> apiMessages = new ArrayList<>();
+            for (PersistedChatMessage msg : messages) {
+                apiMessages.add(msg.toChatMessage());
+            }
+            return apiMessages;
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
     // ==================== Private Helper Methods ====================
 
     /**
@@ -230,26 +248,84 @@ public class ThreadSafeMessageStore implements MessageStore {
     }
 
     /**
-     * Serialize essential tool info from ChatMessage to JSON.
+     * Serialize ChatMessage metadata to JSON including tool calls and thinking data.
+     * This ensures extended thinking content/signature are preserved for multi-turn conversations.
      */
     private static String serializeToolInfo(ChatMessage apiMessage) {
         if (apiMessage == null) {
             return "{}";
         }
 
+        JsonObject json = new JsonObject();
+
+        // Serialize tool calls
         if (apiMessage.getToolCalls() != null) {
-            try {
-                StringBuilder json = new StringBuilder("{\"tool_calls\":[");
-                String toolCallsStr = apiMessage.getToolCalls().toString();
-                json.append(toolCallsStr);
-                json.append("]}");
-                return json.toString();
-            } catch (Exception e) {
-                return "{}";
-            }
+            json.add("tool_calls", apiMessage.getToolCalls());
         }
 
-        return "{}";
+        // Serialize tool call ID
+        if (apiMessage.getToolCallId() != null) {
+            json.addProperty("tool_call_id", apiMessage.getToolCallId());
+        }
+
+        // Serialize thinking content (for Anthropic extended thinking)
+        if (apiMessage.getThinkingContent() != null) {
+            json.addProperty("thinking_content", apiMessage.getThinkingContent());
+        }
+
+        // Serialize thinking signature (for Anthropic extended thinking)
+        if (apiMessage.getThinkingSignature() != null) {
+            json.addProperty("thinking_signature", apiMessage.getThinkingSignature());
+        }
+
+        return json.toString();
+    }
+
+    /**
+     * Deserialize native message data JSON back to a ChatMessage.
+     * Used when loading messages from database to restore thinking data and tool calls.
+     *
+     * @param nativeData The JSON string containing serialized metadata
+     * @param role The message role
+     * @param content The message content text
+     * @return A ChatMessage with all metadata restored
+     */
+    public static ChatMessage deserializeNativeData(String nativeData, String role, String content) {
+        ChatMessage message = new ChatMessage(role, content);
+
+        if (nativeData == null || nativeData.isEmpty() || nativeData.equals("{}")) {
+            return message;
+        }
+
+        try {
+            Gson gson = new Gson();
+            JsonObject json = gson.fromJson(nativeData, JsonObject.class);
+
+            // Restore tool calls
+            if (json.has("tool_calls")) {
+                message.setToolCalls(json.get("tool_calls").getAsJsonArray());
+            }
+
+            // Restore tool call ID
+            if (json.has("tool_call_id")) {
+                message.setToolCallId(json.get("tool_call_id").getAsString());
+            }
+
+            // Restore thinking content (for Anthropic extended thinking)
+            if (json.has("thinking_content")) {
+                message.setThinkingContent(json.get("thinking_content").getAsString());
+            }
+
+            // Restore thinking signature (for Anthropic extended thinking)
+            if (json.has("thinking_signature")) {
+                message.setThinkingSignature(json.get("thinking_signature").getAsString());
+            }
+        } catch (Exception e) {
+            Msg.warn(ThreadSafeMessageStore.class,
+                    "Failed to deserialize native message data: " + e.getMessage());
+        }
+
+        return message;
     }
 
     /**

@@ -101,6 +101,13 @@ public class GraphRAGService {
     }
 
     /**
+     * Check if an LLM provider is configured.
+     */
+    public boolean hasLlmProvider() {
+        return llmProvider != null;
+    }
+
+    /**
      * Set the current program for background processing.
      * This should be called when the program changes in the UI.
      */

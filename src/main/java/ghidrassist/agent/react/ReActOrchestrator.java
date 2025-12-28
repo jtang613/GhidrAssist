@@ -85,6 +85,23 @@ public class ReActOrchestrator {
         this.llmApi = new LlmApi(providerConfig, plugin);
         this.mcpToolManager = MCPToolManager.getInstance();
 
+        // Apply saved reasoning config
+        ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+        if (currentProgram != null) {
+            try {
+                AnalysisDB analysisDB = new AnalysisDB();
+                String programHash = currentProgram.getExecutableSHA256();
+                String savedEffort = analysisDB.getReasoningEffort(programHash);
+                if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                    ghidrassist.apiprovider.ReasoningConfig reasoningConfig =
+                            ghidrassist.apiprovider.ReasoningConfig.fromString(savedEffort);
+                    llmApi.setReasoningConfig(reasoningConfig);
+                }
+            } catch (Exception e) {
+                // Continue without reasoning config if loading fails
+            }
+        }
+
         // Initialize unified ToolRegistry with both native and MCP tools
         this.toolRegistry = initializeToolRegistry();
     }

@@ -87,35 +87,25 @@ public class StructureExtractor {
             decompiler = new DecompInterface();
             decompiler.openProgram(program);
 
-            // Phase 1: Extract all functions as nodes
-            monitor.setMessage("Extracting functions...");
+            // Phase 1: Extract all functions as nodes AND their edges
+            // Note: extractFunction() also extracts CALLS, REFERENCES, DATA_DEPENDS, and
+            // CALLS_VULNERABLE edges for each function, so we don't need separate bulk phases
+            monitor.setMessage("Extracting functions and edges...");
             extractFunctions();
 
-            // Phase 2: Extract call relationships
-            monitor.setMessage("Extracting call graph...");
-            extractCallGraph();
-
-            // Phase 3: Optionally extract basic blocks
+            // Phase 2: Optionally extract basic blocks
             if (includeBlocks) {
                 monitor.setMessage("Extracting basic blocks...");
                 extractBasicBlocks();
             }
 
-            // Phase 4: Extract cross-references (REFERENCES edges)
-            monitor.setMessage("Extracting cross-references...");
-            extractReferences();
-
-            // Phase 5: Extract data dependencies (DATA_DEPENDS edges)
-            monitor.setMessage("Extracting data dependencies...");
-            extractDataDependencies();
-
-            // Phase 6: Extract vulnerable call edges (CALLS_VULNERABLE edges)
-            monitor.setMessage("Extracting vulnerable call edges...");
-            extractVulnerableCalls();
-
-            // Phase 7: Create binary-level node
+            // Phase 3: Create binary-level node
             monitor.setMessage("Creating binary summary node...");
             createBinaryNode();
+
+            // Phase 4: Detect communities
+            monitor.setMessage("Detecting function communities...");
+            detectCommunities();
 
         } finally {
             if (decompiler != null) {
@@ -299,11 +289,8 @@ public class StructureExtractor {
                 continue;
             }
 
-            KnowledgeNode node = createFunctionNode(func);
-            if (node != null) {
-                graph.upsertNode(node);
-                functionsExtracted++;
-            }
+            // Extract function node AND all its edges
+            extractFunction(func);
         }
     }
 
@@ -418,10 +405,16 @@ public class StructureExtractor {
                 graph.addEdge(callerNodeId, extNode.getId(), EdgeType.CALLS);
             } else {
                 KnowledgeNode calleeNode = graph.getNodeByAddress(realCallee.getEntryPoint().getOffset());
-                if (calleeNode != null) {
-                    graph.addEdge(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
-                    callEdgesCreated++;
+                if (calleeNode == null) {
+                    // Create placeholder node for callee that hasn't been processed yet
+                    // It will be fully populated when extractFunction() processes it later
+                    calleeNode = KnowledgeNode.createFunction(binaryId,
+                            realCallee.getEntryPoint().getOffset(), realCallee.getName());
+                    calleeNode.markStale();
+                    graph.upsertNode(calleeNode);
                 }
+                graph.addEdge(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
+                callEdgesCreated++;
             }
         }
     }
@@ -989,6 +982,24 @@ public class StructureExtractor {
         }
 
         return sb.toString();
+    }
+
+    // ========================================
+    // Community Detection
+    // ========================================
+
+    /**
+     * Detect communities (clusters) of related functions using label propagation.
+     */
+    private void detectCommunities() {
+        try {
+            ghidrassist.graphrag.community.CommunityDetector detector =
+                    new ghidrassist.graphrag.community.CommunityDetector(graph, monitor);
+            int communityCount = detector.detectCommunities();
+            Msg.info(this, String.format("Detected %d communities", communityCount));
+        } catch (Exception e) {
+            Msg.error(this, "Failed to detect communities: " + e.getMessage(), e);
+        }
     }
 
     /**

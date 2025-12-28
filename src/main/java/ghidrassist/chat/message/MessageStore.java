@@ -110,4 +110,13 @@ public interface MessageStore {
      * @param providerType The provider type to set
      */
     void setCurrentProviderType(String providerType);
+
+    /**
+     * Get messages as ChatMessage objects for API calls.
+     * This preserves thinking content, tool calls, and other metadata needed
+     * for multi-turn conversations with extended thinking.
+     *
+     * @return List of ChatMessage objects with all metadata restored
+     */
+    List<ChatMessage> getMessagesForApi();
 }
