@@ -124,15 +124,14 @@ public class MCPToolManager implements ToolProvider {
         // This is a no-op for MCPToolManager
     }
 
-    // ==================== Legacy MCP Tool Execution (for backwards compatibility) ====================
+    // ==================== Internal MCP Tool Execution ====================
 
     /**
      * Execute an MCP tool and return MCPToolResult.
-     * This is the legacy method for backwards compatibility.
-     * @deprecated Use executeTool(String, JsonObject) from ToolProvider interface instead.
+     * Internal method used by parallel execution. External callers should use
+     * executeTool(String, JsonObject) from the ToolProvider interface.
      */
-    @Deprecated
-    public CompletableFuture<MCPToolResult> executeToolMCP(String toolName, JsonObject arguments) {
+    private CompletableFuture<MCPToolResult> executeToolMCP(String toolName, JsonObject arguments) {
         MCPTool tool = findTool(toolName);
         if (tool == null) {
             return CompletableFuture.completedFuture(
@@ -308,7 +307,7 @@ public class MCPToolManager implements ToolProvider {
             for (ToolCallRequest toolCall : toolCalls) {
                 CompletableFuture<ToolCallResult> future = CompletableFuture.supplyAsync(() -> {
                     try {
-                        // Use legacy executeToolMCP for backwards compatibility
+                        // Execute tool and get MCPToolResult
                         MCPToolResult result = executeToolMCP(toolCall.getToolName(), toolCall.getArguments())
                             .orTimeout(30, TimeUnit.SECONDS)
                             .get();

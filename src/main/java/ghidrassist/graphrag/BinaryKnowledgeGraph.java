@@ -45,18 +45,6 @@ public class BinaryKnowledgeGraph {
      *
      * @param connection SQLite database connection (shared with AnalysisDB)
      * @param binaryId   Program hash identifying the binary
-     * @deprecated Use the constructor with AnalysisDB parameter for FTS repair support
-     */
-    @Deprecated
-    public BinaryKnowledgeGraph(Connection connection, String binaryId) {
-        this(connection, binaryId, null);
-    }
-
-    /**
-     * Create a BinaryKnowledgeGraph for a specific binary with FTS repair support.
-     *
-     * @param connection SQLite database connection (shared with AnalysisDB)
-     * @param binaryId   Program hash identifying the binary
      * @param analysisDB AnalysisDB instance for FTS table repair
      */
     public BinaryKnowledgeGraph(Connection connection, String binaryId, AnalysisDB analysisDB) {

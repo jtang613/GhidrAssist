@@ -26,16 +26,6 @@ public class MCPToolAdapter implements Tool {
         this.prefixedName = prefixedName;
     }
 
-    /**
-     * Create an adapter with auto-generated prefixed name.
-     * @deprecated Use the constructor with explicit prefixedName for clarity.
-     */
-    @Deprecated
-    public MCPToolAdapter(MCPTool mcpTool) {
-        this.mcpTool = mcpTool;
-        this.prefixedName = mcpTool.getServerName().toLowerCase() + "_" + mcpTool.getName().toLowerCase();
-    }
-
     @Override
     public String getName() {
         return prefixedName;

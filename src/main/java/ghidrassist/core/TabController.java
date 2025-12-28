@@ -770,42 +770,6 @@ public class TabController {
         }
     }
 
-    /**
-     * Legacy method for backwards compatibility.
-     * @deprecated Use handleAddDocuments() instead
-     */
-    @Deprecated
-    public void handleAddDocuments(JList<String> documentList) {
-        handleAddDocuments();
-    }
-
-    /**
-     * Legacy method for backwards compatibility.
-     * @deprecated Use handleDeleteDocument(String) instead
-     */
-    @Deprecated
-    public void handleDeleteSelected(JList<String> documentList) {
-        List<String> selectedFiles = documentList.getSelectedValuesList();
-        if (!selectedFiles.isEmpty()) {
-            handleDeleteDocument(selectedFiles.get(0));
-        }
-    }
-
-    /**
-     * Legacy method for backwards compatibility.
-     * @deprecated Use refreshRAGDocuments() instead
-     */
-    @Deprecated
-    public void loadIndexedFiles(JList<String> documentList) {
-        try {
-            List<String> fileNames = ragManagementService.getIndexedFiles();
-            documentList.setListData(fileNames.toArray(new String[0]));
-        } catch (Exception ex) {
-            Msg.showError(this, ragManagementTab, "Error",
-                    "Failed to load indexed files: " + ex.getMessage());
-        }
-    }
-
     // ==== Analysis Data Operations ====
     
     public void handleContextSave(String context) {
