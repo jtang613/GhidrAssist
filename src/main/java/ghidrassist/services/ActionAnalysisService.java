@@ -60,9 +60,26 @@ public class ActionAnalysisService {
         if (config == null) {
             throw new Exception("No API provider configured.");
         }
-        
+
         LlmApi llmApi = new LlmApi(config, plugin);
-        
+
+        // Apply saved reasoning config
+        ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+        if (currentProgram != null) {
+            try {
+                ghidrassist.AnalysisDB analysisDB = new ghidrassist.AnalysisDB();
+                String programHash = currentProgram.getExecutableSHA256();
+                String savedEffort = analysisDB.getReasoningEffort(programHash);
+                if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                    ghidrassist.apiprovider.ReasoningConfig reasoningConfig =
+                            ghidrassist.apiprovider.ReasoningConfig.fromString(savedEffort);
+                    llmApi.setReasoningConfig(reasoningConfig);
+                }
+            } catch (Exception e) {
+                // Continue without reasoning config if loading fails
+            }
+        }
+
         // Reset and set the active request counter
         activeRequests.set(request.getSelectedActions().size());
         

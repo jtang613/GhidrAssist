@@ -34,6 +34,7 @@ public class SemanticGraphTab extends JPanel {
     // Bottom panel components
     private JButton resetGraphButton;
     private JButton reindexButton;
+    private JButton semanticAnalysisButton;
     private JButton refreshNamesButton;
     private JLabel statsLabel;
 
@@ -75,6 +76,9 @@ public class SemanticGraphTab extends JPanel {
         reindexButton = new JButton("ReIndex Binary");
         reindexButton.setToolTipText("Rebuild the knowledge graph from Ghidra analysis");
 
+        semanticAnalysisButton = new JButton("Semantic Analysis");
+        semanticAnalysisButton.setToolTipText("Use LLM to generate summaries for all stale/unsummarized nodes");
+
         refreshNamesButton = new JButton("Refresh Names");
         refreshNamesButton.setToolTipText("Update function names in graph to match current Ghidra names");
 
@@ -113,6 +117,7 @@ public class SemanticGraphTab extends JPanel {
         JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         buttonRow.add(resetGraphButton);
         buttonRow.add(reindexButton);
+        buttonRow.add(semanticAnalysisButton);
         buttonRow.add(refreshNamesButton);
 
         bottomPanel.add(buttonRow, BorderLayout.NORTH);
@@ -133,6 +138,9 @@ public class SemanticGraphTab extends JPanel {
 
         // ReIndex button
         reindexButton.addActionListener(e -> handleReindex());
+
+        // Semantic Analysis button
+        semanticAnalysisButton.addActionListener(e -> handleSemanticAnalysis());
 
         // Refresh names button
         refreshNamesButton.addActionListener(e -> handleRefreshNames());
@@ -285,6 +293,20 @@ public class SemanticGraphTab extends JPanel {
 
     private void handleRefreshNames() {
         controller.handleSemanticGraphRefreshNames();
+    }
+
+    private void handleSemanticAnalysis() {
+        int result = JOptionPane.showConfirmDialog(this,
+                "Run Semantic Analysis on all stale nodes?\n" +
+                "This will use the LLM to generate summaries for unsummarized functions.\n" +
+                "This may take a while and consume API credits.",
+                "Semantic Analysis",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (result == JOptionPane.YES_OPTION) {
+            controller.handleSemanticGraphSemanticAnalysis();
+        }
     }
 
     /**

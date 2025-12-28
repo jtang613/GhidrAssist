@@ -2,10 +2,12 @@ package ghidrassist.graphrag;
 
 import ghidra.util.Msg;
 
+import ghidrassist.graphrag.community.Community;
 import ghidrassist.graphrag.nodes.EdgeType;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
 import ghidrassist.graphrag.nodes.NodeType;
 import ghidrassist.graphrag.query.*;
+import ghidrassist.graphrag.query.GlobalQueryResult.CommunityInsight;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -97,7 +99,7 @@ public class GraphRAGEngine {
                 .collect(Collectors.toList());
 
         // Get community if available
-        String community = null; // TODO: Implement community lookup
+        String community = getCommunityNameForNode(node.getId());
 
         // Extract category from summary if present
         String category = extractCategory(node.getLlmSummary());
@@ -403,10 +405,252 @@ public class GraphRAGEngine {
             return ModuleSummary.notFound(String.format("sub_%x", functionAddress));
         }
 
-        // TODO: Implement community lookup when community detection is ready
-        // For now, return a placeholder indicating community detection hasn't run
-        return ModuleSummary.notFound(node.getName() != null ? node.getName() :
-                String.format("sub_%x", functionAddress));
+        String functionName = node.getName() != null ? node.getName() :
+                String.format("sub_%x", functionAddress);
+
+        // Look up community for this node
+        String communityId = graph.getNodeCommunity(node.getId());
+        if (communityId == null) {
+            return ModuleSummary.notFound(functionName);
+        }
+
+        // Get community details
+        Community community = graph.getCommunity(communityId);
+        if (community == null) {
+            return ModuleSummary.notFound(functionName);
+        }
+
+        // Get community members
+        List<KnowledgeNode> members = graph.getCommunityMembers(communityId);
+        List<String> memberNames = members.stream()
+                .map(m -> m.getName() != null ? m.getName() : String.format("sub_%x", m.getAddress()))
+                .collect(Collectors.toList());
+
+        // Identify key functions (those with security flags or most connections)
+        List<String> keyFunctions = members.stream()
+                .filter(m -> m.getSecurityFlags() != null && !m.getSecurityFlags().isEmpty())
+                .map(m -> m.getName() != null ? m.getName() : String.format("sub_%x", m.getAddress()))
+                .limit(5)
+                .collect(Collectors.toList());
+
+        // Collect security relevance from member security flags
+        Set<String> allFlags = new HashSet<>();
+        for (KnowledgeNode member : members) {
+            if (member.getSecurityFlags() != null) {
+                allFlags.addAll(member.getSecurityFlags());
+            }
+        }
+        String securityRelevance = allFlags.isEmpty() ? null : String.join(", ", allFlags);
+
+        // Build ModuleSummary
+        return new ModuleSummary(
+                communityId,
+                community.getName(),
+                community.getSummary(),
+                memberNames,
+                keyFunctions,
+                securityRelevance,
+                community.getLevel()
+        );
+    }
+
+    /**
+     * Get community name for a node ID.
+     * Helper method for community lookup.
+     */
+    private String getCommunityNameForNode(String nodeId) {
+        String communityId = graph.getNodeCommunity(nodeId);
+        if (communityId == null) {
+            return null;
+        }
+
+        Community community = graph.getCommunity(communityId);
+        return community != null ? community.getName() : null;
+    }
+
+    // ========================================
+    // Global Query (Map-Reduce over Communities)
+    // ========================================
+
+    /**
+     * Execute a global query across all communities.
+     * NO LLM call - aggregates pre-computed community/function data.
+     *
+     * @param communityLevel Community level to query (0 = function communities)
+     * @return GlobalQueryResult with aggregated insights
+     */
+    public GlobalQueryResult globalQuery(int communityLevel) {
+        Msg.info(this, "Executing global query at community level " + communityLevel);
+
+        GlobalQueryResult result = new GlobalQueryResult(graph.getBinaryId());
+
+        // Get all communities at this level
+        List<Community> communities = graph.getCommunitiesForBinary(communityLevel);
+        if (communities.isEmpty()) {
+            result.addKeyFinding("No communities detected. Run community detection first.");
+            return result;
+        }
+
+        // Count total functions
+        int totalFunctions = graph.getNodesByType(NodeType.FUNCTION).size();
+        result.setTotalFunctions(totalFunctions);
+
+        // MAP PHASE: Extract insights from each community
+        Map<String, Integer> allFlags = new HashMap<>();
+        List<String> attackSurfaceFunctions = new ArrayList<>();
+
+        for (Community community : communities) {
+            CommunityInsight insight = buildCommunityInsight(community);
+            result.addCommunity(insight);
+
+            // Aggregate security flags
+            for (String flag : insight.getSecurityFlags()) {
+                allFlags.merge(flag, 1, Integer::sum);
+            }
+
+            // Collect attack surface functions (those with dangerous flags)
+            for (String func : insight.getKeyFunctions()) {
+                if (isAttackSurfaceCandidate(insight.getSecurityFlags())) {
+                    attackSurfaceFunctions.add(func);
+                }
+            }
+        }
+
+        // Set aggregated security flags
+        result.setSecurityFlagCounts(allFlags);
+
+        // Set attack surface
+        result.setAttackSurface(attackSurfaceFunctions);
+
+        // REDUCE PHASE: Sort communities by security relevance then size
+        List<CommunityInsight> sortedCommunities = new ArrayList<>(result.getCommunities());
+        sortedCommunities.sort((a, b) -> {
+            // First by security score (higher first)
+            int scoreCompare = Integer.compare(b.getSecurityScore(), a.getSecurityScore());
+            if (scoreCompare != 0) return scoreCompare;
+            // Then by member count (larger first)
+            return Integer.compare(b.getMemberCount(), a.getMemberCount());
+        });
+        result.setCommunities(sortedCommunities);
+
+        // Generate key findings
+        List<String> keyFindings = generateKeyFindings(sortedCommunities, allFlags, totalFunctions);
+        result.setKeyFindings(keyFindings);
+
+        Msg.info(this, String.format("Global query complete: %d communities, %d functions, %d security flags",
+                result.getCommunityCount(), totalFunctions, allFlags.size()));
+
+        return result;
+    }
+
+    /**
+     * Build insight for a single community.
+     * Extracts key functions and aggregates security flags from members.
+     */
+    private CommunityInsight buildCommunityInsight(Community community) {
+        CommunityInsight insight = new CommunityInsight(community.getId(), community.getName());
+        insight.setMemberCount(community.getMemberCount());
+        insight.setSummary(community.getSummary());
+
+        // Get community members
+        List<KnowledgeNode> members = graph.getCommunityMembers(community.getId());
+
+        Set<String> flags = new HashSet<>();
+        int securityScore = 0;
+
+        for (KnowledgeNode member : members) {
+            String funcName = member.getName() != null ? member.getName() :
+                    String.format("sub_%x", member.getAddress());
+
+            // Collect security flags
+            if (member.getSecurityFlags() != null && !member.getSecurityFlags().isEmpty()) {
+                flags.addAll(member.getSecurityFlags());
+                securityScore += member.getSecurityFlags().size();
+
+                // Add as key function if it has security flags
+                insight.addKeyFunction(funcName + " @ 0x" + Long.toHexString(member.getAddress()));
+            } else if (!funcName.startsWith("FUN_") && !funcName.startsWith("sub_")) {
+                // Named functions are also key functions (up to limit)
+                if (insight.getKeyFunctions().size() < 10) {
+                    insight.addKeyFunction(funcName);
+                }
+            }
+        }
+
+        insight.setSecurityFlags(new ArrayList<>(flags));
+        insight.setSecurityScore(securityScore);
+
+        return insight;
+    }
+
+    /**
+     * Check if a function is an attack surface candidate based on its flags.
+     */
+    private boolean isAttackSurfaceCandidate(List<String> flags) {
+        if (flags == null || flags.isEmpty()) return false;
+
+        Set<String> attackSurfaceFlags = Set.of(
+                "BUFFER_OVERFLOW_RISK",
+                "COMMAND_INJECTION_RISK",
+                "FORMAT_STRING_RISK",
+                "PATH_TRAVERSAL_RISK",
+                "SQL_INJECTION_RISK",
+                "NETWORK_CAPABLE",
+                "CALLS_VULNERABLE_FUNCTION"
+        );
+
+        for (String flag : flags) {
+            if (attackSurfaceFlags.contains(flag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Generate key findings from aggregated community data.
+     */
+    private List<String> generateKeyFindings(List<CommunityInsight> communities,
+                                              Map<String, Integer> allFlags,
+                                              int totalFunctions) {
+        List<String> findings = new ArrayList<>();
+
+        // Basic stats
+        findings.add(String.format("%d communities detected with %d total functions",
+                communities.size(), totalFunctions));
+
+        // Average community size
+        if (!communities.isEmpty()) {
+            int avgSize = totalFunctions / communities.size();
+            findings.add(String.format("Average community size: %d functions", avgSize));
+        }
+
+        // Security flag distribution
+        if (!allFlags.isEmpty()) {
+            // Sort by count descending
+            List<Map.Entry<String, Integer>> sortedFlags = allFlags.entrySet().stream()
+                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                    .collect(Collectors.toList());
+
+            for (Map.Entry<String, Integer> entry : sortedFlags) {
+                // Count how many communities have this flag
+                long communitiesWithFlag = communities.stream()
+                        .filter(c -> c.getSecurityFlags().contains(entry.getKey()))
+                        .count();
+
+                findings.add(String.format("%d functions with %s across %d communities",
+                        entry.getValue(), entry.getKey(), communitiesWithFlag));
+            }
+        }
+
+        // Identify the most security-critical community
+        if (!communities.isEmpty() && communities.get(0).getSecurityScore() > 0) {
+            CommunityInsight topCommunity = communities.get(0);
+            findings.add(String.format("Most security-relevant: %s (%d flags)",
+                    topCommunity.getCommunityName(), topCommunity.getSecurityScore()));
+        }
+
+        return findings;
     }
 
     // ========================================

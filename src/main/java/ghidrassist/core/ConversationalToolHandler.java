@@ -96,13 +96,69 @@ public class ConversationalToolHandler {
         
         // Start the conversation loop
         userHandler.onStart();
-        
+
         // Provide user feedback about automatic rate limit handling
         userHandler.onUpdate("🔄 Starting conversational tool calling (automatic retry on rate limits)...\n\n");
-        
+
         continueConversation();
     }
-    
+
+    /**
+     * Start the conversational tool calling session with existing history.
+     * This preserves thinking content, tool calls, and other metadata from previous turns.
+     *
+     * @param existingHistory List of ChatMessages from previous conversation (with thinking data)
+     * @param newUserPrompt The new user message to add
+     */
+    public void startConversationWithHistory(List<ChatMessage> existingHistory, String newUserPrompt) {
+        if (isConversationActive) {
+            Msg.warn(this, "Conversation already active, ignoring new request");
+            return;
+        }
+
+        // Validate prompt is not empty
+        if (newUserPrompt == null || newUserPrompt.trim().isEmpty()) {
+            Msg.warn(this, "Empty prompt received, cannot start conversation");
+            userHandler.onError(new IllegalArgumentException(
+                "Cannot process empty query. Please try again."));
+            if (onCompletionCallback != null) {
+                onCompletionCallback.run();
+            }
+            return;
+        }
+
+        isConversationActive = true;
+        isCancelled = false;
+        conversationHistory.clear();
+        rateLimitRetries = 0;
+        toolCallRound = 0;
+
+        // Add system message first
+        conversationHistory.add(new ChatMessage(
+            ChatMessage.ChatMessageRole.SYSTEM,
+            apiClient.getCurrentContext()
+        ));
+
+        // Add existing history (preserving thinking data, tool calls, etc.)
+        // Skip any system messages in the history since we just added our own
+        if (existingHistory != null) {
+            for (ChatMessage msg : existingHistory) {
+                if (!ChatMessage.ChatMessageRole.SYSTEM.equals(msg.getRole())) {
+                    conversationHistory.add(msg);
+                }
+            }
+        }
+
+        // Add new user message
+        conversationHistory.add(new ChatMessage(ChatMessage.ChatMessageRole.USER, newUserPrompt));
+
+        // Start the conversation loop
+        userHandler.onStart();
+        userHandler.onUpdate("🔄 Continuing conversation with history...\n\n");
+
+        continueConversation();
+    }
+
     /**
      * Cancel the ongoing conversation
      */

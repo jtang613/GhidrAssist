@@ -14,6 +14,7 @@ import ghidrassist.AnalysisDB;
 import ghidrassist.graphrag.BinaryKnowledgeGraph;
 import ghidrassist.graphrag.GraphRAGEngine;
 import ghidrassist.graphrag.GraphRAGService;
+import ghidrassist.graphrag.analysis.TaintAnalyzer;
 import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatures;
 import ghidrassist.graphrag.extraction.StructureExtractor;
@@ -260,18 +261,52 @@ public class SemanticQueryTools {
                 )
         ));
 
-        // 12. ga.refresh_names
+        // 12. ga.detect_communities
         tools.add(createTool(
-                TOOL_PREFIX + "refresh_names",
-                "Refresh function names in the knowledge graph to match current Ghidra names. " +
-                "Use this after renaming functions in Ghidra to update the graph. " +
-                "Can refresh a single function or all functions in the binary. NO LLM call.",
+                TOOL_PREFIX + "detect_communities",
+                "Run community detection on the function call graph to cluster related functions into modules. " +
+                "Uses Label Propagation algorithm to identify communities based on call relationships. " +
+                "Results are stored in the knowledge graph for use by ga_get_module_summary. NO LLM call.",
                 createSchema(
                         Map.of(
-                                "address", Map.of("type", "string", "description", "Function address (hex, optional - if omitted refreshes all)"),
-                                "function_name", Map.of("type", "string", "description", "Function name (alternative to address)")
+                                "min_size", Map.of("type", "integer", "description", "Minimum community size (default: 2). Smaller communities are merged."),
+                                "force", Map.of("type", "boolean", "description", "Force re-detection even if communities exist (default: false)")
                         ),
-                        List.of() // None required - omitting all refreshes entire binary
+                        List.of() // None required
+                )
+        ));
+
+        // 13. ga.global_query
+        tools.add(createTool(
+                TOOL_PREFIX + "global_query",
+                "Get binary-wide analysis by aggregating insights across all detected communities. " +
+                "Returns attack surface summary, security flag distribution across communities, " +
+                "key functions per community, and cross-community patterns. " +
+                "Requires community detection to have run first (use ga_detect_communities). NO LLM call.",
+                createSchema(
+                        Map.of(
+                                "community_level", Map.of("type", "integer", "description", "Community level to query (default: 0 = function communities)"),
+                                "include_members", Map.of("type", "boolean", "description", "Include full member function lists for each community (default: false)")
+                        ),
+                        List.of() // None required
+                )
+        ));
+
+        // 14. ga.find_taint_paths
+        tools.add(createTool(
+                TOOL_PREFIX + "find_taint_paths",
+                "Find data flow paths from taint sources (network input, file reads, user input) " +
+                "to taint sinks (dangerous functions like strcpy, system, sprintf). " +
+                "Identifies potential vulnerability chains where untrusted data flows to dangerous operations. " +
+                "Can optionally create TAINT_FLOWS_TO edges in the graph. NO LLM call.",
+                createSchema(
+                        Map.of(
+                                "source_address", Map.of("type", "string", "description", "Optional: Find paths from this specific source function (hex address)"),
+                                "sink_address", Map.of("type", "string", "description", "Optional: Find paths to this specific sink function (hex address)"),
+                                "max_paths", Map.of("type", "integer", "description", "Maximum number of paths to return (default: 20)"),
+                                "create_edges", Map.of("type", "boolean", "description", "Create TAINT_FLOWS_TO edges along found paths (default: false)")
+                        ),
+                        List.of() // None required
                 )
         ));
 
@@ -321,8 +356,12 @@ public class SemanticQueryTools {
                         return executeRecordVulnerability(arguments);
                     case "ga_add_security_flag":
                         return executeAddSecurityFlag(arguments);
-                    case "ga_refresh_names":
-                        return executeRefreshNames(arguments);
+                    case "ga_detect_communities":
+                        return executeDetectCommunities(arguments);
+                    case "ga_global_query":
+                        return executeGlobalQuery(arguments);
+                    case "ga_find_taint_paths":
+                        return executeFindTaintPaths(arguments);
                     default:
                         return MCPToolResult.error("Unknown tool: " + toolName);
                 }
@@ -350,7 +389,9 @@ public class SemanticQueryTools {
                lowerName.equals("ga_index_binary") ||
                lowerName.equals("ga_record_vulnerability") ||
                lowerName.equals("ga_add_security_flag") ||
-               lowerName.equals("ga_refresh_names");
+               lowerName.equals("ga_detect_communities") ||
+               lowerName.equals("ga_global_query") ||
+               lowerName.equals("ga_find_taint_paths");
     }
 
     // ========================================
@@ -1639,6 +1680,214 @@ public class SemanticQueryTools {
             Msg.warn(this, "Invalid address format: " + addressStr);
             return 0;
         }
+    }
+
+    /**
+     * Execute the ga_detect_communities tool.
+     * Runs community detection on the function call graph.
+     */
+    private MCPToolResult executeDetectCommunities(JsonObject arguments) {
+        // Parse arguments
+        int minSize = 2;
+        boolean force = false;
+
+        if (arguments.has("min_size")) {
+            minSize = arguments.get("min_size").getAsInt();
+        }
+        if (arguments.has("force")) {
+            force = arguments.get("force").getAsBoolean();
+        }
+
+        // Check if communities already exist
+        int existingCount = graph.getCommunityCount();
+        if (existingCount > 0 && !force) {
+            return MCPToolResult.success(String.format(
+                    "{\n  \"status\": \"skipped\",\n  \"message\": \"Communities already exist (%d communities). Use force=true to re-detect.\",\n  \"existing_count\": %d\n}",
+                    existingCount, existingCount));
+        }
+
+        // Run community detection
+        ghidrassist.graphrag.community.CommunityDetector detector =
+                new ghidrassist.graphrag.community.CommunityDetector(graph, null);
+        int communityCount = detector.detectCommunities(100, minSize);
+
+        // Get statistics
+        Map<String, Object> stats = detector.getCommunityStats();
+
+        // Build result
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"success\",\n");
+        sb.append("  \"communities_detected\": ").append(communityCount).append(",\n");
+        sb.append("  \"min_size_used\": ").append(minSize).append(",\n");
+
+        if (stats.containsKey("total_members")) {
+            sb.append("  \"total_members\": ").append(stats.get("total_members")).append(",\n");
+        }
+        if (stats.containsKey("avg_size")) {
+            sb.append("  \"avg_community_size\": ").append(stats.get("avg_size")).append(",\n");
+        }
+        if (stats.containsKey("max_size")) {
+            sb.append("  \"max_community_size\": ").append(stats.get("max_size")).append(",\n");
+        }
+        if (stats.containsKey("min_size")) {
+            sb.append("  \"min_community_size\": ").append(stats.get("min_size")).append(",\n");
+        }
+
+        sb.append("  \"message\": \"Community detection complete. Use ga_get_module_summary to view community details.\"\n");
+        sb.append("}");
+
+        Msg.info(this, String.format("Community detection complete: %d communities", communityCount));
+
+        return MCPToolResult.success(sb.toString());
+    }
+
+    /**
+     * Execute the ga_global_query tool.
+     * Aggregates insights across all detected communities for binary-wide analysis.
+     */
+    private MCPToolResult executeGlobalQuery(JsonObject arguments) {
+        // Parse arguments
+        int communityLevel = 0;
+        boolean includeMembers = false;
+
+        if (arguments.has("community_level")) {
+            communityLevel = arguments.get("community_level").getAsInt();
+        }
+        if (arguments.has("include_members")) {
+            includeMembers = arguments.get("include_members").getAsBoolean();
+        }
+
+        // Check if communities exist
+        int existingCount = graph.getCommunityCount();
+        if (existingCount == 0) {
+            return MCPToolResult.success(
+                "{\n  \"status\": \"error\",\n  \"message\": \"No communities detected. " +
+                "Run ga_detect_communities first to cluster functions into communities.\"\n}");
+        }
+
+        // Execute global query
+        GlobalQueryResult result = engine.globalQuery(communityLevel);
+
+        Msg.info(this, String.format("Global query complete: %d communities, %d functions",
+                result.getCommunityCount(), result.getTotalFunctions()));
+
+        return MCPToolResult.success(result.toToolOutput(includeMembers));
+    }
+
+    /**
+     * Execute the ga_find_taint_paths tool.
+     * Finds data flow paths from taint sources to sinks.
+     */
+    private MCPToolResult executeFindTaintPaths(JsonObject arguments) {
+        // Parse arguments
+        long sourceAddress = 0;
+        long sinkAddress = 0;
+        int maxPaths = 20;
+        boolean createEdges = false;
+
+        if (arguments.has("source_address")) {
+            sourceAddress = parseAddress(arguments.get("source_address").getAsString());
+        }
+        if (arguments.has("sink_address")) {
+            sinkAddress = parseAddress(arguments.get("sink_address").getAsString());
+        }
+        if (arguments.has("max_paths")) {
+            maxPaths = arguments.get("max_paths").getAsInt();
+        }
+        if (arguments.has("create_edges")) {
+            createEdges = arguments.get("create_edges").getAsBoolean();
+        }
+
+        // Create taint analyzer
+        TaintAnalyzer analyzer = new TaintAnalyzer(graph);
+
+        // Execute appropriate search
+        java.util.List<TaintAnalyzer.TaintPath> paths;
+
+        if (sourceAddress != 0 && sinkAddress != 0) {
+            // Both specified - not directly supported, find from source
+            paths = analyzer.findTaintPathsFrom(sourceAddress, maxPaths, createEdges);
+        } else if (sourceAddress != 0) {
+            // Find paths from specific source
+            paths = analyzer.findTaintPathsFrom(sourceAddress, maxPaths, createEdges);
+        } else if (sinkAddress != 0) {
+            // Find paths to specific sink
+            paths = analyzer.findTaintPathsTo(sinkAddress, maxPaths, createEdges);
+        } else {
+            // Find all taint paths
+            paths = analyzer.findTaintPaths(maxPaths, createEdges);
+        }
+
+        // Build result output
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"paths_found\": ").append(paths.size()).append(",\n");
+
+        if (paths.isEmpty()) {
+            // Get taint stats for additional context
+            java.util.Map<String, Object> stats = analyzer.getTaintStats();
+            sb.append("  \"source_count\": ").append(stats.get("source_count")).append(",\n");
+            sb.append("  \"sink_count\": ").append(stats.get("sink_count")).append(",\n");
+            sb.append("  \"message\": \"No taint paths found. Ensure the binary is indexed and has source/sink functions.\",\n");
+            sb.append("  \"sample_sources\": ").append(toJsonArray((java.util.List<String>)stats.get("sample_sources"))).append(",\n");
+            sb.append("  \"sample_sinks\": ").append(toJsonArray((java.util.List<String>)stats.get("sample_sinks"))).append("\n");
+        } else {
+            sb.append("  \"edges_created\": ").append(createEdges).append(",\n");
+            sb.append("  \"paths\": [\n");
+
+            for (int i = 0; i < paths.size(); i++) {
+                TaintAnalyzer.TaintPath path = paths.get(i);
+                String pathOutput = path.toToolOutput();
+                // Indent the path output
+                String indented = pathOutput.replace("\n", "\n    ");
+                sb.append("    ").append(indented);
+                if (i < paths.size() - 1) sb.append(",");
+                sb.append("\n");
+            }
+
+            sb.append("  ]\n");
+        }
+
+        sb.append("}");
+
+        Msg.info(this, String.format("Taint path analysis complete: %d paths found", paths.size()));
+
+        return MCPToolResult.success(sb.toString());
+    }
+
+    /**
+     * Execute the ga_cleanup_graph tool.
+     * Performs maintenance operations like removing duplicate edges.
+     */
+    private MCPToolResult executeCleanupGraph(JsonObject arguments) {
+        boolean removeDuplicates = true; // Default to true
+
+        if (arguments.has("remove_duplicates")) {
+            removeDuplicates = arguments.get("remove_duplicates").getAsBoolean();
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"status\": \"success\",\n");
+
+        int totalCleaned = 0;
+
+        if (removeDuplicates) {
+            int duplicatesRemoved = graph.removeDuplicateEdges();
+            totalCleaned += duplicatesRemoved;
+            sb.append("  \"duplicates_removed\": ").append(duplicatesRemoved).append(",\n");
+        }
+
+        // Get updated stats
+        sb.append("  \"current_node_count\": ").append(graph.getNodeCount()).append(",\n");
+        sb.append("  \"current_edge_count\": ").append(graph.getEdgeCount()).append(",\n");
+        sb.append("  \"message\": \"Graph cleanup complete. ").append(totalCleaned).append(" issues fixed.\"\n");
+        sb.append("}");
+
+        Msg.info(this, String.format("Graph cleanup complete: %d issues fixed", totalCleaned));
+
+        return MCPToolResult.success(sb.toString());
     }
 
     private MCPTool createTool(String name, String description, JsonObject inputSchema) {

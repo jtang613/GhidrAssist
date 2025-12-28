@@ -146,8 +146,17 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Insert or update a node.
+     * If a node with the same address already exists, updates it instead of creating a duplicate.
      */
     public void upsertNode(KnowledgeNode node) {
+        // Check if a node with this address already exists (for FUNCTION, BLOCK types)
+        if (node.getAddress() != null && node.getAddress() != 0) {
+            KnowledgeNode existing = getNodeByAddress(node.getAddress());
+            if (existing != null) {
+                // Reuse the existing node's ID to update it instead of creating duplicate
+                node.setId(existing.getId());
+            }
+        }
         upsertNodeInternal(node, false);
     }
 
@@ -244,12 +253,17 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Add an edge with weight and metadata.
+     * Skips if an edge of the same type already exists between source and target.
      */
     public void addEdge(String sourceId, String targetId, EdgeType type, double weight, String metadata) {
+        // Check for existing edge first to prevent duplicates
+        if (hasEdgeBetween(sourceId, targetId, type)) {
+            return; // Edge already exists
+        }
+
         String edgeId = UUID.randomUUID().toString();
         String sql = "INSERT INTO graph_edges (id, source_id, target_id, type, weight, metadata, created_at) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?) "
-                + "ON CONFLICT DO NOTHING";
+                + "VALUES (?, ?, ?, ?, ?, ?, ?)";
 
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, edgeId);
@@ -276,6 +290,32 @@ public class BinaryKnowledgeGraph {
         } catch (SQLException e) {
             Msg.error(this, "Failed to add edge: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Remove duplicate edges from the database.
+     * Keeps the oldest edge (by created_at) for each unique (source_id, target_id, type) combination.
+     *
+     * @return Number of duplicate edges removed
+     */
+    public int removeDuplicateEdges() {
+        // SQL to find and delete duplicates, keeping the one with MIN(created_at)
+        String sql = "DELETE FROM graph_edges WHERE id NOT IN (" +
+                "SELECT MIN(id) FROM graph_edges " +
+                "GROUP BY source_id, target_id, type)";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            int deleted = stmt.executeUpdate();
+            if (deleted > 0) {
+                Msg.info(this, String.format("Removed %d duplicate edges", deleted));
+                // Reload the in-memory graph to reflect changes
+                loadGraphIntoMemory();
+            }
+            return deleted;
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to remove duplicate edges: " + e.getMessage(), e);
+        }
+        return 0;
     }
 
     /**
@@ -484,6 +524,29 @@ public class BinaryKnowledgeGraph {
         return false;
     }
 
+    /**
+     * Check if an edge exists between two nodes with a specific type.
+     *
+     * @param sourceId The source node ID
+     * @param targetId The target node ID
+     * @param edgeType The edge type to check for
+     * @return true if such an edge exists
+     */
+    public boolean hasEdgeBetween(String sourceId, String targetId, EdgeType edgeType) {
+        String sql = "SELECT 1 FROM graph_edges WHERE source_id = ? AND target_id = ? AND type = ? LIMIT 1";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, sourceId);
+            stmt.setString(2, targetId);
+            stmt.setString(3, edgeType.name());
+            ResultSet rs = stmt.executeQuery();
+            return rs.next();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to check edge between nodes: " + e.getMessage(), e);
+        }
+        return false;
+    }
+
     // ========================================
     // Search Operations
     // ========================================
@@ -534,11 +597,14 @@ public class BinaryKnowledgeGraph {
     }
 
     /**
-     * Get stale nodes that need re-summarization.
+     * Get nodes that need summarization: either marked stale OR have empty/null summary.
+     * This ensures nodes with failed previous summarization attempts are re-processed.
      */
     public List<KnowledgeNode> getStaleNodes(int limit) {
         List<KnowledgeNode> nodes = new ArrayList<>();
-        String sql = "SELECT * FROM graph_nodes WHERE binary_id = ? AND is_stale = 1 LIMIT ?";
+        // Include nodes that are stale OR have no summary (null or empty)
+        String sql = "SELECT * FROM graph_nodes WHERE binary_id = ? " +
+                     "AND (is_stale = 1 OR llm_summary IS NULL OR llm_summary = '') LIMIT ?";
 
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, binaryId);
@@ -629,9 +695,233 @@ public class BinaryKnowledgeGraph {
         return node != null ? node.getRawContent() : null;
     }
 
+    /**
+     * Get the in-memory JGraphT graph for algorithm operations.
+     */
+    public Graph<String, LabeledEdge> getMemoryGraph() {
+        return memoryGraph;
+    }
+
+    // ========================================
+    // Community Operations
+    // ========================================
+
+    /**
+     * Insert or update a community record.
+     */
+    public void upsertCommunity(ghidrassist.graphrag.community.Community community) {
+        String sql = "INSERT OR REPLACE INTO graph_communities " +
+                "(id, level, binary_id, parent_community_id, name, summary, member_count, is_stale, created_at, updated_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, community.getId());
+            stmt.setInt(2, community.getLevel());
+            stmt.setString(3, community.getBinaryId());
+            stmt.setString(4, community.getParentCommunityId());
+            stmt.setString(5, community.getName());
+            stmt.setString(6, community.getSummary());
+            stmt.setInt(7, community.getMemberCount());
+            stmt.setInt(8, community.isStale() ? 1 : 0);
+            stmt.setLong(9, community.getCreatedAt());
+            stmt.setLong(10, community.getUpdatedAt());
+
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to upsert community: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get a community by ID.
+     */
+    public ghidrassist.graphrag.community.Community getCommunity(String communityId) {
+        String sql = "SELECT * FROM graph_communities WHERE id = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, communityId);
+            ResultSet rs = stmt.executeQuery();
+
+            if (rs.next()) {
+                return resultSetToCommunity(rs);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get community: " + e.getMessage(), e);
+        }
+        return null;
+    }
+
+    /**
+     * Get all communities for this binary at a specific level.
+     */
+    public List<ghidrassist.graphrag.community.Community> getCommunitiesForBinary(int level) {
+        List<ghidrassist.graphrag.community.Community> communities = new ArrayList<>();
+        String sql = "SELECT * FROM graph_communities WHERE binary_id = ? AND level = ? ORDER BY member_count DESC";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            stmt.setInt(2, level);
+            ResultSet rs = stmt.executeQuery();
+
+            while (rs.next()) {
+                communities.add(resultSetToCommunity(rs));
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get communities: " + e.getMessage(), e);
+        }
+        return communities;
+    }
+
+    /**
+     * Add a node to a community.
+     */
+    public void addCommunityMember(String communityId, String nodeId, double score) {
+        String sql = "INSERT OR REPLACE INTO community_members (community_id, node_id, membership_score) VALUES (?, ?, ?)";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, communityId);
+            stmt.setString(2, nodeId);
+            stmt.setDouble(3, score);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to add community member: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get all member nodes of a community.
+     */
+    public List<KnowledgeNode> getCommunityMembers(String communityId) {
+        List<KnowledgeNode> members = new ArrayList<>();
+        String sql = "SELECT n.* FROM graph_nodes n " +
+                "JOIN community_members cm ON n.id = cm.node_id " +
+                "WHERE cm.community_id = ? " +
+                "ORDER BY n.name";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, communityId);
+            ResultSet rs = stmt.executeQuery();
+
+            while (rs.next()) {
+                members.add(resultSetToNode(rs));
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get community members: " + e.getMessage(), e);
+        }
+        return members;
+    }
+
+    /**
+     * Get the community a node belongs to.
+     */
+    public String getNodeCommunity(String nodeId) {
+        String sql = "SELECT community_id FROM community_members WHERE node_id = ? LIMIT 1";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, nodeId);
+            ResultSet rs = stmt.executeQuery();
+
+            if (rs.next()) {
+                return rs.getString("community_id");
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get node community: " + e.getMessage(), e);
+        }
+        return null;
+    }
+
+    /**
+     * Delete a community and its memberships.
+     */
+    public void deleteCommunity(String communityId) {
+        String sql = "DELETE FROM graph_communities WHERE id = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, communityId);
+            stmt.executeUpdate();
+            // community_members cascade delete handles memberships
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to delete community: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Clear all communities for this binary.
+     */
+    public void clearCommunitiesForBinary() {
+        String sql = "DELETE FROM graph_communities WHERE binary_id = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            stmt.executeUpdate();
+            Msg.debug(this, "Cleared communities for binary: " + binaryId);
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to clear communities: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Mark a community as stale (needs re-summarization).
+     */
+    public void markCommunityStale(String communityId) {
+        String sql = "UPDATE graph_communities SET is_stale = 1, updated_at = ? WHERE id = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setLong(1, System.currentTimeMillis());
+            stmt.setString(2, communityId);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to mark community stale: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Get community count for this binary.
+     */
+    public int getCommunityCount() {
+        String sql = "SELECT COUNT(*) FROM graph_communities WHERE binary_id = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get community count: " + e.getMessage(), e);
+        }
+        return 0;
+    }
+
+    /**
+     * Convert a ResultSet row to a Community object.
+     */
+    private ghidrassist.graphrag.community.Community resultSetToCommunity(ResultSet rs) throws SQLException {
+        return new ghidrassist.graphrag.community.Community(
+                rs.getString("id"),
+                rs.getInt("level"),
+                rs.getString("binary_id"),
+                rs.getString("parent_community_id"),
+                rs.getString("name"),
+                rs.getString("summary"),
+                rs.getInt("member_count"),
+                rs.getInt("is_stale") == 1,
+                rs.getLong("created_at"),
+                rs.getLong("updated_at")
+        );
+    }
+
     // ========================================
     // Internal Methods
     // ========================================
+
+    /**
+     * Reload the in-memory graph from the database.
+     * Call this after bulk operations to ensure memoryGraph is synchronized with DB.
+     */
+    public void reloadFromDatabase() {
+        loadGraphIntoMemory();
+    }
 
     /**
      * Load graph structure from SQLite into JGraphT for algorithm operations.
@@ -718,11 +1008,44 @@ public class BinaryKnowledgeGraph {
     }
 
     private String escapeFtsQuery(String query) {
-        // Escape special FTS5 characters
-        return query
-                .replace("\"", "\"\"")
-                .replace("*", "")
-                .replace(":", " ");
+        // FTS5 has many special characters and operators that can cause errors:
+        // - Column filter: column:term
+        // - Phrase: "phrase"
+        // - Prefix: term*
+        // - Boolean: AND, OR, NOT
+        // - Grouping: ( )
+        // - Required/excluded: +term, -term
+        // - NEAR operator
+        //
+        // The safest approach is to quote each term individually to make them literal.
+
+        if (query == null || query.trim().isEmpty()) {
+            return "\"\""; // Empty query
+        }
+
+        // Split into words and quote each one
+        String[] words = query.trim().split("\\s+");
+        StringBuilder sb = new StringBuilder();
+
+        for (int i = 0; i < words.length; i++) {
+            String word = words[i];
+            if (word.isEmpty()) continue;
+
+            // Escape internal quotes by doubling them
+            word = word.replace("\"", "\"\"");
+
+            // Remove characters that are problematic even inside quotes
+            word = word.replace("*", "");
+
+            if (sb.length() > 0) {
+                sb.append(" ");
+            }
+
+            // Quote the word to treat it as a literal
+            sb.append("\"").append(word).append("\"");
+        }
+
+        return sb.length() > 0 ? sb.toString() : "\"\"";
     }
 
     // ========================================

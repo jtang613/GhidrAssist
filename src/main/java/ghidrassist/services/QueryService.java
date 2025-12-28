@@ -117,6 +117,18 @@ public class QueryService {
 
         LlmApi llmApi = new LlmApi(config, plugin);
 
+        // Apply saved reasoning config to the LlmApi
+        ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+        if (currentProgram != null) {
+            String programHash = currentProgram.getExecutableSHA256();
+            String savedEffort = analysisDB.getReasoningEffort(programHash);
+            if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                ghidrassist.apiprovider.ReasoningConfig reasoningConfig =
+                        ghidrassist.apiprovider.ReasoningConfig.fromString(savedEffort);
+                llmApi.setReasoningConfig(reasoningConfig);
+            }
+        }
+
         // Initialize GraphRAGService with LLM provider for background semantic analysis
         initializeGraphRAGService(config);
 
@@ -133,7 +145,21 @@ public class QueryService {
 
             // Set LLM provider for background semantic analysis
             if (config != null) {
-                graphRAG.setLLMProvider(config.createProvider());
+                ghidrassist.apiprovider.APIProvider provider = config.createProvider();
+
+                // Apply saved reasoning config to the new provider
+                ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+                if (currentProgram != null) {
+                    String programHash = currentProgram.getExecutableSHA256();
+                    String savedEffort = analysisDB.getReasoningEffort(programHash);
+                    if (savedEffort != null && !savedEffort.equalsIgnoreCase("none")) {
+                        ghidrassist.apiprovider.ReasoningConfig reasoningConfig =
+                                ghidrassist.apiprovider.ReasoningConfig.fromString(savedEffort);
+                        provider.setReasoningConfig(reasoningConfig);
+                    }
+                }
+
+                graphRAG.setLLMProvider(provider);
             }
 
             // Set current program context
@@ -192,7 +218,54 @@ public class QueryService {
             }
         }
 
-        executeRegularQuery(request, llmApi, handler);
+        // MCP is disabled, but native tools (semantics, etc.) should still be available
+        executeNativeToolQuery(request, llmApi, handler);
+    }
+
+    /**
+     * Execute a query with native tools only (no MCP tools).
+     * Native tools include semantics analysis, knowledge graph queries, etc.
+     */
+    private void executeNativeToolQuery(QueryRequest request, LlmApi llmApi,
+                                         LlmApi.LlmResponseHandler handler) throws Exception {
+        // Set full context (program + address) for native tool providers
+        ghidra.program.model.listing.Program currentProgram = plugin.getCurrentProgram();
+        ghidra.program.model.address.Address currentAddress = plugin.getCurrentAddress();
+        if (currentProgram != null) {
+            toolRegistry.setFullContext(currentProgram, currentAddress);
+        }
+
+        // Get native tools only (MCP tools won't be registered since MCP is disabled)
+        java.util.List<java.util.Map<String, Object>> nativeFunctions = toolRegistry.getToolsAsFunction();
+
+        ghidra.util.Msg.info(this, "Native tool registry has " + nativeFunctions.size() + " tools available");
+
+        if (!nativeFunctions.isEmpty()) {
+            int maxToolRounds = analysisDataService.getMaxToolCalls();
+
+            // Get existing history with thinking data preserved for multi-turn conversations
+            List<ChatMessage> fullHistory = messageStore.getMessagesForApi();
+            List<ChatMessage> existingHistory;
+
+            if (fullHistory == null || fullHistory.size() <= 1) {
+                existingHistory = new ArrayList<>();
+            } else {
+                existingHistory = new ArrayList<>(fullHistory.subList(0, fullHistory.size() - 1));
+            }
+
+            // Use history-aware method to preserve thinking data across turns
+            llmApi.sendConversationalToolRequestWithHistory(
+                existingHistory,
+                request.getProcessedQuery(),
+                nativeFunctions,
+                handler,
+                maxToolRounds,
+                toolRegistry
+            );
+        } else {
+            // No native tools available, fall back to regular query
+            executeRegularQuery(request, llmApi, handler);
+        }
     }
 
     private void executeMCPQuery(QueryRequest request, LlmApi llmApi, MCPToolManager toolManager,
@@ -217,8 +290,30 @@ public class QueryService {
 
         if (!allFunctions.isEmpty()) {
             int maxToolRounds = analysisDataService.getMaxToolCalls();
-            llmApi.sendConversationalToolRequest(request.getFullConversation(),
-                allFunctions, handler, maxToolRounds, toolRegistry);
+
+            // Get existing history with thinking data preserved for multi-turn conversations
+            // The current user message is already in the store, so get all PREVIOUS messages
+            List<ChatMessage> fullHistory = messageStore.getMessagesForApi();
+            List<ChatMessage> existingHistory;
+
+            if (fullHistory == null || fullHistory.size() <= 1) {
+                // No previous history or only the current user message - start fresh
+                existingHistory = new ArrayList<>();
+            } else {
+                // Get all messages except the last one (current user message)
+                // This preserves thinking data from previous assistant responses
+                existingHistory = new ArrayList<>(fullHistory.subList(0, fullHistory.size() - 1));
+            }
+
+            // Use history-aware method to preserve thinking data across turns
+            llmApi.sendConversationalToolRequestWithHistory(
+                existingHistory,
+                request.getProcessedQuery(),
+                allFunctions,
+                handler,
+                maxToolRounds,
+                toolRegistry
+            );
         } else {
             executeRegularQuery(request, llmApi, handler);
         }

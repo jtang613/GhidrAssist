@@ -1,6 +1,7 @@
 package ghidrassist;
 
 import ghidrassist.apiprovider.APIProviderConfig;
+import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.apiprovider.ReasoningConfig;
 import ghidrassist.core.ConversationalToolHandler;
 import ghidrassist.core.LlmApiClient;
@@ -117,6 +118,51 @@ public class LlmApi {
 
         // Start the conversation
         toolHandler.startConversation(prompt);
+    }
+
+    /**
+     * Send a conversational tool calling request with existing history.
+     * This preserves thinking content, tool calls, and other metadata from previous turns.
+     *
+     * @param existingHistory List of ChatMessages from previous conversation
+     * @param newPrompt The new user message to add
+     * @param functions Available function definitions
+     * @param responseHandler Handler for streaming responses
+     * @param maxToolRounds Maximum number of tool calling rounds
+     * @param toolRegistry Registry for tool execution
+     */
+    public void sendConversationalToolRequestWithHistory(
+            List<ChatMessage> existingHistory,
+            String newPrompt,
+            List<Map<String, Object>> functions,
+            LlmResponseHandler responseHandler,
+            int maxToolRounds,
+            ToolRegistry toolRegistry) {
+
+        if (!apiClient.isProviderAvailable()) {
+            errorHandler.handleError(
+                new IllegalStateException("LLM provider is not initialized."),
+                "send conversational tool request with history",
+                null
+            );
+            return;
+        }
+
+        // Create completion callback to clear reference
+        Runnable onCompletion = () -> {
+            activeConversationalHandler = null;
+        };
+
+        // Create enhanced response handler for conversational tool calling
+        ConversationalToolHandler toolHandler = new ConversationalToolHandler(
+            apiClient, functions, responseProcessor, responseHandler, errorHandler, onCompletion,
+            maxToolRounds, toolRegistry);
+
+        // Store reference for cancellation
+        activeConversationalHandler = toolHandler;
+
+        // Start the conversation with existing history
+        toolHandler.startConversationWithHistory(existingHistory, newPrompt);
     }
 
     /**
