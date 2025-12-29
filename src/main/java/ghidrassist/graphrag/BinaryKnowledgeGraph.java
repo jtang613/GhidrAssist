@@ -154,14 +154,19 @@ public class BinaryKnowledgeGraph {
     private void upsertNodeInternal(KnowledgeNode node, boolean isRetry) {
         String sql = "INSERT INTO graph_nodes "
                 + "(id, type, address, binary_id, name, raw_content, llm_summary, confidence, "
-                + "embedding, security_flags, analysis_depth, created_at, updated_at, is_stale) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "embedding, security_flags, network_apis, file_io_apis, risk_level, activity_profile, "
+                + "analysis_depth, created_at, updated_at, is_stale, user_edited) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 + "ON CONFLICT(id) DO UPDATE SET "
                 + "type = excluded.type, address = excluded.address, name = excluded.name, "
                 + "raw_content = excluded.raw_content, llm_summary = excluded.llm_summary, "
                 + "confidence = excluded.confidence, embedding = excluded.embedding, "
-                + "security_flags = excluded.security_flags, analysis_depth = excluded.analysis_depth, "
-                + "updated_at = excluded.updated_at, is_stale = excluded.is_stale";
+                + "security_flags = excluded.security_flags, "
+                + "network_apis = excluded.network_apis, file_io_apis = excluded.file_io_apis, "
+                + "risk_level = excluded.risk_level, activity_profile = excluded.activity_profile, "
+                + "analysis_depth = excluded.analysis_depth, "
+                + "updated_at = excluded.updated_at, is_stale = excluded.is_stale, "
+                + "user_edited = excluded.user_edited";
 
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, node.getId());
@@ -178,10 +183,15 @@ public class BinaryKnowledgeGraph {
             stmt.setFloat(8, node.getConfidence());
             stmt.setBytes(9, node.serializeEmbedding());
             stmt.setString(10, node.serializeSecurityFlags());
-            stmt.setInt(11, node.getAnalysisDepth());
-            stmt.setLong(12, node.getCreatedAt().toEpochMilli());
-            stmt.setLong(13, node.getUpdatedAt().toEpochMilli());
-            stmt.setInt(14, node.isStale() ? 1 : 0);
+            stmt.setString(11, node.serializeNetworkAPIs());
+            stmt.setString(12, node.serializeFileIOAPIs());
+            stmt.setString(13, node.getRiskLevel());
+            stmt.setString(14, node.getActivityProfile());
+            stmt.setInt(15, node.getAnalysisDepth());
+            stmt.setLong(16, node.getCreatedAt().toEpochMilli());
+            stmt.setLong(17, node.getUpdatedAt().toEpochMilli());
+            stmt.setInt(18, node.isStale() ? 1 : 0);
+            stmt.setInt(19, node.isUserEdited() ? 1 : 0);
 
             stmt.executeUpdate();
 
@@ -991,6 +1001,36 @@ public class BinaryKnowledgeGraph {
         }
 
         node.setStale(rs.getInt("is_stale") == 1);
+
+        // Load user_edited with fallback for older databases
+        try {
+            node.setUserEdited(rs.getInt("user_edited") == 1);
+        } catch (SQLException e) {
+            // Column doesn't exist in older databases
+            node.setUserEdited(false);
+        }
+
+        // Load security detail columns with fallback for older databases
+        try {
+            node.setNetworkAPIs(KnowledgeNode.deserializeStringList(rs.getString("network_apis")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setFileIOAPIs(KnowledgeNode.deserializeStringList(rs.getString("file_io_apis")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setRiskLevel(rs.getString("risk_level"));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setActivityProfile(rs.getString("activity_profile"));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
 
         return node;
     }

@@ -76,6 +76,7 @@ public class KnowledgeNode {
     private Instant createdAt;
     private Instant updatedAt;
     private boolean isStale;              // Needs re-summarization
+    private boolean userEdited;           // Set true when user manually edits llmSummary
 
     /**
      * Create a new KnowledgeNode with a generated UUID.
@@ -87,6 +88,7 @@ public class KnowledgeNode {
         this.confidence = 0.0f;
         this.analysisDepth = 0;
         this.isStale = false;
+        this.userEdited = false;
         this.securityFlags = new ArrayList<>();
         this.createdAt = Instant.now();
         this.updatedAt = Instant.now();
@@ -102,6 +104,7 @@ public class KnowledgeNode {
         this.confidence = 0.0f;
         this.analysisDepth = 0;
         this.isStale = false;
+        this.userEdited = false;
         this.securityFlags = new ArrayList<>();
         this.createdAt = Instant.now();
         this.updatedAt = Instant.now();
@@ -375,6 +378,14 @@ public class KnowledgeNode {
 
     public void setStale(boolean stale) {
         isStale = stale;
+    }
+
+    public boolean isUserEdited() {
+        return userEdited;
+    }
+
+    public void setUserEdited(boolean userEdited) {
+        this.userEdited = userEdited;
     }
 
     // ========================================

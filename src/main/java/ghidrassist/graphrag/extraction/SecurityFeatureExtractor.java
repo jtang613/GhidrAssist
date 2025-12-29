@@ -436,29 +436,72 @@ public class SecurityFeatureExtractor {
                     continue;
                 }
 
-                // Check each API category
-                if (NETWORK_APIS.contains(name)) {
-                    features.addNetworkAPI(name);
+                // Normalize the function name to handle decorated names
+                // Examples: _WSAGetLastError@0 -> WSAGetLastError, __imp_send -> send
+                String normalizedName = normalizeFunctionName(name);
+
+                // Check each API category using both original and normalized names
+                if (NETWORK_APIS.contains(name) || NETWORK_APIS.contains(normalizedName)) {
+                    features.addNetworkAPI(normalizedName);
                 }
-                if (FILE_IO_APIS.contains(name)) {
-                    features.addFileIOAPI(name);
+                if (FILE_IO_APIS.contains(name) || FILE_IO_APIS.contains(normalizedName)) {
+                    features.addFileIOAPI(normalizedName);
                 }
-                if (CRYPTO_APIS.contains(name)) {
-                    features.addCryptoAPI(name);
+                if (CRYPTO_APIS.contains(name) || CRYPTO_APIS.contains(normalizedName)) {
+                    features.addCryptoAPI(normalizedName);
                 }
-                if (PROCESS_APIS.contains(name)) {
-                    features.addProcessAPI(name);
+                if (PROCESS_APIS.contains(name) || PROCESS_APIS.contains(normalizedName)) {
+                    features.addProcessAPI(normalizedName);
                 }
 
                 // Check for dangerous functions (vulnerability indicators)
                 String vulnType = DANGEROUS_FUNCTIONS.get(name);
+                if (vulnType == null) {
+                    vulnType = DANGEROUS_FUNCTIONS.get(normalizedName);
+                }
                 if (vulnType != null) {
-                    features.addDangerousFunction(name, vulnType);
+                    features.addDangerousFunction(normalizedName, vulnType);
                 }
             }
         } catch (Exception e) {
             Msg.debug(this, "Error extracting API calls: " + e.getMessage());
         }
+    }
+
+    /**
+     * Normalize a function name by stripping common decorations:
+     * - Leading underscores (_func, __func, __imp_func)
+     * - Trailing @N suffix (stdcall decoration like @0, @4, @8)
+     * - Trailing W or A suffix for Unicode/ANSI variants (if not in API set)
+     */
+    private String normalizeFunctionName(String name) {
+        if (name == null || name.isEmpty()) {
+            return name;
+        }
+
+        String normalized = name;
+
+        // Strip __imp_ prefix (import thunk)
+        if (normalized.startsWith("__imp_")) {
+            normalized = normalized.substring(6);
+        }
+
+        // Strip leading underscores (but keep at least the core name)
+        while (normalized.startsWith("_") && normalized.length() > 1) {
+            normalized = normalized.substring(1);
+        }
+
+        // Strip trailing @N (stdcall decoration)
+        int atIndex = normalized.lastIndexOf('@');
+        if (atIndex > 0) {
+            String suffix = normalized.substring(atIndex + 1);
+            // Check if suffix is all digits
+            if (suffix.matches("\\d+")) {
+                normalized = normalized.substring(0, atIndex);
+            }
+        }
+
+        return normalized;
     }
 
     // ========================================

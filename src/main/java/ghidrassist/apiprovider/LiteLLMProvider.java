@@ -556,6 +556,221 @@ public class LiteLLMProvider extends OpenAIProvider {
     }
 
     /**
+     * Override non-streaming function call to handle Bedrock quirk:
+     * "Thinking may not be enabled when tool_choice forces tool use."
+     *
+     * When tool_choice is "required", we must NOT include any thinking/reasoning
+     * configuration for Anthropic models on Bedrock.
+     */
+    @Override
+    public String createChatCompletionWithFunctions(List<ChatMessage> messages,
+                                                     List<Map<String, Object>> functions) throws APIProviderException {
+        // Build payload WITHOUT thinking enabled (tool_choice will be "required")
+        JsonObject payload = buildToolCallPayload(messages, functions, true);
+
+        Request request = new Request.Builder()
+                .url(url + "chat/completions")
+                .post(RequestBody.create(JSON, gson.toJson(payload)))
+                .build();
+
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
+            String responseBody = response.body().string();
+            return parseToolCallResponse(responseBody);
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctions");
+        }
+    }
+
+    /**
+     * Override non-streaming full response function call.
+     */
+    @Override
+    public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages,
+                                                                  List<Map<String, Object>> functions) throws APIProviderException {
+        // Build payload WITHOUT thinking enabled
+        JsonObject payload = buildToolCallPayload(messages, functions, false);
+
+        Request request = new Request.Builder()
+                .url(url + "chat/completions")
+                .post(RequestBody.create(JSON, gson.toJson(payload)))
+                .build();
+
+        try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
+            return response.body().string();
+        } catch (IOException e) {
+            throw handleNetworkError(e, "createChatCompletionWithFunctionsFullResponse");
+        }
+    }
+
+    /**
+     * Build payload for tool/function calls.
+     * CRITICAL: Thinking must be DISABLED when tool_choice forces tool use.
+     *
+     * @param messages Chat messages
+     * @param functions Tool/function definitions
+     * @param forceToolUse If true, set tool_choice to "required"
+     */
+    private JsonObject buildToolCallPayload(List<ChatMessage> messages,
+                                             List<Map<String, Object>> functions,
+                                             boolean forceToolUse) {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("model", super.getModel());
+        payload.addProperty("max_tokens", super.getMaxTokens());
+        payload.addProperty("stream", false);
+
+        // CRITICAL: Do NOT include reasoning/thinking when using tool_choice
+        // Bedrock error: "Thinking may not be enabled when tool_choice forces tool use."
+        // So we intentionally skip all thinking-related configuration here
+
+        // Build messages array - use standard format (no thinking blocks)
+        JsonArray messagesArray = new JsonArray();
+        for (ChatMessage message : messages) {
+            // Always use standard format for tool calls - no thinking block translation
+            JsonObject messageObj = buildMessageObject(message, false);
+            messagesArray.add(messageObj);
+        }
+        payload.add("messages", messagesArray);
+
+        // Add tools
+        if (functions != null && !functions.isEmpty()) {
+            payload.add("tools", gson.toJsonTree(functions));
+        } else {
+            payload.add("tools", new JsonArray());
+        }
+
+        // Set tool_choice if forcing tool use
+        if (forceToolUse) {
+            payload.addProperty("tool_choice", "required");
+        }
+
+        Msg.debug(this, "LiteLLM tool call payload (thinking disabled): " + payload.toString());
+        return payload;
+    }
+
+    /**
+     * Parse tool call response and return in standard {"tool_calls":[...]} format.
+     * Handles both OpenAI format and Anthropic/Bedrock format.
+     *
+     * OpenAI format:
+     *   choices[0].message.tool_calls[0].function.arguments
+     *
+     * Anthropic/Bedrock format (via LiteLLM):
+     *   choices[0].message.content[] with type="tool_use", input={...}
+     *   OR direct content array with tool_use blocks
+     *
+     * Returns: {"tool_calls":[{"function":{"name":"...", "arguments":{...}}}]}
+     */
+    private String parseToolCallResponse(String responseBody) throws APIProviderException {
+        try {
+            Msg.debug(this, "LiteLLM parsing response: " + responseBody);
+            JsonObject jsonResponse = gson.fromJson(responseBody, JsonObject.class);
+
+            if (jsonResponse.has("choices")) {
+                JsonArray choices = jsonResponse.getAsJsonArray("choices");
+                if (choices.size() > 0) {
+                    JsonObject choice = choices.get(0).getAsJsonObject();
+                    if (choice.has("message")) {
+                        JsonObject message = choice.getAsJsonObject("message");
+
+                        // Format 1: OpenAI style - tool_calls array
+                        if (message.has("tool_calls")) {
+                            JsonArray toolCalls = message.getAsJsonArray("tool_calls");
+                            String result = "{\"tool_calls\":" + toolCalls.toString() + "}";
+                            Msg.debug(this, "LiteLLM parsed OpenAI tool_calls format: " + result);
+                            return result;
+                        }
+
+                        // Format 2: Anthropic/Bedrock style - content array with tool_use blocks
+                        if (message.has("content")) {
+                            com.google.gson.JsonElement contentElement = message.get("content");
+
+                            // Content could be an array (Anthropic format)
+                            if (contentElement.isJsonArray()) {
+                                JsonArray contentArray = contentElement.getAsJsonArray();
+                                JsonArray convertedToolCalls = convertToolUseToToolCalls(contentArray);
+                                if (convertedToolCalls.size() > 0) {
+                                    String result = "{\"tool_calls\":" + convertedToolCalls.toString() + "}";
+                                    Msg.debug(this, "LiteLLM parsed Anthropic tool_use format: " + result);
+                                    return result;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Format 3: Direct Anthropic API response (content at top level)
+            if (jsonResponse.has("content")) {
+                com.google.gson.JsonElement contentElement = jsonResponse.get("content");
+                if (contentElement.isJsonArray()) {
+                    JsonArray contentArray = contentElement.getAsJsonArray();
+                    JsonArray convertedToolCalls = convertToolUseToToolCalls(contentArray);
+                    if (convertedToolCalls.size() > 0) {
+                        String result = "{\"tool_calls\":" + convertedToolCalls.toString() + "}";
+                        Msg.debug(this, "LiteLLM parsed direct Anthropic format: " + result);
+                        return result;
+                    }
+                }
+            }
+
+            Msg.warn(this, "LiteLLM: Could not find tool call in response: " + responseBody);
+            // Return empty tool_calls if nothing found
+            return "{\"tool_calls\":[]}";
+        } catch (Exception e) {
+            throw new ResponseException(name, "createChatCompletionWithFunctions",
+                    ResponseException.ResponseErrorType.MALFORMED_JSON, e);
+        }
+    }
+
+    /**
+     * Convert Anthropic tool_use content blocks to OpenAI-style tool_calls array.
+     *
+     * Anthropic format:
+     *   { "type": "tool_use", "id": "...", "name": "func_name", "input": {...} }
+     *
+     * OpenAI format:
+     *   { "function": { "name": "func_name", "arguments": {...} }, "id": "..." }
+     */
+    private JsonArray convertToolUseToToolCalls(JsonArray contentArray) {
+        JsonArray toolCalls = new JsonArray();
+
+        for (com.google.gson.JsonElement item : contentArray) {
+            if (!item.isJsonObject()) continue;
+
+            JsonObject contentBlock = item.getAsJsonObject();
+            if (!contentBlock.has("type")) continue;
+
+            String type = contentBlock.get("type").getAsString();
+            if ("tool_use".equals(type)) {
+                JsonObject toolCall = new JsonObject();
+                JsonObject function = new JsonObject();
+
+                // Get function name
+                if (contentBlock.has("name")) {
+                    function.addProperty("name", contentBlock.get("name").getAsString());
+                }
+
+                // Get arguments (called "input" in Anthropic format)
+                if (contentBlock.has("input")) {
+                    // Keep as object, not string
+                    function.add("arguments", contentBlock.get("input"));
+                }
+
+                toolCall.add("function", function);
+
+                // Preserve ID if present
+                if (contentBlock.has("id")) {
+                    toolCall.addProperty("id", contentBlock.get("id").getAsString());
+                }
+
+                toolCalls.add(toolCall);
+            }
+        }
+
+        return toolCalls;
+    }
+
+    /**
      * Get the detected model family.
      */
     public String getModelFamily() {

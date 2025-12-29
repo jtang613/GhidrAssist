@@ -166,10 +166,15 @@ public class AnalysisDB {
                 + "confidence REAL DEFAULT 0.0,"      // Summary confidence 0.0 - 1.0
                 + "embedding BLOB,"                   // Serialized float array for vector search
                 + "security_flags TEXT,"              // JSON array of security annotations
+                + "network_apis TEXT,"                // JSON array of network API calls
+                + "file_io_apis TEXT,"                // JSON array of file I/O API calls
+                + "risk_level TEXT,"                  // LOW, MEDIUM, HIGH
+                + "activity_profile TEXT,"            // NETWORK_CLIENT, FILE_WRITER, etc.
                 + "analysis_depth INTEGER DEFAULT 0," // How many times analyzed
                 + "created_at INTEGER,"
                 + "updated_at INTEGER,"
-                + "is_stale INTEGER DEFAULT 0"        // Needs re-summarization
+                + "is_stale INTEGER DEFAULT 0,"       // Needs re-summarization
+                + "user_edited INTEGER DEFAULT 0"     // Protects llmSummary from auto-overwrite
                 + ")";
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(createGraphNodesTableSQL);
@@ -178,6 +183,28 @@ public class AnalysisDB {
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_binary ON graph_nodes(binary_id)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_name ON graph_nodes(name)");
             stmt.execute("CREATE INDEX IF NOT EXISTS idx_nodes_stale ON graph_nodes(binary_id, is_stale)");
+        }
+
+        // Migration: Add user_edited column to existing graph_nodes tables
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE graph_nodes ADD COLUMN user_edited INTEGER DEFAULT 0");
+        } catch (SQLException e) {
+            // Column already exists, ignore
+        }
+
+        // Migration: Add security detail columns to existing graph_nodes tables
+        String[] securityColumns = {
+            "ALTER TABLE graph_nodes ADD COLUMN network_apis TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN file_io_apis TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN risk_level TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN activity_profile TEXT"
+        };
+        for (String alterSql : securityColumns) {
+            try (Statement stmt = connection.createStatement()) {
+                stmt.execute(alterSql);
+            } catch (SQLException e) {
+                // Column already exists, ignore
+            }
         }
 
         // Graph edges table (adjacency list for relationships)
