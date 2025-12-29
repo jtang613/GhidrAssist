@@ -27,7 +27,8 @@ public abstract class APIProvider implements ChatProvider {
         OLLAMA,
         OPENWEBUI,
         LMSTUDIO,
-        AZURE_OPENAI
+        AZURE_OPENAI,
+        LITELLM
     }
 
     protected String name;
@@ -194,18 +195,28 @@ public abstract class APIProvider implements ChatProvider {
                     errorMessage != null ? errorMessage : "Rate limit exceeded", retryAfter);
                     
             case 400:
-                if (errorMessage != null && errorMessage.toLowerCase().contains("model")) {
-                    return new ModelException(name, operation, ModelException.ModelErrorType.MODEL_NOT_FOUND, 
-                        statusCode, apiErrorCode);
-                } else if (errorMessage != null && errorMessage.toLowerCase().contains("context")) {
-                    return new ModelException(name, operation, ModelException.ModelErrorType.CONTEXT_LENGTH_EXCEEDED, 
-                        statusCode, apiErrorCode);
-                } else if (errorMessage != null && errorMessage.toLowerCase().contains("token")) {
-                    return new ModelException(name, operation, ModelException.ModelErrorType.TOKEN_LIMIT_EXCEEDED, 
-                        statusCode, apiErrorCode);
+                // Be more specific about model errors - look for definitive phrases, not just "model"
+                String lowerErrorMessage = errorMessage != null ? errorMessage.toLowerCase() : "";
+                if (lowerErrorMessage.contains("model not found") ||
+                    lowerErrorMessage.contains("model_not_found") ||
+                    lowerErrorMessage.contains("unknown model") ||
+                    lowerErrorMessage.contains("invalid model")) {
+                    // Preserve the actual error message instead of using a generic one
+                    return new ModelException(name, operation, ModelException.ModelErrorType.MODEL_NOT_FOUND,
+                        statusCode, apiErrorCode, errorMessage);
+                } else if (lowerErrorMessage.contains("context length") ||
+                           lowerErrorMessage.contains("context_length") ||
+                           lowerErrorMessage.contains("maximum context")) {
+                    return new ModelException(name, operation, ModelException.ModelErrorType.CONTEXT_LENGTH_EXCEEDED,
+                        statusCode, apiErrorCode, errorMessage);
+                } else if (lowerErrorMessage.contains("token limit") ||
+                           lowerErrorMessage.contains("max_tokens") ||
+                           lowerErrorMessage.contains("maximum.*token")) {
+                    return new ModelException(name, operation, ModelException.ModelErrorType.TOKEN_LIMIT_EXCEEDED,
+                        statusCode, apiErrorCode, errorMessage);
                 }
-                return new APIProviderException(APIProviderException.ErrorCategory.CONFIGURATION, 
-                    name, operation, statusCode, apiErrorCode, 
+                return new APIProviderException(APIProviderException.ErrorCategory.CONFIGURATION,
+                    name, operation, statusCode, apiErrorCode,
                     errorMessage != null ? errorMessage : "Bad request");
                     
             case 404:

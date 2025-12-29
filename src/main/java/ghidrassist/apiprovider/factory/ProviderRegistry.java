@@ -130,6 +130,7 @@ public class ProviderRegistry {
         registerFactory(new OllamaProviderFactory());
         registerFactory(new LMStudioProviderFactory());
         registerFactory(new OpenWebUiProviderFactory());
+        registerFactory(new LiteLLMProviderFactory());
     }
     
     /**

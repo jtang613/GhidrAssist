@@ -34,7 +34,18 @@ public class ModelException extends APIProviderException {
               errorType.getDescription(), false, null, null);
         this.modelErrorType = errorType;
     }
-    
+
+    /**
+     * Constructor that allows specifying a custom error message from the API
+     * instead of using the generic ModelErrorType description.
+     */
+    public ModelException(String providerName, String operation, ModelErrorType errorType,
+                        int httpStatusCode, String apiErrorCode, String customMessage) {
+        super(ErrorCategory.MODEL_ERROR, providerName, operation, httpStatusCode, apiErrorCode,
+              customMessage != null ? customMessage : errorType.getDescription(), false, null, null);
+        this.modelErrorType = errorType;
+    }
+
     public ModelException(String providerName, String operation, String message) {
         super(ErrorCategory.MODEL_ERROR, providerName, operation, message);
         this.modelErrorType = null;
