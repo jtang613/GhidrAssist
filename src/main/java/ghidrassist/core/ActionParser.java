@@ -44,18 +44,58 @@ public class ActionParser {
         // First check if this is already a tool calls JSON object
         try {
             JsonObject responseObj = gson.fromJson(response, JsonObject.class);
-            
+
             // Check if this is already tool calls JSON
             if (responseObj.has("tool_calls")) {
                 return response;
             }
-            
-            // Check if this is an Anthropic response with content array
+
+            // Check for OpenAI format: choices[].message.tool_calls
+            if (responseObj.has("choices")) {
+                JsonArray choices = responseObj.getAsJsonArray("choices");
+                if (choices.size() > 0) {
+                    JsonObject choice = choices.get(0).getAsJsonObject();
+                    if (choice.has("message")) {
+                        JsonObject message = choice.getAsJsonObject("message");
+
+                        // OpenAI style tool_calls in message
+                        if (message.has("tool_calls")) {
+                            JsonArray toolCalls = message.getAsJsonArray("tool_calls");
+                            JsonObject result = new JsonObject();
+                            result.add("tool_calls", toolCalls);
+                            return gson.toJson(result);
+                        }
+
+                        // Anthropic/Bedrock style - content array with tool_use blocks
+                        if (message.has("content") && message.get("content").isJsonArray()) {
+                            JsonArray convertedToolCalls = convertAnthropicToolUseToToolCalls(
+                                    message.getAsJsonArray("content"));
+                            if (convertedToolCalls != null && convertedToolCalls.size() > 0) {
+                                JsonObject result = new JsonObject();
+                                result.add("tool_calls", convertedToolCalls);
+                                return gson.toJson(result);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this is an Anthropic response with content array at top level
             if (responseObj.has("content") && responseObj.get("content").isJsonArray()) {
                 JsonArray contentArray = responseObj.getAsJsonArray("content");
+
+                // First check for tool_use blocks (Anthropic native format)
+                JsonArray convertedToolCalls = convertAnthropicToolUseToToolCalls(contentArray);
+                if (convertedToolCalls != null && convertedToolCalls.size() > 0) {
+                    JsonObject result = new JsonObject();
+                    result.add("tool_calls", convertedToolCalls);
+                    return gson.toJson(result);
+                }
+
+                // Fall back to checking for text content with embedded JSON
                 if (contentArray.size() > 0) {
                     JsonObject firstContent = contentArray.get(0).getAsJsonObject();
-                    if (firstContent.has("type") && "text".equals(firstContent.get("type").getAsString()) 
+                    if (firstContent.has("type") && "text".equals(firstContent.get("type").getAsString())
                         && firstContent.has("text")) {
                         String textContent = firstContent.get("text").getAsString();
                         return preprocessJsonResponse(textContent);
@@ -65,9 +105,57 @@ public class ActionParser {
         } catch (JsonSyntaxException e) {
             // Not a JSON object, treat as raw text that needs preprocessing
         }
-        
+
         // This is likely text content from Anthropic provider that needs preprocessing
         return preprocessJsonResponse(response);
+    }
+
+    /**
+     * Convert Anthropic tool_use content blocks to OpenAI-style tool_calls array.
+     *
+     * Anthropic format:
+     *   { "type": "tool_use", "id": "...", "name": "func_name", "input": {...} }
+     *
+     * OpenAI format:
+     *   { "function": { "name": "func_name", "arguments": "{...}" } }
+     */
+    private static JsonArray convertAnthropicToolUseToToolCalls(JsonArray contentArray) {
+        JsonArray toolCalls = new JsonArray();
+
+        for (JsonElement item : contentArray) {
+            if (!item.isJsonObject()) continue;
+
+            JsonObject contentBlock = item.getAsJsonObject();
+            if (!contentBlock.has("type")) continue;
+
+            String type = contentBlock.get("type").getAsString();
+            if ("tool_use".equals(type)) {
+                JsonObject toolCall = new JsonObject();
+                JsonObject function = new JsonObject();
+
+                // Get function name
+                if (contentBlock.has("name")) {
+                    function.addProperty("name", contentBlock.get("name").getAsString());
+                }
+
+                // Get arguments (called "input" in Anthropic format)
+                if (contentBlock.has("input")) {
+                    // Convert input object to JSON string (OpenAI stores arguments as string)
+                    function.add("arguments", contentBlock.get("input"));
+                }
+
+                toolCall.add("function", function);
+
+                // Preserve ID if present
+                if (contentBlock.has("id")) {
+                    toolCall.addProperty("id", contentBlock.get("id").getAsString());
+                }
+
+                toolCalls.add(toolCall);
+            }
+        }
+
+        return toolCalls;
     }
 
     /**

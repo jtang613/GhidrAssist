@@ -21,6 +21,12 @@ import ghidrassist.chat.PersistedChatMessage;
 import ghidrassist.services.*;
 import ghidrassist.services.RAGManagementService.RAGIndexStats;
 import ghidrassist.ui.tabs.*;
+import ghidrassist.graphrag.BinaryKnowledgeGraph;
+import ghidrassist.graphrag.nodes.KnowledgeNode;
+import ghidrassist.graphrag.extraction.StructureExtractor;
+import ghidrassist.graphrag.extraction.SemanticExtractor;
+import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
+import ghidrassist.graphrag.extraction.SecurityFeatures;
 
 import java.sql.Timestamp;
 
@@ -212,142 +218,104 @@ public class TabController {
             cancelCurrentOperation();
             return;
         }
-        
+
         Function currentFunction = plugin.getCurrentFunction();
         if (currentFunction == null) {
             Msg.showInfo(getClass(), explainTab, "No Function", "No function at current location.");
             return;
         }
-        
+
         setUIState(true, "Stop", "Processing...");
-        
+
         Task task = new Task("Explain Function", true, true, true) {
             @Override
             public void run(TaskMonitor monitor) {
                 try {
-                    CodeAnalysisService.AnalysisRequest request = 
-                        codeAnalysisService.createFunctionAnalysisRequest(currentFunction);
-                    
-                    feedbackService.cacheLastInteraction(request.getPrompt(), null);
-                    
-                    codeAnalysisService.executeAnalysis(request, new LlmApi.LlmResponseHandler() {
-                        private final StringBuilder responseBuffer = new StringBuilder();
-                        private final Object bufferLock = new Object();
+                    String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+                    BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+                    long address = currentFunction.getEntryPoint().getOffset();
 
-                        @Override
-                        public void onStart() {
-                            synchronized (bufferLock) {
-                                responseBuffer.setLength(0);
-                            }
+                    // Step 1: Check if node exists, if not extract structure
+                    monitor.setMessage("Checking knowledge graph...");
+                    KnowledgeNode node = graph.getNodeByAddress(address);
 
-                            // Cancel any existing render task before starting new one
-                            cancelActiveRenderTask();
+                    if (node == null) {
+                        // Need to index this function first
+                        monitor.setMessage("Indexing function structure...");
+                        StructureExtractor extractor = new StructureExtractor(
+                                plugin.getCurrentProgram(), graph, monitor);
+                        try {
+                            node = extractor.extractFunction(currentFunction);
+                        } finally {
+                            extractor.dispose();
+                        }
+                    }
 
-                            // Show initial processing message
+                    // Step 2: Extract security features if not present or incomplete
+                    // Check both security_flags AND network_apis since old data may have flags but no API lists
+                    boolean needsSecurityAnalysis = node != null && (
+                        (node.getSecurityFlags() == null || node.getSecurityFlags().isEmpty()) ||
+                        (node.getNetworkAPIs() == null || node.getNetworkAPIs().isEmpty())
+                    );
+                    if (needsSecurityAnalysis) {
+                        monitor.setMessage("Analyzing security features...");
+                        SecurityFeatureExtractor secExtractor = new SecurityFeatureExtractor(
+                                plugin.getCurrentProgram(), monitor);
+                        SecurityFeatures features = secExtractor.extractFeatures(currentFunction);
+                        if (features != null) {
+                            node.applySecurityFeatures(features);
+                        }
+                    }
+
+                    // Step 3: Run semantic analysis if no summary OR stale AND not user-edited
+                    if (node != null) {
+                        boolean needsSummary = (node.getLlmSummary() == null || node.getLlmSummary().isEmpty())
+                                || (node.isStale() && !node.isUserEdited());
+
+                        if (needsSummary) {
+                            monitor.setMessage("Running semantic analysis...");
+
+                            // Show processing message
                             SwingUtilities.invokeLater(() -> {
-                                explainTab.setExplanationText("<html><body><i>Processing...</i></body></html>");
+                                explainTab.setExplanationText("<html><body><i>Running semantic analysis...</i></body></html>");
                             });
 
-                            // Start periodic markdown rendering using class-level tracking
-                            synchronized (renderLock) {
-                                activeRenderTask = updateScheduler.scheduleAtFixedRate(
-                                    this::renderCurrentContent,
-                                    RENDER_INTERVAL_MS,
-                                    RENDER_INTERVAL_MS,
-                                    TimeUnit.MILLISECONDS
-                                );
+                            // Create semantic extractor and summarize
+                            APIProviderConfig providerConfig = GhidrAssistPlugin.getCurrentProviderConfig();
+                            if (providerConfig == null) {
+                                throw new Exception("No LLM provider configured. Please configure an API provider in Analysis Options.");
+                            }
+                            SemanticExtractor semanticExtractor = new SemanticExtractor(
+                                    providerConfig.createProvider(), graph);
+
+                            // Use existing non-streaming summarizeNode method
+                            boolean success = semanticExtractor.summarizeNode(node);
+                            if (success) {
+                                node.setStale(false);
                             }
                         }
 
-                        @Override
-                        public void onUpdate(String partialResponse) {
-                            synchronized (bufferLock) {
-                                if (partialResponse == null || partialResponse.isEmpty()) {
-                                    return;
-                                }
+                        // Step 4: Save node to graph (summarizeNode already upserts, but ensure we save)
+                        graph.upsertNode(node);
 
-                                // Handle cumulative vs delta responses - just accumulate in buffer
-                                String currentBuffer = responseBuffer.toString();
-                                if (partialResponse.startsWith(currentBuffer)) {
-                                    String newContent = partialResponse.substring(currentBuffer.length());
-                                    if (!newContent.isEmpty()) {
-                                        responseBuffer.append(newContent);
-                                    }
-                                } else {
-                                    responseBuffer.append(partialResponse);
-                                }
-
-                                // No immediate UI update - let the periodic render handle it
-                                // This prevents UI flooding while keeping content responsive
-                            }
-                        }
-
-                        /**
-                         * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
-                         */
-                        private void renderCurrentContent() {
-                            final String content;
-                            synchronized (bufferLock) {
-                                if (responseBuffer.length() == 0) {
-                                    return;
-                                }
-                                content = responseBuffer.toString();
-                            }
-
-                            SwingUtilities.invokeLater(() -> {
-                                String html = markdownHelper.markdownToHtml(content);
-                                explainTab.setExplanationText(html);
-                            });
-                        }
-
-                        @Override
-                        public void onComplete(String fullResponse) {
-                            // Cancel periodic render task
-                            cancelActiveRenderTask();
-
-                            synchronized (bufferLock) {
-                                // Use fullResponse if it's more complete than current buffer
-                                if (fullResponse != null && fullResponse.length() > responseBuffer.length()) {
-                                    responseBuffer.setLength(0);
-                                    responseBuffer.append(fullResponse);
-                                }
-
-                                final String finalResponse = responseBuffer.toString();
-
-                                SwingUtilities.invokeLater(() -> {
-                                    feedbackService.cacheLastInteraction(request.getPrompt(), finalResponse);
-                                    explainTab.setExplanationText(
-                                        markdownHelper.markdownToHtml(finalResponse));
-
-                                    // Store analysis result
-                                    codeAnalysisService.storeAnalysisResult(
-                                        currentFunction, request.getPrompt(), finalResponse);
-
-                                    setUIState(false, "Explain Function", null);
-                                });
-                            }
-                        }
-
-                        @Override
-                        public void onError(Throwable error) {
-                            // Cancel periodic render task on error
-                            cancelActiveRenderTask();
-
-                            SwingUtilities.invokeLater(() -> {
-                                explainTab.setExplanationText("An error occurred: " + error.getMessage());
-                                setUIState(false, "Explain Function", null);
-                            });
-                        }
-
-                        @Override
-                        public boolean shouldContinue() {
-                            return isQueryRunning;
-                        }
-                    });
+                        // Step 5: Update display
+                        final KnowledgeNode finalNode = node;
+                        SwingUtilities.invokeLater(() -> {
+                            updateExplainDisplay(finalNode);
+                            setUIState(false, "Explain Function", null);
+                        });
+                    } else {
+                        SwingUtilities.invokeLater(() -> {
+                            explainTab.setExplanationText("Failed to analyze function.");
+                            explainTab.clearSecurityInfo();
+                            setUIState(false, "Explain Function", null);
+                        });
+                    }
 
                 } catch (Exception e) {
+                    cancelActiveRenderTask();
                     SwingUtilities.invokeLater(() -> {
-                        Msg.showError(getClass(), explainTab, "Error", 
+                        Msg.showError(getClass(), explainTab, "Error",
                             "Failed to explain function: " + e.getMessage());
                         setUIState(false, "Explain Function", null);
                     });
@@ -358,42 +326,38 @@ public class TabController {
         new TaskLauncher(task, plugin.getTool().getToolFrame());
     }
 
+    /**
+     * Update the Explain tab display with data from a KnowledgeNode.
+     */
+    private void updateExplainDisplay(KnowledgeNode node) {
+        if (node == null) {
+            explainTab.setExplanationText("");
+            explainTab.clearSecurityInfo();
+            return;
+        }
+
+        // Update main summary
+        String summary = node.getLlmSummary();
+        if (summary != null && !summary.isEmpty()) {
+            explainTab.setExplanationText(markdownHelper.markdownToHtml(summary));
+        } else {
+            explainTab.setExplanationText("<i>No summary available. Click 'Explain Function' to analyze.</i>");
+        }
+
+        // Update security info panel
+        explainTab.updateSecurityInfo(
+            node.getRiskLevel(),
+            node.getActivityProfile(),
+            node.getSecurityFlags(),
+            node.getNetworkAPIs(),
+            node.getFileIOAPIs()
+        );
+    }
+
     public void handleExplainLine() {
-        if (isQueryRunning) {
-            cancelCurrentOperation();
-            return;
-        }
-        
-        Address currentAddress = plugin.getCurrentAddress();
-        if (currentAddress == null) {
-            Msg.showInfo(getClass(), explainTab, "No Address", "No address at current location.");
-            return;
-        }
-        
-        setUIState(true, "Stop", "Processing...");
-        
-        Task task = new Task("Explain Line", true, true, true) {
-            @Override
-            public void run(TaskMonitor monitor) {
-                try {
-                    CodeAnalysisService.AnalysisRequest request = 
-                        codeAnalysisService.createLineAnalysisRequest(currentAddress);
-                    
-                    feedbackService.cacheLastInteraction(request.getPrompt(), null);
-                    
-                    codeAnalysisService.executeAnalysis(request, createExplainResponseHandler());
-
-                } catch (Exception e) {
-                    SwingUtilities.invokeLater(() -> {
-                        Msg.showError(getClass(), explainTab, "Error", 
-                            "Failed to explain line: " + e.getMessage());
-                        setUIState(false, "Explain Line", null);
-                    });
-                }
-            }
-        };
-
-        new TaskLauncher(task, plugin.getTool().getToolFrame());
+        // Statement/block level semantic analysis is planned for a future release
+        Msg.showInfo(getClass(), explainTab, "Coming Soon",
+            "Statement/block level semantic analysis is planned for a future release.");
     }
 
     // ==== Query Operations ====
@@ -838,27 +802,51 @@ public class TabController {
     }
     
     public void handleUpdateAnalysis(String updatedContent) {
+        Function function = plugin.getCurrentFunction();
+        if (function == null) {
+            return;
+        }
+
         try {
-            Function function = plugin.getCurrentFunction();
-            codeAnalysisService.updateAnalysis(function, updatedContent);
+            String programHash = function.getProgram().getExecutableSHA256();
+            BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+            KnowledgeNode node = graph.getNodeByAddress(function.getEntryPoint().getOffset());
+
+            if (node == null) {
+                Msg.showWarn(this, explainTab, "Not Indexed",
+                    "Function not indexed. Run 'Explain Function' first.");
+                return;
+            }
+
+            node.setLlmSummary(updatedContent);
+            node.setUserEdited(true);  // Protect from auto-overwrite
+            node.markUpdated();
+            graph.upsertNode(node);
         } catch (Exception e) {
             Msg.showError(this, null, "Error", "Failed to update analysis: " + e.getMessage());
         }
     }
-    
+
     public void handleClearAnalysisData() {
+        Function function = plugin.getCurrentFunction();
+        if (function == null) {
+            return;
+        }
+
         try {
-            Function function = plugin.getCurrentFunction();
-            boolean success = codeAnalysisService.clearAnalysis(function);
-            
-            if (success) {
-                Msg.showInfo(this, null, "Success", "Analysis data cleared.");
-                if (explainTab != null) {
-                    explainTab.setExplanationText("");
-                }
-            } else {
-                Msg.showInfo(this, null, "Info", "No analysis data found to clear.");
+            String programHash = function.getProgram().getExecutableSHA256();
+            BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+            KnowledgeNode node = graph.getNodeByAddress(function.getEntryPoint().getOffset());
+
+            if (node != null) {
+                node.setLlmSummary(null);
+                node.setUserEdited(false);
+                node.markStale();
+                graph.upsertNode(node);
             }
+
+            explainTab.setExplanationText("");
+            explainTab.clearSecurityInfo();
         } catch (Exception e) {
             Msg.showError(this, null, "Error", "Failed to clear analysis: " + e.getMessage());
         }
@@ -1318,16 +1306,22 @@ public class TabController {
     
     private void updateAnalysisDisplay() {
         Function function = plugin.getCurrentFunction();
-        if (function != null) {
-            Analysis existingAnalysis = codeAnalysisService.getExistingAnalysis(function);
-            if (existingAnalysis != null) {
-                explainTab.setExplanationText(
-                    markdownHelper.markdownToHtml(existingAnalysis.getResponse()));
-            } else {
-                explainTab.setExplanationText("");
-            }
-        } else {
+        if (function == null) {
             explainTab.setExplanationText("");
+            explainTab.clearSecurityInfo();
+            return;
+        }
+
+        try {
+            String programHash = function.getProgram().getExecutableSHA256();
+            BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+            KnowledgeNode node = graph.getNodeByAddress(function.getEntryPoint().getOffset());
+
+            updateExplainDisplay(node);
+        } catch (Exception e) {
+            // Fall back to empty display on error
+            explainTab.setExplanationText("");
+            explainTab.clearSecurityInfo();
         }
     }
     
