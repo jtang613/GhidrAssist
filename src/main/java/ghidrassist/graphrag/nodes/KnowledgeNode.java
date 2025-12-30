@@ -65,6 +65,7 @@ public class KnowledgeNode {
     private List<String> urls;            // Detected URLs in strings
     private List<String> filePaths;       // Detected file paths in strings
     private List<String> domains;         // Detected domain names in strings
+    private List<String> registryKeys;    // Detected registry keys in strings
     private String activityProfile;       // Computed activity profile (NETWORK_CLIENT, FILE_WRITER, etc.)
     private String riskLevel;             // Computed risk level (LOW, MEDIUM, HIGH)
 
@@ -440,6 +441,14 @@ public class KnowledgeNode {
         this.domains = domains != null ? new ArrayList<>(domains) : new ArrayList<>();
     }
 
+    public List<String> getRegistryKeys() {
+        return registryKeys != null ? Collections.unmodifiableList(registryKeys) : Collections.emptyList();
+    }
+
+    public void setRegistryKeys(List<String> registryKeys) {
+        this.registryKeys = registryKeys != null ? new ArrayList<>(registryKeys) : new ArrayList<>();
+    }
+
     public String getActivityProfile() {
         return activityProfile;
     }
@@ -471,7 +480,8 @@ public class KnowledgeNode {
      */
     public boolean hasFileActivity() {
         return (fileIOAPIs != null && !fileIOAPIs.isEmpty()) ||
-               (filePaths != null && !filePaths.isEmpty());
+               (filePaths != null && !filePaths.isEmpty()) ||
+               (registryKeys != null && !registryKeys.isEmpty());
     }
 
     /**
@@ -488,6 +498,7 @@ public class KnowledgeNode {
         this.urls = new ArrayList<>(features.getURLs());
         this.filePaths = new ArrayList<>(features.getFilePaths());
         this.domains = new ArrayList<>(features.getDomains());
+        this.registryKeys = new ArrayList<>(features.getRegistryKeys());
         this.activityProfile = features.getActivityProfile();
         this.riskLevel = features.getRiskLevel();
     }
@@ -518,6 +529,10 @@ public class KnowledgeNode {
 
     public String serializeDomains() {
         return serializeStringList(domains);
+    }
+
+    public String serializeRegistryKeys() {
+        return serializeStringList(registryKeys);
     }
 
     private String serializeStringList(List<String> list) {
