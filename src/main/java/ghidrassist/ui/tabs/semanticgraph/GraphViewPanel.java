@@ -279,7 +279,7 @@ public class GraphViewPanel extends JPanel {
         // N-Hops spinner
         SpinnerNumberModel spinnerModel = new SpinnerNumberModel(2, 1, 5, 1);
         nHopsSpinner = new JSpinner(spinnerModel);
-        nHopsSpinner.setPreferredSize(new Dimension(50, 25));
+        nHopsSpinner.setPreferredSize(new Dimension(75, 25));
 
         // Edge type checkboxes
         showCallsCheckbox = new JCheckBox("CALLS", true);

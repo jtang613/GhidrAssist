@@ -7,8 +7,11 @@ import ghidrassist.chat.PersistedChatMessage;
 import ghidrassist.graphrag.BinaryKnowledgeGraph;
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class AnalysisDB {
@@ -154,6 +157,8 @@ public class AnalysisDB {
         // Graph-RAG Knowledge Backend Tables
         // ========================================
 
+        ensureGraphRagSchema();
+
         // Graph nodes table (5 types: STATEMENT, BLOCK, FUNCTION, MODULE, BINARY)
         String createGraphNodesTableSQL = "CREATE TABLE IF NOT EXISTS graph_nodes ("
                 + "id TEXT PRIMARY KEY,"
@@ -168,6 +173,11 @@ public class AnalysisDB {
                 + "security_flags TEXT,"              // JSON array of security annotations
                 + "network_apis TEXT,"                // JSON array of network API calls
                 + "file_io_apis TEXT,"                // JSON array of file I/O API calls
+                + "ip_addresses TEXT,"                // JSON array of IP addresses
+                + "urls TEXT,"                        // JSON array of URLs
+                + "file_paths TEXT,"                  // JSON array of file paths
+                + "domains TEXT,"                     // JSON array of domains
+                + "registry_keys TEXT,"               // JSON array of registry keys
                 + "risk_level TEXT,"                  // LOW, MEDIUM, HIGH
                 + "activity_profile TEXT,"            // NETWORK_CLIENT, FILE_WRITER, etc.
                 + "analysis_depth INTEGER DEFAULT 0," // How many times analyzed
@@ -196,6 +206,11 @@ public class AnalysisDB {
         String[] securityColumns = {
             "ALTER TABLE graph_nodes ADD COLUMN network_apis TEXT",
             "ALTER TABLE graph_nodes ADD COLUMN file_io_apis TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN ip_addresses TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN urls TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN file_paths TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN domains TEXT",
+            "ALTER TABLE graph_nodes ADD COLUMN registry_keys TEXT",
             "ALTER TABLE graph_nodes ADD COLUMN risk_level TEXT",
             "ALTER TABLE graph_nodes ADD COLUMN activity_profile TEXT"
         };
@@ -298,6 +313,148 @@ public class AnalysisDB {
                     + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
                     + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
                     + "END");
+        }
+    }
+
+    private void ensureGraphRagSchema() throws SQLException {
+        List<String> nodeColumns = Arrays.asList(
+                "id",
+                "type",
+                "address",
+                "binary_id",
+                "name",
+                "raw_content",
+                "llm_summary",
+                "confidence",
+                "embedding",
+                "security_flags",
+                "network_apis",
+                "file_io_apis",
+                "ip_addresses",
+                "urls",
+                "file_paths",
+                "domains",
+                "registry_keys",
+                "risk_level",
+                "activity_profile",
+                "analysis_depth",
+                "created_at",
+                "updated_at",
+                "is_stale",
+                "user_edited"
+        );
+        List<String> edgeColumns = Arrays.asList(
+                "id",
+                "source_id",
+                "target_id",
+                "type",
+                "weight",
+                "metadata",
+                "created_at"
+        );
+        List<String> communityColumns = Arrays.asList(
+                "id",
+                "level",
+                "binary_id",
+                "parent_community_id",
+                "name",
+                "summary",
+                "member_count",
+                "is_stale",
+                "created_at",
+                "updated_at"
+        );
+        List<String> memberColumns = Arrays.asList(
+                "community_id",
+                "node_id",
+                "membership_score"
+        );
+        List<String> ftsColumns = Arrays.asList(
+                "id",
+                "name",
+                "llm_summary",
+                "security_flags"
+        );
+
+        dropGraphNodeTriggers();
+
+        boolean nodesRenamed = ensureTableSchema("graph_nodes", nodeColumns);
+        if (nodesRenamed) {
+            renameTableWithCounter("graph_edges");
+            renameTableWithCounter("graph_communities");
+            renameTableWithCounter("community_members");
+            renameTableWithCounter("node_fts");
+            return;
+        }
+
+        ensureTableSchema("graph_edges", edgeColumns);
+        ensureTableSchema("graph_communities", communityColumns);
+        ensureTableSchema("community_members", memberColumns);
+        ensureTableSchema("node_fts", ftsColumns);
+    }
+
+    private void dropGraphNodeTriggers() throws SQLException {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ai");
+            stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ad");
+            stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_au");
+        }
+    }
+
+    private boolean ensureTableSchema(String tableName, List<String> expectedColumns) throws SQLException {
+        if (!tableExists(tableName)) {
+            return false;
+        }
+        List<String> existing = getTableColumns(tableName);
+        if (!columnsMatch(existing, expectedColumns)) {
+            renameTableWithCounter(tableName);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean columnsMatch(List<String> existing, List<String> expected) {
+        Set<String> existingSet = new HashSet<>(existing);
+        Set<String> expectedSet = new HashSet<>(expected);
+        return existingSet.equals(expectedSet);
+    }
+
+    private boolean tableExists(String tableName) throws SQLException {
+        try (PreparedStatement stmt = connection.prepareStatement(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?")) {
+            stmt.setString(1, tableName);
+            try (ResultSet rs = stmt.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private List<String> getTableColumns(String tableName) throws SQLException {
+        List<String> columns = new ArrayList<>();
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+            while (rs.next()) {
+                columns.add(rs.getString("name"));
+            }
+        }
+        return columns;
+    }
+
+    private String nextBackupName(String tableName) throws SQLException {
+        int suffix = 1;
+        while (tableExists(tableName + "_backup_" + suffix)) {
+            suffix++;
+        }
+        return tableName + "_backup_" + suffix;
+    }
+
+    private void renameTableWithCounter(String tableName) throws SQLException {
+        if (!tableExists(tableName)) {
+            return;
+        }
+        String backupName = nextBackupName(tableName);
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("ALTER TABLE " + tableName + " RENAME TO " + backupName);
         }
     }
 

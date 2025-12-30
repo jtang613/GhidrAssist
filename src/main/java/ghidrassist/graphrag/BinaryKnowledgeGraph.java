@@ -154,15 +154,19 @@ public class BinaryKnowledgeGraph {
     private void upsertNodeInternal(KnowledgeNode node, boolean isRetry) {
         String sql = "INSERT INTO graph_nodes "
                 + "(id, type, address, binary_id, name, raw_content, llm_summary, confidence, "
-                + "embedding, security_flags, network_apis, file_io_apis, risk_level, activity_profile, "
-                + "analysis_depth, created_at, updated_at, is_stale, user_edited) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "embedding, security_flags, network_apis, file_io_apis, ip_addresses, urls, "
+                + "file_paths, domains, registry_keys, risk_level, activity_profile, analysis_depth, "
+                + "created_at, updated_at, is_stale, user_edited) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 + "ON CONFLICT(id) DO UPDATE SET "
                 + "type = excluded.type, address = excluded.address, name = excluded.name, "
                 + "raw_content = excluded.raw_content, llm_summary = excluded.llm_summary, "
                 + "confidence = excluded.confidence, embedding = excluded.embedding, "
                 + "security_flags = excluded.security_flags, "
                 + "network_apis = excluded.network_apis, file_io_apis = excluded.file_io_apis, "
+                + "ip_addresses = excluded.ip_addresses, urls = excluded.urls, "
+                + "file_paths = excluded.file_paths, domains = excluded.domains, "
+                + "registry_keys = excluded.registry_keys, "
                 + "risk_level = excluded.risk_level, activity_profile = excluded.activity_profile, "
                 + "analysis_depth = excluded.analysis_depth, "
                 + "updated_at = excluded.updated_at, is_stale = excluded.is_stale, "
@@ -185,13 +189,18 @@ public class BinaryKnowledgeGraph {
             stmt.setString(10, node.serializeSecurityFlags());
             stmt.setString(11, node.serializeNetworkAPIs());
             stmt.setString(12, node.serializeFileIOAPIs());
-            stmt.setString(13, node.getRiskLevel());
-            stmt.setString(14, node.getActivityProfile());
-            stmt.setInt(15, node.getAnalysisDepth());
-            stmt.setLong(16, node.getCreatedAt().toEpochMilli());
-            stmt.setLong(17, node.getUpdatedAt().toEpochMilli());
-            stmt.setInt(18, node.isStale() ? 1 : 0);
-            stmt.setInt(19, node.isUserEdited() ? 1 : 0);
+            stmt.setString(13, node.serializeIPAddresses());
+            stmt.setString(14, node.serializeURLs());
+            stmt.setString(15, node.serializeFilePaths());
+            stmt.setString(16, node.serializeDomains());
+            stmt.setString(17, node.serializeRegistryKeys());
+            stmt.setString(18, node.getRiskLevel());
+            stmt.setString(19, node.getActivityProfile());
+            stmt.setInt(20, node.getAnalysisDepth());
+            stmt.setLong(21, node.getCreatedAt().toEpochMilli());
+            stmt.setLong(22, node.getUpdatedAt().toEpochMilli());
+            stmt.setInt(23, node.isStale() ? 1 : 0);
+            stmt.setInt(24, node.isUserEdited() ? 1 : 0);
 
             stmt.executeUpdate();
 
@@ -396,7 +405,7 @@ public class BinaryKnowledgeGraph {
     /**
      * Get neighboring nodes within N hops.
      */
-    public List<KnowledgeNode> getNeighbors(String nodeId, int depth) {
+    public List<KnowledgeNode> getNeighbors(String nodeId, int maxDepth) {
         Set<String> visited = new HashSet<>();
         List<KnowledgeNode> neighbors = new ArrayList<>();
 
@@ -407,27 +416,27 @@ public class BinaryKnowledgeGraph {
         BreadthFirstIterator<String, LabeledEdge> iterator =
                 new BreadthFirstIterator<>(memoryGraph, nodeId);
 
-        int currentDepth = 0;
-        String lastVertex = nodeId;
-
-        while (iterator.hasNext() && currentDepth <= depth) {
+        while (iterator.hasNext()) {
             String vertexId = iterator.next();
+
+            // Skip the starting node
             if (vertexId.equals(nodeId)) {
                 continue;
             }
 
-            // Track depth (simplified - BFS naturally expands by level)
+            // Use BFS iterator's depth tracking - stop if beyond maxDepth
+            int vertexDepth = iterator.getDepth(vertexId);
+            if (vertexDepth > maxDepth) {
+                // BFS visits nodes in order of increasing depth, so we can stop here
+                break;
+            }
+
             if (!visited.contains(vertexId)) {
                 visited.add(vertexId);
                 KnowledgeNode node = getNode(vertexId);
                 if (node != null) {
                     neighbors.add(node);
                 }
-            }
-
-            // Check if we've exceeded depth (approximate via neighbor count)
-            if (neighbors.size() > depth * 50) {
-                break;
             }
         }
 
@@ -1018,6 +1027,31 @@ public class BinaryKnowledgeGraph {
         }
         try {
             node.setFileIOAPIs(KnowledgeNode.deserializeStringList(rs.getString("file_io_apis")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setIPAddresses(KnowledgeNode.deserializeStringList(rs.getString("ip_addresses")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setURLs(KnowledgeNode.deserializeStringList(rs.getString("urls")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setFilePaths(KnowledgeNode.deserializeStringList(rs.getString("file_paths")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setDomains(KnowledgeNode.deserializeStringList(rs.getString("domains")));
+        } catch (SQLException e) {
+            // Column doesn't exist
+        }
+        try {
+            node.setRegistryKeys(KnowledgeNode.deserializeStringList(rs.getString("registry_keys")));
         } catch (SQLException e) {
             // Column doesn't exist
         }
