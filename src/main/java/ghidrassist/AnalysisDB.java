@@ -1272,6 +1272,29 @@ public class AnalysisDB {
     }
 
     /**
+     * Get the last updated timestamp (epoch ms) for a program's knowledge graph.
+     *
+     * @param programHash The program hash
+     * @return Epoch milliseconds for most recent update, or null if unknown
+     */
+    public Long getKnowledgeGraphLastIndexed(String programHash) {
+        String sql = "SELECT MAX(updated_at) FROM graph_nodes WHERE binary_id = ?";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, programHash);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                long value = rs.getLong(1);
+                if (!rs.wasNull() && value > 0) {
+                    return value;
+                }
+            }
+        } catch (SQLException e) {
+            Msg.warn(this, "Error getting knowledge graph last indexed time: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
      * Clear the cached BinaryKnowledgeGraph for a program.
      * Call this when switching programs or when the graph needs to be reloaded.
      *
