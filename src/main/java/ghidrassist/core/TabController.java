@@ -29,6 +29,9 @@ import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatures;
 
 import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 import javax.swing.*;
 import javax.swing.event.HyperlinkEvent;
@@ -1161,6 +1164,15 @@ public class TabController {
         return null;
     }
 
+    private String formatIndexedTimestamp(Long epochMs) {
+        if (epochMs == null || epochMs <= 0) {
+            return "unknown";
+        }
+        DateTimeFormatter formatter =
+                DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
+        return formatter.format(Instant.ofEpochMilli(epochMs));
+    }
+
     public boolean isQueryRunning() {
         return isQueryRunning;
     }
@@ -1966,7 +1978,17 @@ public class TabController {
 
                     SwingUtilities.invokeLater(() -> {
                         semanticGraphTab.refreshCurrentView();
-                        semanticGraphTab.updateStats(result.functionsExtracted, result.callEdgesCreated, 0, "just now");
+                        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+                        Long lastIndexed = analysisDB.getKnowledgeGraphLastIndexed(programHash);
+                        if (lastIndexed == null) {
+                            lastIndexed = System.currentTimeMillis();
+                        }
+                        semanticGraphTab.updateStats(
+                                result.functionsExtracted,
+                                result.callEdgesCreated,
+                                0,
+                                formatIndexedTimestamp(lastIndexed)
+                        );
                         Msg.showInfo(this, null, "Indexing Complete",
                                 String.format("Indexed %d functions, %d edges",
                                         result.functionsExtracted, result.callEdgesCreated));
@@ -2233,7 +2255,9 @@ public class TabController {
                 // Update stats
                 int nodeCount = graph.getNodeCount();
                 int edgeCount = graph.getEdgeCount();
-                semanticGraphTab.updateStats(nodeCount, edgeCount, 0, null);
+                Long lastIndexed = analysisDB.getKnowledgeGraphLastIndexed(
+                        plugin.getCurrentProgram().getExecutableSHA256());
+                semanticGraphTab.updateStats(nodeCount, edgeCount, 0, formatIndexedTimestamp(lastIndexed));
 
             } catch (Exception e) {
                 Msg.error(this, "Failed to refresh list view: " + e.getMessage(), e);
