@@ -11,15 +11,39 @@ GhidrAssist integrates Large Language Models (LLMs) into Ghidra to provide intel
 
 **Core Functionality:**
 * **Code Explanation** - Explain functions and instructions in both disassembly and decompiled pseudo-C
+  - Security analysis panel showing risk level, activity profile, and API usage
+  - Editable summaries with user-edit protection from auto-overwrite
 * **Interactive Chat** - Multi-turn conversational queries with persistent chat history
 * **Custom Queries** - Direct LLM queries with optional context from current function/location
+
+**Graph-RAG Knowledge System:**
+* **Semantic Knowledge Graph** - Hierarchical representation of binary analysis
+  - 5-level semantic hierarchy: Statement → Block → Function → Module → Binary
+  - Pre-computed LLM summaries enable fast, LLM-free queries
+  - SQLite persistence with JGraphT graph algorithms
+  - Full-text search (FTS5) on summaries and security annotations
+* **Community Detection** - Automatic module discovery via Leiden algorithm
+  - Groups related functions into logical modules
+  - Hierarchical community structure with summaries
+  - Visual graph exploration with configurable depth
+* **Security Feature Extraction** - Comprehensive security analysis
+  - Network APIs: POSIX sockets, WinSock, DNS, SSL/TLS, WinHTTP, WinINet
+  - File I/O APIs: POSIX, Windows, C library functions
+  - Crypto APIs: OpenSSL, Windows crypto, platform-specific
+  - String patterns: IP addresses, URLs, domains, file paths, registry keys
+  - Risk level classification (LOW/MEDIUM/HIGH) and activity profiling
+* **Semantic Graph Tab** - Visual knowledge graph interface
+  - Graph view with N-hop depth exploration
+  - List view of all indexed functions
+  - Semantic search across summaries
+  - One-click re-indexing and security analysis
 
 **Advanced Capabilities:**
 * **Extended Thinking/Reasoning Control** - Adjust LLM reasoning depth for quality vs. speed trade-offs
   - Support for OpenAI o1/o3/o4, Claude with extended thinking, and local reasoning models
   - Configurable effort levels: Low (fast), Medium (balanced), High (thorough)
   - Per-program persistence - different binaries can use different reasoning levels
-  - Provider-agnostic implementation (Anthropic, OpenAI, Azure, LMStudio, Ollama)
+  - Provider-agnostic implementation (Anthropic, OpenAI, Azure, LiteLLM, LMStudio, Ollama)
 * **ReAct Agentic Mode** - Autonomous investigation using structured reasoning (Think-Act-Observe)
   - LLM proposes investigation steps based on your query
   - Systematic tool execution with progress tracking via todo lists
@@ -47,18 +71,35 @@ GhidrAssist integrates Large Language Models (LLMs) into Ghidra to provide intel
 
 ### Architecture
 
-The plugin uses a modular architecture:
+The plugin uses a modular, service-oriented architecture:
+
+**Core Services:**
 - **Query Modes**: Regular queries, MCP-enhanced queries, or full agentic investigation
 - **ReAct Orchestrator**: Manages autonomous investigation loops with todo tracking and findings accumulation
 - **Conversational Tool Handler**: Manages multi-turn tool calling sessions
 - **MCPToolManager**: Interfaces with external MCP servers for specialized tools
-- **AnalysisDB**: SQLite database for chat history and RLHF feedback
-- **RAGEngine**: Lucene-powered document search and context retrieval
+
+**Graph-RAG Backend:**
+- **BinaryKnowledgeGraph**: Hybrid SQLite + JGraphT storage for semantic knowledge
+- **GraphRAGEngine**: LLM-free query engine using pre-computed summaries
+- **SemanticExtractor**: LLM-powered function summarization with batch processing
+- **SecurityFeatureExtractor**: Static analysis for network, file I/O, and crypto APIs
+- **CommunityDetector**: Leiden algorithm implementation for module discovery
+
+**Data Layer:**
+- **AnalysisDB**: SQLite database for chat history, RLHF feedback, and knowledge graphs
+- **SchemaMigrationRunner**: Versioned database migrations for transparent upgrades
+- **RAGEngine**: Lucene-powered document search for custom context injection
+
+**UI Components:**
+- Tab-based interface: Explain, Query, Actions, Semantic Graph, RAG Management, MCP Servers
+- Service orchestration via TabController
 
 Future Roadmap:
 * Model fine-tuning using collected RLHF dataset
 * Additional MCP tool integrations
 * Enhanced agentic capabilities, multi-agent collaboration
+* Embedding-based similarity search
 
 ## Screenshots
 
@@ -93,6 +134,12 @@ GhidrAssist works with any OpenAI v1-compatible API. Setup details are provider-
 - [OpenAI API](https://help.openai.com/en/articles/4936850-where-do-i-find-my-openai-api-key)
 - [Anthropic Claude](https://docs.anthropic.com/en/docs/initial-setup)
 - Azure OpenAI
+
+**LiteLLM Proxy (Multi-Provider Gateway):**
+- [LiteLLM](https://docs.litellm.ai/) - Unified API for 100+ LLM providers
+- Supports AWS Bedrock, Google Vertex AI, Azure, and many others
+- Select "LiteLLM" as provider type in GhidrAssist settings
+- Automatic model family detection for proper message formatting
 
 ### Recommended Models
 
@@ -149,6 +196,43 @@ GhidrAssist works with any OpenAI v1-compatible API. Setup details are provider-
 - "Trace the data flow from user input to this call"
 - "Find all functions that modify global variable X"
 - "Analyze the error handling in the current function"
+
+## Using the Semantic Graph (Graph-RAG)
+
+The Semantic Graph tab provides a knowledge graph interface for exploring binary analysis results without requiring LLM calls for every query.
+
+### Getting Started
+
+1. **Index the Binary:**
+   - Open the Semantic Graph tab
+   - Click "ReIndex Binary" to extract structural relationships
+   - Click "Semantic Analysis" to generate LLM summaries (requires API)
+   - Progress is shown in the status bar
+
+2. **Explore the Graph:**
+   - **List View**: Browse all indexed functions with summaries and security flags
+   - **Graph View**: Visualize call relationships with configurable N-hop depth
+   - **Search View**: Full-text search across summaries and security annotations
+
+3. **Security Analysis:**
+   - Click "Security Analysis" to scan for security-relevant features
+   - Results include: network APIs, file I/O, crypto usage, string patterns
+   - Risk levels (LOW/MEDIUM/HIGH) are assigned based on detected features
+
+### Explain Tab Integration
+
+When viewing a function in the Explain tab:
+- If the function is indexed, the pre-computed summary is shown instantly
+- Security panel displays: risk level, activity profile, APIs used
+- Click "Edit" to modify summaries (protected from auto-overwrite)
+- Use "Refresh" to re-generate the summary with the LLM
+
+### Benefits
+
+- **Fast Queries**: Pre-computed summaries eliminate LLM latency for repeat queries
+- **Offline Analysis**: Browse indexed data without API connectivity
+- **Security Focus**: Automatic detection of security-relevant code patterns
+- **Module Discovery**: Community detection groups related functions automatically
 
 ## Homepage
 https://github.com/jtang613/GhidrAssist
