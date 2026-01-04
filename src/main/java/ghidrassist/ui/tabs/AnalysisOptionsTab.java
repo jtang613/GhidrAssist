@@ -5,7 +5,7 @@ import java.awt.*;
 import ghidrassist.core.TabController;
 
 public class AnalysisOptionsTab extends JPanel {
-    private static final String VERSION = "1.8.0";
+    private static final String VERSION = "1.10.0";
     private static final String[] REASONING_EFFORT_OPTIONS = {"None", "Low", "Medium", "High"};
 
     private final TabController controller;
