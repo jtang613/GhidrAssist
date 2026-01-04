@@ -131,6 +131,7 @@ public class ProviderRegistry {
         registerFactory(new LMStudioProviderFactory());
         registerFactory(new OpenWebUiProviderFactory());
         registerFactory(new LiteLLMProviderFactory());
+        registerFactory(new ClaudeCodeProviderFactory());
     }
     
     /**

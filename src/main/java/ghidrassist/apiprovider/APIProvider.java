@@ -28,7 +28,8 @@ public abstract class APIProvider implements ChatProvider {
         OPENWEBUI,
         LMSTUDIO,
         AZURE_OPENAI,
-        LITELLM
+        LITELLM,
+        CLAUDE_CODE
     }
 
     protected String name;
