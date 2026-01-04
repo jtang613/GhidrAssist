@@ -391,16 +391,24 @@ public class SettingsDialog extends DialogComponentProvider {
         }
     }
 
-    private boolean validateProviderFields(String name, String model, Integer maxTokens, String url, String key) {
+    private boolean validateProviderFields(String name, String model, Integer maxTokens,
+                                           String url, String key, APIProvider.ProviderType type) {
         StringBuilder errorMessage = new StringBuilder();
-        
+
+        // Check if this is a CLI-based provider (no URL/key required)
+        boolean isCliProvider = (type == APIProvider.ProviderType.CLAUDE_CODE);
+
         // Check for empty fields
         if (name.isEmpty()) errorMessage.append("Name is required.\n");
         if (model.isEmpty()) errorMessage.append("Model is required.\n");
         if (maxTokens <= 0) errorMessage.append("Max tokens must be a positive integer.\n");
-        if (url.isEmpty()) errorMessage.append("URL is required.\n");
-        if (key.isEmpty()) errorMessage.append("Key is required.\n");
-        
+
+        // URL and key not required for CLI-based providers
+        if (!isCliProvider) {
+            if (url.isEmpty()) errorMessage.append("URL is required.\n");
+            if (key.isEmpty()) errorMessage.append("Key is required.\n");
+        }
+
         // Show error message if any validation failed
         if (errorMessage.length() > 0) {
             JOptionPane.showMessageDialog(
@@ -411,7 +419,7 @@ public class SettingsDialog extends DialogComponentProvider {
             );
             return false;
         }
-        
+
         return true;
     }
 
@@ -446,8 +454,39 @@ public class SettingsDialog extends DialogComponentProvider {
             typeComboBox.setSelectedItem(newProvider.getType());
         }
 
-        JCheckBox disableTlsVerifyCheckbox = new JCheckBox("Disable TLS Certificate Verification", 
+        JCheckBox disableTlsVerifyCheckbox = new JCheckBox("Disable TLS Certificate Verification",
             newProvider.isDisableTlsVerification());
+
+        // Note label for CLI-based providers
+        JLabel cliNoteLabel = new JLabel("<html><i>Requires 'claude' CLI installed and authenticated</i></html>");
+        cliNoteLabel.setForeground(java.awt.Color.GRAY);
+        cliNoteLabel.setVisible(false);
+
+        // Helper to update UI based on provider type
+        Runnable updateFieldsForType = () -> {
+            APIProvider.ProviderType selectedType = (APIProvider.ProviderType) typeComboBox.getSelectedItem();
+            boolean isCliProvider = (selectedType == APIProvider.ProviderType.CLAUDE_CODE);
+
+            urlField.setEnabled(!isCliProvider);
+            keyField.setEnabled(!isCliProvider);
+            cliNoteLabel.setVisible(isCliProvider);
+
+            if (isCliProvider) {
+                urlField.setText("");
+                keyField.setText("");
+                // Set default model for Claude Code if empty
+                if (modelField.getText().trim().isEmpty() ||
+                    modelField.getText().equals("gpt-4o-mini")) {
+                    modelField.setText("sonnet");
+                }
+            }
+        };
+
+        // Add listener for type changes
+        typeComboBox.addActionListener(e -> updateFieldsForType.run());
+
+        // Apply initial state
+        updateFieldsForType.run();
 
         JPanel panel = new JPanel(new GridLayout(0, 2));
         panel.add(new JLabel("Name:"));
@@ -462,6 +501,8 @@ public class SettingsDialog extends DialogComponentProvider {
         panel.add(urlField);
         panel.add(new JLabel("Key:"));
         panel.add(keyField);
+        panel.add(new JLabel("")); // Empty label for spacing
+        panel.add(cliNoteLabel);
         panel.add(new JLabel("Insecure TLS:"));
         panel.add(disableTlsVerifyCheckbox);
 
@@ -478,7 +519,7 @@ public class SettingsDialog extends DialogComponentProvider {
                 APIProvider.ProviderType type = (APIProvider.ProviderType) typeComboBox.getSelectedItem();
                 
                 // Validate all fields
-                if (validateProviderFields(name, model, maxTokens, url, key)) {
+                if (validateProviderFields(name, model, maxTokens, url, key, type)) {
                     // Ensure URL has trailing slash
                     url = ensureTrailingSlash(url);
                     
