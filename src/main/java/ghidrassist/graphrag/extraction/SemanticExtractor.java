@@ -262,10 +262,23 @@ public class SemanticExtractor {
                 node.setLlmSummary(response);
                 node.setConfidence(0.85f);
 
-                // Extract security flags if present
-                String securityNotes = ExtractionPrompts.extractSecurityNotes(response);
-                if (securityNotes != null && !securityNotes.toLowerCase().contains("none")) {
+                // Extract security flags if present (supports both old and new format)
+                String security = ExtractionPrompts.extractSecurity(response);
+                if (security == null) {
+                    // Fall back to legacy format
+                    security = ExtractionPrompts.extractSecurityNotes(response);
+                }
+                if (security != null && !security.toLowerCase().contains("none") &&
+                    !security.toLowerCase().contains("no security") &&
+                    !security.toLowerCase().contains("not applicable")) {
                     node.addSecurityFlag("LLM_FLAGGED");
+                }
+
+                // Extract and store category if present
+                String category = ExtractionPrompts.extractCategory(response);
+                if (category != null && !category.isEmpty()) {
+                    // Store category as a security flag for searchability
+                    node.addSecurityFlag("CATEGORY_" + category.toUpperCase().replace(" ", "_"));
                 }
 
                 node.markUpdated();
