@@ -37,7 +37,7 @@ public class ExtractionPrompts {
         // Analyze complexity to determine appropriate summary length
         ComplexityMetrics complexity = analyzeComplexity(decompiledCode);
 
-        prompt.append("Analyze this decompiled function and provide a summary.\n\n");
+        prompt.append("Analyze this decompiled function and provide a structured summary.\n\n");
 
         prompt.append("## Function: ").append(functionName).append("\n\n");
 
@@ -57,31 +57,43 @@ public class ExtractionPrompts {
                            complexity.level.equals("complex") ? 3000 : 2000;
         prompt.append("```c\n").append(truncateCode(decompiledCode, truncateLimit)).append("\n```\n\n");
 
-        // Complexity-scaled guidance
-        prompt.append("**Summary Length Guidance:** ").append(complexity.summaryGuidance).append("\n\n");
+        // Output format instructions - explicit and mandatory
+        prompt.append("## Output Format (REQUIRED - follow this structure exactly):\n\n");
 
-        prompt.append("Provide a summary in the following format:\n\n");
+        prompt.append("**Summary:** [1-3 sentences describing what this function does]\n\n");
 
-        // Scale Purpose section based on complexity
-        if (complexity.level.equals("very_complex") || complexity.level.equals("complex")) {
-            prompt.append("**Purpose:** [A thorough description of what this function does, ");
-            prompt.append("its role in the larger system, and its key responsibilities. ");
-            prompt.append("For complex functions, this should be a full paragraph.]\n\n");
-
-            prompt.append("**Behavior:** [Detailed explanation of the function's logic including:\n");
-            prompt.append("- Main code paths and control flow\n");
-            prompt.append("- Key data transformations and algorithms\n");
-            prompt.append("- Important state changes and side effects\n");
-            prompt.append("- Error handling patterns\n");
-            prompt.append("For complex functions, use multiple paragraphs as needed.]\n\n");
+        // Complexity-based section guidance
+        if (complexity.level.equals("simple")) {
+            prompt.append("For this simple function, provide ONLY the Summary and Category sections.\n\n");
         } else {
-            prompt.append("**Purpose:** [1-3 sentences describing what this function does]\n\n");
-            prompt.append("**Behavior:** [Key operations, data transformations, control flow]\n\n");
+            prompt.append("[Include the following sections ONLY if applicable to this function:]\n\n");
+
+            if (complexity.level.equals("very_complex") || complexity.level.equals("complex")) {
+                prompt.append("**Details:** [Detailed explanation of the function's logic including:\n");
+                prompt.append("- Main code paths and control flow\n");
+                prompt.append("- Key data transformations and algorithms\n");
+                prompt.append("- Important state changes and side effects\n");
+                prompt.append("- Error handling patterns\n");
+                prompt.append("Use multiple paragraphs as needed for complex functions.]\n\n");
+            } else {
+                prompt.append("**Details:** [Brief description of control flow and key operations. ");
+                prompt.append("Skip this section for trivial utility functions.]\n\n");
+            }
+
+            prompt.append("**File IO:** [ONLY if this function performs file operations: ");
+            prompt.append("list operations like fopen, fread, fwrite, fclose, CreateFile, ReadFile, etc. ");
+            prompt.append("Otherwise OMIT this section entirely.]\n\n");
+
+            prompt.append("**Network IO:** [ONLY if this function performs network operations: ");
+            prompt.append("list operations like socket, connect, send, recv, WSAStartup, getaddrinfo, etc. ");
+            prompt.append("Otherwise OMIT this section entirely.]\n\n");
+
+            prompt.append("**Security:** [ONLY if security-relevant observations exist: ");
+            prompt.append("buffer handling concerns, input validation issues, crypto usage, ");
+            prompt.append("privilege operations, error handling gaps. Otherwise OMIT this section.]\n\n");
         }
 
-        prompt.append("**Security Notes:** [Any potential security concerns: buffer handling, ");
-        prompt.append("input validation, crypto usage, privilege operations. Write 'None identified' if none.]\n\n");
-        prompt.append("**Category:** [One of: initialization, data_processing, io_operations, ");
+        prompt.append("**Category:** [REQUIRED - One of: initialization, data_processing, io_operations, ");
         prompt.append("network, crypto, authentication, error_handling, utility, unknown]\n");
 
         return prompt.toString();
@@ -89,7 +101,7 @@ public class ExtractionPrompts {
 
     /**
      * Generate a complexity-scaled summary prompt for individual function processing.
-     * Summary length scales with function complexity.
+     * Uses simplified format for batch/brief processing - Summary and Category only.
      */
     public static String functionBriefSummaryPrompt(String functionName, String decompiledCode) {
         ComplexityMetrics complexity = analyzeComplexity(decompiledCode);
@@ -105,8 +117,21 @@ public class ExtractionPrompts {
                            complexity.level.equals("moderate") ? 2000 : 1500;
         prompt.append("```c\n").append(truncateCode(decompiledCode, truncateLimit)).append("\n```\n\n");
 
-        prompt.append(complexity.summaryGuidance).append("\n\n");
-        prompt.append("Summary:");
+        prompt.append("## Output Format (REQUIRED):\n\n");
+        prompt.append("**Summary:** [");
+        if (complexity.level.equals("simple")) {
+            prompt.append("1-2 sentences");
+        } else if (complexity.level.equals("moderate")) {
+            prompt.append("2-4 sentences");
+        } else {
+            prompt.append("1-2 paragraphs covering key functionality");
+        }
+        prompt.append(" describing what this function does]\n\n");
+
+        prompt.append("**Category:** [One of: initialization, data_processing, io_operations, ");
+        prompt.append("network, crypto, authentication, error_handling, utility, unknown]\n\n");
+
+        prompt.append("Do NOT include other sections (Details, File IO, Network IO, Security) in this brief format.");
 
         return prompt.toString();
     }
@@ -316,17 +341,42 @@ public class ExtractionPrompts {
     // ========================================
 
     /**
-     * Extract the purpose line from a function summary response.
+     * Extract the Summary section from a function summary response.
      */
-    public static String extractPurpose(String response) {
-        return extractSection(response, "Purpose:");
+    public static String extractSummary(String response) {
+        return extractSection(response, "Summary:");
     }
 
     /**
-     * Extract the security notes from a function summary response.
+     * Extract the Details section from a function summary response.
+     * Returns null if section not present.
      */
-    public static String extractSecurityNotes(String response) {
-        return extractSection(response, "Security Notes:");
+    public static String extractDetails(String response) {
+        return extractSection(response, "Details:");
+    }
+
+    /**
+     * Extract the File IO section from a function summary response.
+     * Returns null if section not present.
+     */
+    public static String extractFileIO(String response) {
+        return extractSection(response, "File IO:");
+    }
+
+    /**
+     * Extract the Network IO section from a function summary response.
+     * Returns null if section not present.
+     */
+    public static String extractNetworkIO(String response) {
+        return extractSection(response, "Network IO:");
+    }
+
+    /**
+     * Extract the Security section from a function summary response.
+     * Returns null if section not present.
+     */
+    public static String extractSecurity(String response) {
+        return extractSection(response, "Security:");
     }
 
     /**
@@ -336,16 +386,70 @@ public class ExtractionPrompts {
         return extractSection(response, "Category:");
     }
 
+    /**
+     * Legacy: Extract the purpose line (maps to Summary for backwards compatibility).
+     * @deprecated Use extractSummary() instead
+     */
+    @Deprecated
+    public static String extractPurpose(String response) {
+        // Try new format first, fall back to old format
+        String summary = extractSection(response, "Summary:");
+        if (summary != null) return summary;
+        return extractSection(response, "Purpose:");
+    }
+
+    /**
+     * Legacy: Extract the security notes (maps to Security for backwards compatibility).
+     * @deprecated Use extractSecurity() instead
+     */
+    @Deprecated
+    public static String extractSecurityNotes(String response) {
+        // Try new format first, fall back to old format
+        String security = extractSection(response, "Security:");
+        if (security != null) return security;
+        return extractSection(response, "Security Notes:");
+    }
+
     private static String extractSection(String response, String header) {
-        int start = response.indexOf(header);
+        if (response == null) return null;
+
+        // Try with ** markdown formatting first
+        int start = response.indexOf("**" + header);
+        if (start != -1) {
+            start = response.indexOf("**", start + 2);  // Find closing **
+            if (start != -1) start += 2;  // Move past **
+        }
+
+        // Fall back to plain header
+        if (start == -1) {
+            start = response.indexOf(header);
+            if (start != -1) start += header.length();
+        }
+
         if (start == -1) return null;
 
-        start += header.length();
-        int end = response.indexOf("\n\n", start);
-        if (end == -1) end = response.indexOf("\n**", start);
-        if (end == -1) end = response.length();
+        // Find the end of this section (next section header or end of text)
+        int end = response.length();
 
-        return response.substring(start, end).trim();
+        // Look for next section (with ** prefix)
+        int nextSection = response.indexOf("\n**", start);
+        if (nextSection != -1 && nextSection < end) end = nextSection;
+
+        // Also check for double newline as section separator
+        int doubleNewline = response.indexOf("\n\n", start);
+        // Only use double newline if there's content after it that looks like a header
+        if (doubleNewline != -1 && doubleNewline < end) {
+            String afterNewline = response.substring(doubleNewline + 2).trim();
+            if (afterNewline.startsWith("**") || afterNewline.matches("^[A-Z][a-z]+:.*")) {
+                end = doubleNewline;
+            }
+        }
+
+        String result = response.substring(start, end).trim();
+        // Remove leading colon if present (from ** format)
+        if (result.startsWith(":")) result = result.substring(1).trim();
+
+        return result.isEmpty() ? null : result;
     }
 
     // ========================================
