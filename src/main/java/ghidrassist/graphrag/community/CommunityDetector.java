@@ -274,46 +274,64 @@ public class CommunityDetector {
     }
 
     /**
+     * Helper class to hold prepared community data for batch processing.
+     */
+    private static class CommunityData {
+        final Community community;
+        final List<String> memberIds;
+        final int index;
+
+        CommunityData(Community community, List<String> memberIds, int index) {
+            this.community = community;
+            this.memberIds = memberIds;
+            this.index = index;
+        }
+    }
+
+    /**
      * Create Community and membership records in the database.
+     * Uses parallel processing for summary generation and batch DB operations.
      */
     private int createCommunityRecords(Map<Integer, List<String>> communities) {
         String binaryId = graph.getBinaryId();
+
+        // Phase 1: Generate all community data in parallel
+        // (names and summaries can be computed independently using the cached node data)
+        List<CommunityData> communityDataList = communities.entrySet().parallelStream()
+            .map(entry -> {
+                List<String> memberIds = entry.getValue();
+                int index = entry.getKey();
+
+                Community community = new Community(binaryId, 0); // level 0 = function communities
+                community.setMemberCount(memberIds.size());
+                community.setName(generateCommunityName(memberIds, index));
+                community.setSummary(generateCommunitySummary(memberIds));
+
+                return new CommunityData(community, memberIds, index);
+            })
+            .collect(Collectors.toList());
+
+        // Phase 2: Batch insert all records (sequential but using batch operations)
         int count = 0;
-
-        for (Map.Entry<Integer, List<String>> entry : communities.entrySet()) {
-            List<String> memberIds = entry.getValue();
-
-            // Create community
-            Community community = new Community(binaryId, 0); // level 0 = function communities
-            community.setMemberCount(memberIds.size());
-
-            // Generate name based on prominent functions
-            String name = generateCommunityName(memberIds, entry.getKey());
-            community.setName(name);
-
-            // Generate summary based on member analysis
-            String summary = generateCommunitySummary(memberIds);
-            community.setSummary(summary);
-
-            // Store community
-            graph.upsertCommunity(community);
-
-            // Add members
-            for (String nodeId : memberIds) {
-                graph.addCommunityMember(community.getId(), nodeId, 1.0);
-            }
-
-            // Create BELONGS_TO_COMMUNITY edges
-            for (String nodeId : memberIds) {
-                graph.addEdge(nodeId, community.getId(), EdgeType.BELONGS_TO_COMMUNITY);
-            }
-
-            count++;
-
+        for (CommunityData data : communityDataList) {
             if (monitor != null && monitor.isCancelled()) {
                 break;
             }
+
+            // Store community
+            graph.upsertCommunity(data.community);
+
+            // Add members and edges using batch operations
+            for (String nodeId : data.memberIds) {
+                graph.queueCommunityMemberForBatch(data.community.getId(), nodeId, 1.0);
+                graph.queueEdgeForBatch(nodeId, data.community.getId(), EdgeType.BELONGS_TO_COMMUNITY);
+            }
+
+            count++;
         }
+
+        // Flush remaining batches
+        graph.flushAllBatches();
 
         Msg.info(this, String.format("Created %d community records", count));
         return count;

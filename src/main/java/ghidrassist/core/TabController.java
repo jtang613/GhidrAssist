@@ -3,6 +3,7 @@ package ghidrassist.core;
 import ghidra.app.services.GoToService;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
+import ghidra.program.model.listing.Program;
 import ghidra.program.util.ProgramLocation;
 import ghidra.util.Msg;
 import ghidra.util.task.Task;
@@ -27,6 +28,7 @@ import ghidrassist.graphrag.extraction.StructureExtractor;
 import ghidrassist.graphrag.extraction.SemanticExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatures;
+import ghidrassist.workers.*;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -93,6 +95,13 @@ public class TabController {
     private RAGManagementTab ragManagementTab;
     private AnalysisOptionsTab analysisOptionsTab;
     private SemanticGraphTab semanticGraphTab;
+
+    // Background workers for non-blocking analysis
+    private volatile ReindexWorker reindexWorker;
+    private volatile SemanticAnalysisWorker semanticAnalysisWorker;
+    private volatile SecurityAnalysisWorker securityAnalysisWorker;
+    private volatile RefreshNamesWorker refreshNamesWorker;
+    private volatile NetworkFlowAnalysisWorker networkFlowWorker;
 
     // Database for semantic graph operations
     private final AnalysisDB analysisDB;
@@ -217,7 +226,10 @@ public class TabController {
     // ==== Code Analysis Operations ====
     
     public void handleExplainFunction() {
+        Msg.info(this, "handleExplainFunction called, isQueryRunning=" + isQueryRunning);
+
         if (isQueryRunning) {
+            Msg.info(this, "Query already running, cancelling...");
             cancelCurrentOperation();
             return;
         }
@@ -228,105 +240,131 @@ public class TabController {
             return;
         }
 
-        setUIState(true, "Stop", "Processing...");
+        Msg.info(this, "Explaining function: " + currentFunction.getName());
 
-        Task task = new Task("Explain Function", true, true, true) {
-            @Override
-            public void run(TaskMonitor monitor) {
-                try {
-                    String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-                    BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
-                    long address = currentFunction.getEntryPoint().getOffset();
+        try {
+            setUIState(true, "Stop", "Processing...");
+        } catch (Exception e) {
+            Msg.error(this, "Failed to set UI state: " + e.getMessage());
+            return;
+        }
 
-                    // Step 1: Check if node exists, if not extract structure
-                    monitor.setMessage("Checking knowledge graph...");
-                    KnowledgeNode node = graph.getNodeByAddress(address);
+        // Run in background thread (no modal dialog)
+        Thread explainThread = new Thread(() -> {
+            try {
+                String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+                BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+                long address = currentFunction.getEntryPoint().getOffset();
 
-                    if (node == null) {
-                        // Need to index this function first
-                        monitor.setMessage("Indexing function structure...");
-                        StructureExtractor extractor = new StructureExtractor(
-                                plugin.getCurrentProgram(), graph, monitor);
-                        try {
-                            node = extractor.extractFunction(currentFunction);
-                        } finally {
-                            extractor.dispose();
-                        }
-                    }
+                // Step 1: Check if node exists with decompilation, if not extract structure
+                KnowledgeNode node = graph.getNodeByAddress(address);
+                boolean needsExtraction = (node == null) ||
+                    (node.getRawContent() == null || node.getRawContent().isEmpty());
 
-                    // Step 2: Extract security features if not present or incomplete
-                    // Check both security_flags AND network_apis since old data may have flags but no API lists
-                    boolean needsSecurityAnalysis = node != null && (
-                        (node.getSecurityFlags() == null || node.getSecurityFlags().isEmpty()) ||
-                        (node.getNetworkAPIs() == null || node.getNetworkAPIs().isEmpty())
-                    );
-                    if (needsSecurityAnalysis) {
-                        monitor.setMessage("Analyzing security features...");
-                        SecurityFeatureExtractor secExtractor = new SecurityFeatureExtractor(
-                                plugin.getCurrentProgram(), monitor);
-                        SecurityFeatures features = secExtractor.extractFeatures(currentFunction);
-                        if (features != null) {
-                            node.applySecurityFeatures(features);
-                        }
-                    }
+                if (needsExtraction) {
+                    // Need to index/re-index this function
+                    SwingUtilities.invokeLater(() ->
+                        explainTab.setExplanationText("<html><body><i>Indexing function structure...</i></body></html>"));
 
-                    // Step 3: Run semantic analysis if no summary OR stale AND not user-edited
-                    if (node != null) {
-                        boolean needsSummary = (node.getLlmSummary() == null || node.getLlmSummary().isEmpty())
-                                || (node.isStale() && !node.isUserEdited());
+                    StructureExtractor extractor = new StructureExtractor(
+                            plugin.getCurrentProgram(), graph, TaskMonitor.DUMMY);
+                    try {
+                        node = extractor.extractFunction(currentFunction);
 
-                        if (needsSummary) {
-                            monitor.setMessage("Running semantic analysis...");
-
-                            // Show processing message
-                            SwingUtilities.invokeLater(() -> {
-                                explainTab.setExplanationText("<html><body><i>Running semantic analysis...</i></body></html>");
-                            });
-
-                            // Create semantic extractor and summarize
-                            APIProviderConfig providerConfig = GhidrAssistPlugin.getCurrentProviderConfig();
-                            if (providerConfig == null) {
-                                throw new Exception("No LLM provider configured. Please configure an API provider in Analysis Options.");
-                            }
-                            SemanticExtractor semanticExtractor = new SemanticExtractor(
-                                    providerConfig.createProvider(), graph);
-
-                            // Use existing non-streaming summarizeNode method
-                            boolean success = semanticExtractor.summarizeNode(node);
-                            if (success) {
-                                node.setStale(false);
+                        // If still no rawContent, try to get decompilation directly
+                        if (node != null && (node.getRawContent() == null || node.getRawContent().isEmpty())) {
+                            String decompilation = extractor.getDecompiledCode(currentFunction);
+                            if (decompilation != null && !decompilation.isEmpty()) {
+                                node.setRawContent(decompilation);
+                                graph.upsertNode(node);
                             }
                         }
+                    } finally {
+                        extractor.dispose();
+                    }
+                }
 
-                        // Step 4: Save node to graph (summarizeNode already upserts, but ensure we save)
-                        graph.upsertNode(node);
+                // Step 2: Extract security features if not present or incomplete
+                boolean needsSecurityAnalysis = node != null && (
+                    (node.getSecurityFlags() == null || node.getSecurityFlags().isEmpty()) ||
+                    (node.getNetworkAPIs() == null || node.getNetworkAPIs().isEmpty())
+                );
+                if (needsSecurityAnalysis) {
+                    SecurityFeatureExtractor secExtractor = new SecurityFeatureExtractor(
+                            plugin.getCurrentProgram(), TaskMonitor.DUMMY);
+                    SecurityFeatures features = secExtractor.extractFeatures(currentFunction);
+                    if (features != null) {
+                        node.applySecurityFeatures(features);
+                    }
+                }
 
-                        // Step 5: Update display
-                        final KnowledgeNode finalNode = node;
-                        SwingUtilities.invokeLater(() -> {
-                            updateExplainDisplay(finalNode);
-                            setUIState(false, "Explain Function", null);
-                        });
+                // Step 3: Run semantic analysis if no summary OR stale AND not user-edited
+                if (node != null) {
+                    boolean hasExistingSummary = node.getLlmSummary() != null && !node.getLlmSummary().isEmpty();
+                    boolean isStaleAndNotEdited = node.isStale() && !node.isUserEdited();
+                    boolean needsSummary = !hasExistingSummary || isStaleAndNotEdited;
+
+                    Msg.info(this, String.format("Semantic analysis check: hasExistingSummary=%b, isStale=%b, isUserEdited=%b, needsSummary=%b",
+                            hasExistingSummary, node.isStale(), node.isUserEdited(), needsSummary));
+
+                    if (needsSummary) {
+                        // Show processing message
+                        SwingUtilities.invokeLater(() ->
+                            explainTab.setExplanationText("<html><body><i>Running semantic analysis...</i></body></html>"));
+
+                        // Create semantic extractor and summarize
+                        APIProviderConfig providerConfig = GhidrAssistPlugin.getCurrentProviderConfig();
+                        if (providerConfig == null) {
+                            throw new Exception("No LLM provider configured. Please configure an API provider in Analysis Options.");
+                        }
+
+                        Msg.info(this, "Creating SemanticExtractor with provider: " + providerConfig.getType());
+                        SemanticExtractor semanticExtractor = new SemanticExtractor(
+                                providerConfig.createProvider(), graph);
+
+                        // Use existing non-streaming summarizeNode method
+                        Msg.info(this, "Calling summarizeNode...");
+                        boolean success = semanticExtractor.summarizeNode(node);
+                        Msg.info(this, "summarizeNode returned: " + success);
+
+                        if (success) {
+                            node.setStale(false);
+                        } else {
+                            Msg.warn(this, "summarizeNode failed - node rawContent length: " +
+                                    (node.getRawContent() != null ? node.getRawContent().length() : "null"));
+                        }
                     } else {
-                        SwingUtilities.invokeLater(() -> {
-                            explainTab.setExplanationText("Failed to analyze function.");
-                            explainTab.clearSecurityInfo();
-                            setUIState(false, "Explain Function", null);
-                        });
+                        Msg.info(this, "Skipping semantic analysis - using existing summary");
                     }
 
-                } catch (Exception e) {
-                    cancelActiveRenderTask();
+                    // Step 4: Save node to graph
+                    graph.upsertNode(node);
+
+                    // Step 5: Update display
+                    final KnowledgeNode finalNode = node;
                     SwingUtilities.invokeLater(() -> {
-                        Msg.showError(getClass(), explainTab, "Error",
-                            "Failed to explain function: " + e.getMessage());
+                        updateExplainDisplay(finalNode);
+                        setUIState(false, "Explain Function", null);
+                    });
+                } else {
+                    SwingUtilities.invokeLater(() -> {
+                        explainTab.setExplanationText("Failed to analyze function.");
+                        explainTab.clearSecurityInfo();
                         setUIState(false, "Explain Function", null);
                     });
                 }
-            }
-        };
 
-        new TaskLauncher(task, plugin.getTool().getToolFrame());
+            } catch (Exception e) {
+                cancelActiveRenderTask();
+                SwingUtilities.invokeLater(() -> {
+                    Msg.showError(getClass(), explainTab, "Error",
+                        "Failed to explain function: " + e.getMessage());
+                    setUIState(false, "Explain Function", null);
+                });
+            }
+        }, "GhidrAssist-ExplainFunction");
+
+        explainThread.start();
     }
 
     /**
@@ -467,7 +505,7 @@ public class TabController {
             currentOrchestrator = new ghidrassist.agent.react.ReActOrchestrator(
                     ghidrassist.GhidrAssistPlugin.getCurrentProviderConfig(),
                     plugin,
-                    15,  // maxIterations
+                    18,  // maxIterations
                     8000,  // contextSummaryThreshold
                     maxToolRounds  // maxToolRounds per iteration
                 );
@@ -1949,6 +1987,7 @@ public class TabController {
 
     /**
      * Handle reindex button with background progress.
+     * Uses SwingWorker for non-blocking operation.
      */
     public void handleSemanticGraphReindex() {
         if (plugin.getCurrentProgram() == null) {
@@ -1956,85 +1995,107 @@ public class TabController {
             return;
         }
 
-        Task task = new Task("ReIndex Binary", true, true, true) {
-            @Override
-            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
-                try {
-                    ghidrassist.graphrag.GraphRAGService service =
-                            ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
-                    service.setCurrentProgram(plugin.getCurrentProgram());
+        // If already running, cancel it
+        if (reindexWorker != null && !reindexWorker.isDone()) {
+            reindexWorker.requestCancel();
+            return;
+        }
 
-                    // Clear existing graph data before reindexing
-                    monitor.setMessage("Clearing existing graph data...");
-                    service.clearGraph(plugin.getCurrentProgram());
+        // Create and configure the worker
+        reindexWorker = new ReindexWorker(analysisDB, plugin.getCurrentProgram());
 
-                    monitor.setMessage("Indexing binary structure...");
-                    ghidrassist.graphrag.extraction.StructureExtractor.ExtractionResult result =
-                            service.indexStructureSync(plugin.getCurrentProgram(), monitor, false);
+        reindexWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
+        });
 
-                    // Invalidate cache so UI gets a fresh graph instance that loads from DB
-                    analysisDB.invalidateKnowledgeGraphCache(
-                            plugin.getCurrentProgram().getExecutableSHA256());
+        reindexWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setReindexRunning(false);
+            semanticGraphTab.refreshCurrentView();
 
-                    SwingUtilities.invokeLater(() -> {
-                        semanticGraphTab.refreshCurrentView();
-                        String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-                        Long lastIndexed = analysisDB.getKnowledgeGraphLastIndexed(programHash);
-                        if (lastIndexed == null) {
-                            lastIndexed = System.currentTimeMillis();
-                        }
-                        semanticGraphTab.updateStats(
-                                result.functionsExtracted,
-                                result.callEdgesCreated,
-                                0,
-                                formatIndexedTimestamp(lastIndexed)
-                        );
-                        Msg.showInfo(this, null, "Indexing Complete",
-                                String.format("Indexed %d functions, %d edges",
-                                        result.functionsExtracted, result.callEdgesCreated));
-                    });
-                } catch (Exception e) {
-                    Msg.showError(this, null, "Error", "Failed to index binary: " + e.getMessage());
-                }
+            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+            Long lastIndexed = analysisDB.getKnowledgeGraphLastIndexed(programHash);
+            if (lastIndexed == null) {
+                lastIndexed = System.currentTimeMillis();
             }
-        };
-        TaskLauncher.launch(task);
+            semanticGraphTab.updateStats(
+                    result.functionsExtracted,
+                    result.callEdgesCreated,
+                    0,
+                    formatIndexedTimestamp(lastIndexed)
+            );
+            Msg.showInfo(this, null, "Indexing Complete",
+                    String.format("Indexed %d functions, %d edges",
+                            result.functionsExtracted, result.callEdgesCreated));
+        });
+
+        reindexWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setReindexRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
+
+        reindexWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setReindexRunning(false);
+            Msg.showError(this, null, "Error", "Failed to index binary: " + error);
+        });
+
+        // Start the worker
+        semanticGraphTab.setReindexRunning(true);
+        semanticGraphTab.showProgress(0, "Starting reindex...");
+        reindexWorker.execute();
     }
 
     /**
      * Handle refresh names button.
+     * Uses SwingWorker for non-blocking operation.
      */
     public void handleSemanticGraphRefreshNames() {
         if (plugin.getCurrentProgram() == null) {
             return;
         }
 
-        Task task = new Task("Refresh Names", true, true, true) {
-            @Override
-            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
-                try {
-                    // Use the ga_refresh_names tool via SemanticQueryTools
-                    ghidrassist.graphrag.query.SemanticQueryTools tools =
-                            new ghidrassist.graphrag.query.SemanticQueryTools(analysisDB);
-                    tools.setCurrentProgram(plugin.getCurrentProgram());
+        // If already running, cancel it
+        if (refreshNamesWorker != null && !refreshNamesWorker.isDone()) {
+            refreshNamesWorker.requestCancel();
+            return;
+        }
 
-                    com.google.gson.JsonObject args = new com.google.gson.JsonObject();
-                    tools.executeTool("ga_refresh_names", args).join();
+        // Create and configure the worker
+        refreshNamesWorker = new RefreshNamesWorker(analysisDB, plugin.getCurrentProgram());
 
-                    SwingUtilities.invokeLater(() -> {
-                        semanticGraphTab.refreshCurrentView();
-                        Msg.showInfo(this, null, "Names Refreshed", "Function names have been refreshed.");
-                    });
-                } catch (Exception e) {
-                    Msg.showError(this, null, "Error", "Failed to refresh names: " + e.getMessage());
-                }
-            }
-        };
-        TaskLauncher.launch(task);
+        refreshNamesWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showIndeterminateProgress(progress.message);
+        });
+
+        refreshNamesWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setRefreshNamesRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Names Refreshed", "Function names have been refreshed.");
+        });
+
+        refreshNamesWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setRefreshNamesRunning(false);
+        });
+
+        refreshNamesWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setRefreshNamesRunning(false);
+            Msg.showError(this, null, "Error", "Failed to refresh names: " + error);
+        });
+
+        // Start the worker
+        semanticGraphTab.setRefreshNamesRunning(true);
+        semanticGraphTab.showIndeterminateProgress("Refreshing function names...");
+        refreshNamesWorker.execute();
     }
 
     /**
      * Handle semantic analysis button - LLM summarization of stale nodes.
+     * Uses SwingWorker for non-blocking operation.
      */
     public void handleSemanticGraphSemanticAnalysis() {
         if (plugin.getCurrentProgram() == null) {
@@ -2042,60 +2103,49 @@ public class TabController {
             return;
         }
 
-        Task task = new Task("Semantic Analysis", true, true, true) {
-            @Override
-            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
-                try {
-                    ghidrassist.graphrag.GraphRAGService service =
-                            ghidrassist.graphrag.GraphRAGService.getInstance(analysisDB);
-                    service.setCurrentProgram(plugin.getCurrentProgram());
+        // If already running, cancel it
+        if (semanticAnalysisWorker != null && !semanticAnalysisWorker.isDone()) {
+            semanticAnalysisWorker.requestCancel();
+            return;
+        }
 
-                    // Check if LLM provider is configured
-                    if (!service.hasLlmProvider()) {
-                        SwingUtilities.invokeLater(() -> {
-                            Msg.showError(this, null, "No LLM Provider",
-                                    "No LLM provider configured. Please configure an API provider in Analysis Options.");
-                        });
-                        return;
-                    }
+        // Create and configure the worker
+        semanticAnalysisWorker = new SemanticAnalysisWorker(analysisDB, plugin.getCurrentProgram());
 
-                    monitor.setMessage("Running semantic analysis...");
+        semanticAnalysisWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
+        });
 
-                    // Run semantic extraction with progress callback
-                    ghidrassist.graphrag.extraction.SemanticExtractor.ExtractionResult result =
-                            service.summarizeStaleNodes(plugin.getCurrentProgram(), 0,
-                                    (processed, total, summarized, errors) -> {
-                                        monitor.setProgress(processed);
-                                        monitor.setMaximum(total);
-                                        monitor.setMessage(String.format("Summarizing... %d/%d (%d errors)",
-                                                processed, total, errors));
-                                        if (monitor.isCancelled()) {
-                                            throw new RuntimeException("Cancelled");
-                                        }
-                                    });
+        semanticAnalysisWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSemanticAnalysisRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Semantic Analysis Complete",
+                    String.format("Summarized %d nodes (%d errors) in %.1fs",
+                            result.summarized, result.errors, result.elapsedMs / 1000.0));
+        });
 
-                    // Invalidate cache so UI gets fresh data
-                    analysisDB.invalidateKnowledgeGraphCache(
-                            plugin.getCurrentProgram().getExecutableSHA256());
+        semanticAnalysisWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSemanticAnalysisRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
 
-                    SwingUtilities.invokeLater(() -> {
-                        semanticGraphTab.refreshCurrentView();
-                        Msg.showInfo(this, null, "Semantic Analysis Complete",
-                                String.format("Summarized %d nodes (%d errors) in %.1fs",
-                                        result.summarized, result.errors, result.elapsedMs / 1000.0));
-                    });
-                } catch (Exception e) {
-                    if (!e.getMessage().contains("Cancelled")) {
-                        Msg.showError(this, null, "Error", "Failed to run semantic analysis: " + e.getMessage());
-                    }
-                }
-            }
-        };
-        TaskLauncher.launch(task);
+        semanticAnalysisWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSemanticAnalysisRunning(false);
+            Msg.showError(this, null, "Error", "Failed to run semantic analysis: " + error);
+        });
+
+        // Start the worker
+        semanticGraphTab.setSemanticAnalysisRunning(true);
+        semanticGraphTab.showProgress(0, "Starting semantic analysis...");
+        semanticAnalysisWorker.execute();
     }
 
     /**
      * Handle security analysis button - taint analysis + VULNERABLE_VIA edges.
+     * Uses SwingWorker for non-blocking operation.
      */
     public void handleSemanticGraphSecurityAnalysis() {
         if (plugin.getCurrentProgram() == null) {
@@ -2103,56 +2153,98 @@ public class TabController {
             return;
         }
 
-        Task task = new Task("Security Analysis", true, true, true) {
-            @Override
-            public void run(TaskMonitor monitor) throws ghidra.util.exception.CancelledException {
-                try {
-                    String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-                    ghidrassist.graphrag.BinaryKnowledgeGraph graph =
-                            analysisDB.getKnowledgeGraph(programHash);
+        // If already running, cancel it
+        if (securityAnalysisWorker != null && !securityAnalysisWorker.isDone()) {
+            securityAnalysisWorker.requestCancel();
+            return;
+        }
 
-                    if (graph == null) {
-                        SwingUtilities.invokeLater(() -> {
-                            Msg.showError(this, null, "Not Indexed",
-                                    "Binary is not indexed. Please run ReIndex first.");
-                        });
-                        return;
-                    }
+        // Create and configure the worker
+        securityAnalysisWorker = new SecurityAnalysisWorker(analysisDB, plugin.getCurrentProgram());
 
-                    monitor.setMessage("Running taint analysis...");
-                    monitor.setIndeterminate(true);
+        securityAnalysisWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
+        });
 
-                    // Run taint analysis with edge creation
-                    ghidrassist.graphrag.analysis.TaintAnalyzer taintAnalyzer =
-                            new ghidrassist.graphrag.analysis.TaintAnalyzer(graph);
+        securityAnalysisWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSecurityAnalysisRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Security Analysis Complete",
+                    String.format("Found %d taint paths\nCreated %d VULNERABLE_VIA edges",
+                            result.pathCount, result.vulnerableViaEdges));
+        });
 
-                    // Find taint paths and create TAINT_FLOWS_TO edges
-                    java.util.List<ghidrassist.graphrag.analysis.TaintAnalyzer.TaintPath> taintPaths =
-                            taintAnalyzer.findTaintPaths(100, true); // max 100 paths, create edges
+        securityAnalysisWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSecurityAnalysisRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
 
-                    monitor.setMessage("Creating VULNERABLE_VIA edges...");
+        securityAnalysisWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSecurityAnalysisRunning(false);
+            Msg.showError(this, null, "Error", "Failed to run security analysis: " + error);
+        });
 
-                    // Create VULNERABLE_VIA edges from entry points to vulnerable sinks
-                    int vulnerableViaEdges = taintAnalyzer.createVulnerableViaEdges();
+        // Start the worker
+        semanticGraphTab.setSecurityAnalysisRunning(true);
+        semanticGraphTab.showProgress(0, "Starting security analysis...");
+        securityAnalysisWorker.execute();
+    }
 
-                    // Invalidate cache
-                    analysisDB.invalidateKnowledgeGraphCache(programHash);
+    /**
+     * Handle network flow analysis button - trace send/recv data flow paths.
+     * Uses SwingWorker for non-blocking operation.
+     */
+    public void handleSemanticGraphNetworkFlowAnalysis() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
 
-                    final int pathCount = taintPaths.size();
-                    final int vulnEdges = vulnerableViaEdges;
+        // If already running, cancel it
+        if (networkFlowWorker != null && !networkFlowWorker.isDone()) {
+            networkFlowWorker.requestCancel();
+            return;
+        }
 
-                    SwingUtilities.invokeLater(() -> {
-                        semanticGraphTab.refreshCurrentView();
-                        Msg.showInfo(this, null, "Security Analysis Complete",
-                                String.format("Found %d taint paths\nCreated %d VULNERABLE_VIA edges",
-                                        pathCount, vulnEdges));
-                    });
-                } catch (Exception e) {
-                    Msg.showError(this, null, "Error", "Failed to run security analysis: " + e.getMessage());
-                }
-            }
-        };
-        TaskLauncher.launch(task);
+        // Create and configure the worker
+        networkFlowWorker = new NetworkFlowAnalysisWorker(analysisDB, plugin.getCurrentProgram());
+
+        networkFlowWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
+        });
+
+        networkFlowWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setNetworkFlowRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Network Flow Analysis Complete",
+                    String.format("Found %d functions calling send APIs\n" +
+                            "Found %d functions calling recv APIs\n" +
+                            "Created %d NETWORK_SEND_PATH edges\n" +
+                            "Created %d NETWORK_RECV_PATH edges",
+                            result.sendFunctionsFound, result.recvFunctionsFound,
+                            result.sendPathEdges, result.recvPathEdges));
+        });
+
+        networkFlowWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setNetworkFlowRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
+
+        networkFlowWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setNetworkFlowRunning(false);
+            Msg.showError(this, null, "Error", "Failed to run network flow analysis: " + error);
+        });
+
+        // Start the worker
+        semanticGraphTab.setNetworkFlowRunning(true);
+        semanticGraphTab.showProgress(0, "Starting network flow analysis...");
+        networkFlowWorker.execute();
     }
 
     /**
@@ -2477,6 +2569,7 @@ public class TabController {
                 .replace("\r", "\\r")
                 .replace("\t", "\\t");
     }
+
 
     // ==== Cleanup ====
 

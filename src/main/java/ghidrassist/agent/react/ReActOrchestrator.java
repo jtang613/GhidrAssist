@@ -58,7 +58,7 @@ public class ReActOrchestrator {
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
 
     public ReActOrchestrator(APIProviderConfig providerConfig, GhidrAssistPlugin plugin) {
-        this(providerConfig, plugin, 15, 8000, 10);
+        this(providerConfig, plugin, 18, 8000, 10);
     }
 
     public ReActOrchestrator(

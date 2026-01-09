@@ -78,18 +78,21 @@ public class LiteLLMProvider extends OpenAIProvider {
      * Checks both model name patterns AND URL patterns.
      *
      * Detection sources:
-     * 1. Model name prefix "bedrock/"
-     * 2. Model name contains "bedrock"
-     * 3. URL contains AWS/Bedrock patterns (amazonaws.com, bedrock, etc.)
-     * 4. Common Bedrock model aliases (claude-sonnet-4-5, claude-opus-4, etc.)
+     * 1. Model name prefix "bedrock/" (LiteLLM standard format)
+     * 2. Model name prefix "bedrock-" (alternative format like "bedrock-claude-opus-4-5")
+     * 3. Model name contains "bedrock" anywhere
+     * 4. URL contains AWS/Bedrock patterns (amazonaws.com, bedrock, etc.)
+     * 5. Common Bedrock model aliases (claude-sonnet-4-5, claude-opus-4, etc.)
      */
     private boolean detectIsBedrock(String model, String url) {
         if (model == null) return false;
         String lowerModel = model.toLowerCase();
         String lowerUrl = url != null ? url.toLowerCase() : "";
 
-        // Direct model name detection
-        if (lowerModel.startsWith("bedrock/") || lowerModel.contains("bedrock")) {
+        // Direct model name detection - both slash and hyphen prefixes
+        if (lowerModel.startsWith("bedrock/") || lowerModel.startsWith("bedrock-") ||
+            lowerModel.contains("bedrock")) {
+            Msg.info(this, "LiteLLM: Detected Bedrock model from name: " + model);
             return true;
         }
 
@@ -131,6 +134,7 @@ public class LiteLLMProvider extends OpenAIProvider {
      *
      * Examples:
      * - bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0 -> anthropic
+     * - bedrock-claude-opus-4-5 -> anthropic (hyphen prefix format)
      * - bedrock/amazon.nova-pro-v1:0 -> amazon
      * - bedrock/meta.llama3-70b-instruct-v1:0 -> meta
      * - claude-sonnet-4-5 -> anthropic (alias)
@@ -141,7 +145,7 @@ public class LiteLLMProvider extends OpenAIProvider {
         if (model == null) return "unknown";
         String lowerModel = model.toLowerCase();
 
-        // Bedrock models: bedrock/<provider>.<model-name>
+        // Bedrock models with slash format: bedrock/<provider>.<model-name>
         if (lowerModel.startsWith("bedrock/")) {
             if (lowerModel.contains("anthropic") || lowerModel.contains("claude")) {
                 return "anthropic";
@@ -154,6 +158,20 @@ public class LiteLLMProvider extends OpenAIProvider {
             } else if (lowerModel.contains("ai21")) {
                 return "ai21";
             } else if (lowerModel.contains("mistral")) {
+                return "mistral";
+            }
+        }
+
+        // Bedrock models with hyphen format: bedrock-<model-name>
+        if (lowerModel.startsWith("bedrock-")) {
+            String modelPart = lowerModel.substring(8); // Remove "bedrock-" prefix
+            if (modelPart.contains("claude") || modelPart.contains("anthropic")) {
+                return "anthropic";
+            } else if (modelPart.contains("nova") || modelPart.contains("titan") || modelPart.contains("amazon")) {
+                return "amazon";
+            } else if (modelPart.contains("llama") || modelPart.contains("meta")) {
+                return "meta";
+            } else if (modelPart.contains("mistral")) {
                 return "mistral";
             }
         }
@@ -244,12 +262,13 @@ public class LiteLLMProvider extends OpenAIProvider {
         boolean hasThinking = message.getThinkingContent() != null ||
                               message.getThinkingSignature() != null;
 
-        // For Anthropic models with thinking data, format as content blocks
-        if (useAnthropicThinkingFormat && hasThinking && "assistant".equals(message.getRole())) {
+        // For Anthropic models with thinking enabled AND assistant messages,
+        // we MUST include thinking blocks (either real or redacted)
+        if (useAnthropicThinkingFormat && "assistant".equals(message.getRole())) {
             JsonArray contentBlocks = new JsonArray();
 
-            // Add thinking block first (Anthropic requirement)
-            if (message.getThinkingContent() != null) {
+            if (hasThinking && message.getThinkingContent() != null) {
+                // Add actual thinking block first (Anthropic requirement)
                 JsonObject thinkingBlock = new JsonObject();
                 thinkingBlock.addProperty("type", "thinking");
                 thinkingBlock.addProperty("thinking", message.getThinkingContent());
@@ -257,6 +276,15 @@ public class LiteLLMProvider extends OpenAIProvider {
                     thinkingBlock.addProperty("signature", message.getThinkingSignature());
                 }
                 contentBlocks.add(thinkingBlock);
+            } else {
+                // No thinking content stored - add redacted_thinking block
+                // This is required by Bedrock when thinking is enabled globally
+                // "When thinking is enabled, a final assistant message must start with a thinking block"
+                JsonObject redactedBlock = new JsonObject();
+                redactedBlock.addProperty("type", "redacted_thinking");
+                redactedBlock.addProperty("data", ""); // Empty redacted block
+                contentBlocks.add(redactedBlock);
+                Msg.debug(this, "LiteLLM: Added redacted_thinking block for historical assistant message");
             }
 
             // Add text content block
@@ -270,7 +298,7 @@ public class LiteLLMProvider extends OpenAIProvider {
             messageObj.add("content", contentBlocks);
         } else {
             // Standard OpenAI format - simple string content
-            // This is used for ALL non-Anthropic models and Anthropic models without thinking
+            // This is used for ALL non-Anthropic models and user/system messages
             if (message.getContent() != null) {
                 messageObj.addProperty("content", message.getContent());
             }

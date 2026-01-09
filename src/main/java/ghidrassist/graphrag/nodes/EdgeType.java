@@ -102,6 +102,20 @@ public enum EdgeType {
      */
     CALLS_VULNERABLE("security", "Calls vulnerable", true),
 
+    /**
+     * Network data flow - path from entry point to send function.
+     * Shows how data reaches network output (send, WSASend, etc.).
+     * Directed from entry point/caller to the function that sends data.
+     */
+    NETWORK_SEND_PATH("security", "Network send path", true),
+
+    /**
+     * Network data flow - path from recv function to its consumers.
+     * Shows where received network data flows (recv, WSARecv, etc.).
+     * Directed from the function that receives data to its callers.
+     */
+    NETWORK_RECV_PATH("security", "Network recv path", true),
+
     // ========================================
     // COMMUNITY edges (computed)
     // ========================================

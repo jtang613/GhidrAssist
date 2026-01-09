@@ -14,6 +14,7 @@ import org.jgrapht.traverse.BreadthFirstIterator;
 import java.sql.*;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Core storage layer for the Binary Knowledge Graph.
@@ -40,6 +41,48 @@ public class BinaryKnowledgeGraph {
     // FTS repair attempted flag to prevent infinite retry loops
     private boolean ftsRepairAttempted = false;
 
+    // Batch insert support for performance
+    private static final int BATCH_SIZE = 200;
+    private final List<KnowledgeNode> pendingNodes = Collections.synchronizedList(new ArrayList<>());
+    private final List<PendingEdge> pendingEdges = Collections.synchronizedList(new ArrayList<>());
+    private final Object batchLock = new Object();
+
+    // Node caches for performance - populated on demand
+    private final Map<String, KnowledgeNode> nodeCache = new ConcurrentHashMap<>();
+    private final Map<NodeType, List<KnowledgeNode>> nodesByTypeCache = new ConcurrentHashMap<>();
+
+    // Pending edge holder
+    private static class PendingEdge {
+        final String sourceId;
+        final String targetId;
+        final EdgeType type;
+        final double weight;
+        final String metadata;
+
+        PendingEdge(String sourceId, String targetId, EdgeType type, double weight, String metadata) {
+            this.sourceId = sourceId;
+            this.targetId = targetId;
+            this.type = type;
+            this.weight = weight;
+            this.metadata = metadata;
+        }
+    }
+
+    // Pending community member holder
+    private final List<PendingCommunityMember> pendingCommunityMembers = Collections.synchronizedList(new ArrayList<>());
+
+    private static class PendingCommunityMember {
+        final String communityId;
+        final String nodeId;
+        final double score;
+
+        PendingCommunityMember(String communityId, String nodeId, double score) {
+            this.communityId = communityId;
+            this.nodeId = nodeId;
+            this.score = score;
+        }
+    }
+
     /**
      * Create a BinaryKnowledgeGraph for a specific binary.
      *
@@ -61,8 +104,19 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Get a node by its unique ID.
+     * Uses cache for performance - nodes are cached on first access.
      */
     public KnowledgeNode getNode(String id) {
+        if (id == null) {
+            return null;
+        }
+        return nodeCache.computeIfAbsent(id, this::fetchNodeFromDB);
+    }
+
+    /**
+     * Fetch a node from the database (internal method for cache miss).
+     */
+    private KnowledgeNode fetchNodeFromDB(String id) {
         String sql = "SELECT * FROM graph_nodes WHERE id = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, id);
@@ -115,8 +169,14 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Get all nodes of a specific type for this binary.
+     * Uses cache for performance - results are cached after first query.
      */
     public List<KnowledgeNode> getNodesByType(NodeType type) {
+        List<KnowledgeNode> cached = nodesByTypeCache.get(type);
+        if (cached != null) {
+            return new ArrayList<>(cached); // Return copy to prevent external modification
+        }
+
         List<KnowledgeNode> nodes = new ArrayList<>();
         String sql = "SELECT * FROM graph_nodes WHERE binary_id = ? AND type = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -124,12 +184,129 @@ public class BinaryKnowledgeGraph {
             stmt.setString(2, type.name());
             ResultSet rs = stmt.executeQuery();
             while (rs.next()) {
-                nodes.add(resultSetToNode(rs));
+                KnowledgeNode node = resultSetToNode(rs);
+                nodes.add(node);
+                // Also populate the individual node cache
+                nodeCache.put(node.getId(), node);
             }
         } catch (SQLException e) {
             Msg.error(this, "Failed to get nodes by type: " + e.getMessage(), e);
         }
-        return nodes;
+
+        // Cache the result
+        nodesByTypeCache.put(type, nodes);
+        return new ArrayList<>(nodes); // Return copy
+    }
+
+    /**
+     * Bulk fetch nodes by IDs - single query instead of N separate queries.
+     * This is a performance optimization for operations that need many nodes.
+     * Uses cache for performance - checks cache first, only fetches uncached nodes from DB.
+     *
+     * @param nodeIds Collection of node IDs to fetch
+     * @return Map of node ID to KnowledgeNode (missing nodes are simply not in the map)
+     */
+    public Map<String, KnowledgeNode> getNodes(Collection<String> nodeIds) {
+        Map<String, KnowledgeNode> result = new HashMap<>();
+        if (nodeIds == null || nodeIds.isEmpty()) {
+            return result;
+        }
+
+        // Check cache first
+        List<String> uncachedIds = new ArrayList<>();
+        for (String id : nodeIds) {
+            KnowledgeNode cached = nodeCache.get(id);
+            if (cached != null) {
+                result.put(id, cached);
+            } else {
+                uncachedIds.add(id);
+            }
+        }
+
+        // If all nodes were cached, we're done
+        if (uncachedIds.isEmpty()) {
+            return result;
+        }
+
+        // SQLite has a limit on the number of parameters, so we batch in chunks
+        int batchSize = 500; // SQLite default SQLITE_MAX_VARIABLE_NUMBER is 999
+
+        for (int i = 0; i < uncachedIds.size(); i += batchSize) {
+            List<String> batch = uncachedIds.subList(i, Math.min(i + batchSize, uncachedIds.size()));
+            String placeholders = String.join(",", Collections.nCopies(batch.size(), "?"));
+            String sql = "SELECT * FROM graph_nodes WHERE id IN (" + placeholders + ")";
+
+            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                int idx = 1;
+                for (String id : batch) {
+                    stmt.setString(idx++, id);
+                }
+                ResultSet rs = stmt.executeQuery();
+                while (rs.next()) {
+                    KnowledgeNode node = resultSetToNode(rs);
+                    result.put(node.getId(), node);
+                    // Populate cache
+                    nodeCache.put(node.getId(), node);
+                }
+            } catch (SQLException e) {
+                Msg.error(this, "Failed to batch get nodes: " + e.getMessage(), e);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Clear all node caches.
+     * Call this after bulk operations like reindexing to ensure fresh data.
+     */
+    public void invalidateNodeCache() {
+        nodeCache.clear();
+        nodesByTypeCache.clear();
+    }
+
+    /**
+     * Bulk fetch all outgoing edges for a set of source nodes - single query.
+     * This is a performance optimization to avoid N+1 queries when exporting graphs.
+     *
+     * @param sourceNodeIds Collection of source node IDs
+     * @return List of all edges originating from the given nodes
+     */
+    public List<GraphEdge> getEdgesForNodes(Collection<String> sourceNodeIds) {
+        List<GraphEdge> edges = new ArrayList<>();
+        if (sourceNodeIds == null || sourceNodeIds.isEmpty()) {
+            return edges;
+        }
+
+        // Batch in chunks for large node sets
+        List<String> idList = new ArrayList<>(sourceNodeIds);
+        int batchSize = 500;
+
+        for (int i = 0; i < idList.size(); i += batchSize) {
+            List<String> batch = idList.subList(i, Math.min(i + batchSize, idList.size()));
+            String placeholders = String.join(",", Collections.nCopies(batch.size(), "?"));
+            String sql = "SELECT * FROM graph_edges WHERE source_id IN (" + placeholders + ")";
+
+            try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                int idx = 1;
+                for (String id : batch) {
+                    stmt.setString(idx++, id);
+                }
+                ResultSet rs = stmt.executeQuery();
+                while (rs.next()) {
+                    edges.add(new GraphEdge(
+                            rs.getString("id"),
+                            rs.getString("source_id"),
+                            rs.getString("target_id"),
+                            EdgeType.fromString(rs.getString("type")),
+                            rs.getDouble("weight"),
+                            rs.getString("metadata")
+                    ));
+                }
+            } catch (SQLException e) {
+                Msg.error(this, "Failed to batch get edges: " + e.getMessage(), e);
+            }
+        }
+        return edges;
     }
 
     /**
@@ -209,6 +386,11 @@ public class BinaryKnowledgeGraph {
                 memoryGraph.addVertex(node.getId());
                 nodeCount++;
             }
+
+            // Update node cache
+            nodeCache.put(node.getId(), node);
+            // Invalidate type cache since we may have added/modified a node
+            nodesByTypeCache.remove(node.getType());
         } catch (SQLException e) {
             // Check if this is an FTS corruption error
             if (!isRetry && !ftsRepairAttempted && AnalysisDB.isFtsCorruptionError(e)) {
@@ -231,6 +413,10 @@ public class BinaryKnowledgeGraph {
      * Delete a node and all its edges.
      */
     public boolean deleteNode(String id) {
+        // Get node type before deletion for cache invalidation
+        KnowledgeNode existingNode = nodeCache.get(id);
+        NodeType nodeType = existingNode != null ? existingNode.getType() : null;
+
         // Edges will be deleted via CASCADE
         String sql = "DELETE FROM graph_nodes WHERE id = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
@@ -239,6 +425,12 @@ public class BinaryKnowledgeGraph {
             if (affected > 0) {
                 memoryGraph.removeVertex(id);
                 nodeCount--;
+
+                // Remove from caches
+                nodeCache.remove(id);
+                if (nodeType != null) {
+                    nodesByTypeCache.remove(nodeType);
+                }
                 return true;
             }
         } catch (SQLException e) {
@@ -297,6 +489,299 @@ public class BinaryKnowledgeGraph {
         } catch (SQLException e) {
             Msg.error(this, "Failed to add edge: " + e.getMessage(), e);
         }
+    }
+
+    // ========================================
+    // Batch Insert Operations (for performance)
+    // ========================================
+
+    /**
+     * Queue a node for batch insertion.
+     * Automatically flushes when batch size is reached.
+     */
+    public void queueNodeForBatch(KnowledgeNode node) {
+        pendingNodes.add(node);
+        if (pendingNodes.size() >= BATCH_SIZE) {
+            flushNodeBatch();
+        }
+    }
+
+    /**
+     * Queue an edge for batch insertion.
+     * Automatically flushes when batch size is reached.
+     */
+    public void queueEdgeForBatch(String sourceId, String targetId, EdgeType type) {
+        queueEdgeForBatch(sourceId, targetId, type, 1.0, null);
+    }
+
+    /**
+     * Queue an edge with weight and metadata for batch insertion.
+     */
+    public void queueEdgeForBatch(String sourceId, String targetId, EdgeType type, double weight, String metadata) {
+        pendingEdges.add(new PendingEdge(sourceId, targetId, type, weight, metadata));
+        if (pendingEdges.size() >= BATCH_SIZE) {
+            flushEdgeBatch();
+        }
+    }
+
+    /**
+     * Flush all pending nodes to the database.
+     */
+    public void flushNodeBatch() {
+        List<KnowledgeNode> toInsert;
+        synchronized (batchLock) {
+            if (pendingNodes.isEmpty()) {
+                return;
+            }
+            toInsert = new ArrayList<>(pendingNodes);
+            pendingNodes.clear();
+        }
+
+        String sql = "INSERT INTO graph_nodes "
+                + "(id, type, address, binary_id, name, raw_content, llm_summary, confidence, "
+                + "embedding, security_flags, network_apis, file_io_apis, ip_addresses, urls, "
+                + "file_paths, domains, registry_keys, risk_level, activity_profile, analysis_depth, "
+                + "created_at, updated_at, is_stale, user_edited) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON CONFLICT(id) DO UPDATE SET "
+                + "type = excluded.type, address = excluded.address, name = excluded.name, "
+                + "raw_content = excluded.raw_content, llm_summary = excluded.llm_summary, "
+                + "confidence = excluded.confidence, embedding = excluded.embedding, "
+                + "security_flags = excluded.security_flags, "
+                + "network_apis = excluded.network_apis, file_io_apis = excluded.file_io_apis, "
+                + "ip_addresses = excluded.ip_addresses, urls = excluded.urls, "
+                + "file_paths = excluded.file_paths, domains = excluded.domains, "
+                + "registry_keys = excluded.registry_keys, "
+                + "risk_level = excluded.risk_level, activity_profile = excluded.activity_profile, "
+                + "analysis_depth = excluded.analysis_depth, "
+                + "updated_at = excluded.updated_at, is_stale = excluded.is_stale, "
+                + "user_edited = excluded.user_edited";
+
+        synchronized (batchLock) {
+            try {
+                boolean originalAutoCommit = connection.getAutoCommit();
+                connection.setAutoCommit(false);
+
+                try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                    for (KnowledgeNode node : toInsert) {
+                        stmt.setString(1, node.getId());
+                        stmt.setString(2, node.getType().name());
+                        if (node.getAddress() != null) {
+                            stmt.setLong(3, node.getAddress());
+                        } else {
+                            stmt.setNull(3, Types.INTEGER);
+                        }
+                        stmt.setString(4, node.getBinaryId());
+                        stmt.setString(5, node.getName());
+                        stmt.setString(6, node.getRawContent());
+                        stmt.setString(7, node.getLlmSummary());
+                        stmt.setFloat(8, node.getConfidence());
+                        stmt.setBytes(9, node.serializeEmbedding());
+                        stmt.setString(10, node.serializeSecurityFlags());
+                        stmt.setString(11, node.serializeNetworkAPIs());
+                        stmt.setString(12, node.serializeFileIOAPIs());
+                        stmt.setString(13, node.serializeIPAddresses());
+                        stmt.setString(14, node.serializeURLs());
+                        stmt.setString(15, node.serializeFilePaths());
+                        stmt.setString(16, node.serializeDomains());
+                        stmt.setString(17, node.serializeRegistryKeys());
+                        stmt.setString(18, node.getRiskLevel());
+                        stmt.setString(19, node.getActivityProfile());
+                        stmt.setInt(20, node.getAnalysisDepth());
+                        stmt.setLong(21, node.getCreatedAt().toEpochMilli());
+                        stmt.setLong(22, node.getUpdatedAt().toEpochMilli());
+                        stmt.setInt(23, node.isStale() ? 1 : 0);
+                        stmt.setInt(24, node.isUserEdited() ? 1 : 0);
+                        stmt.addBatch();
+
+                        // Add to in-memory graph
+                        if (!memoryGraph.containsVertex(node.getId())) {
+                            memoryGraph.addVertex(node.getId());
+                            nodeCount++;
+                        }
+                    }
+
+                    stmt.executeBatch();
+                    connection.commit();
+                } catch (SQLException e) {
+                    connection.rollback();
+                    Msg.error(this, "Failed to batch insert nodes: " + e.getMessage(), e);
+                } finally {
+                    connection.setAutoCommit(originalAutoCommit);
+                }
+            } catch (SQLException e) {
+                Msg.error(this, "Failed to manage transaction for batch insert: " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * Flush all pending edges to the database.
+     */
+    public void flushEdgeBatch() {
+        List<PendingEdge> toInsert;
+        synchronized (batchLock) {
+            if (pendingEdges.isEmpty()) {
+                return;
+            }
+            toInsert = new ArrayList<>(pendingEdges);
+            pendingEdges.clear();
+        }
+
+        // First, filter out edges that already exist
+        Set<String> existingEdgeKeys = new HashSet<>();
+        String checkSql = "SELECT source_id, target_id, type FROM graph_edges WHERE source_id IN (" +
+                String.join(",", Collections.nCopies(toInsert.size(), "?")) + ")";
+
+        try (PreparedStatement checkStmt = connection.prepareStatement(checkSql)) {
+            Set<String> sourceIds = new HashSet<>();
+            for (PendingEdge edge : toInsert) {
+                sourceIds.add(edge.sourceId);
+            }
+            int idx = 1;
+            for (String sourceId : sourceIds) {
+                checkStmt.setString(idx++, sourceId);
+            }
+            // Pad remaining parameters if sourceIds < toInsert.size()
+            for (int i = idx; i <= toInsert.size(); i++) {
+                checkStmt.setString(i, "");
+            }
+
+            ResultSet rs = checkStmt.executeQuery();
+            while (rs.next()) {
+                String key = rs.getString("source_id") + "|" + rs.getString("target_id") + "|" + rs.getString("type");
+                existingEdgeKeys.add(key);
+            }
+        } catch (SQLException e) {
+            Msg.debug(this, "Failed to check existing edges: " + e.getMessage());
+        }
+
+        // Filter out existing edges
+        List<PendingEdge> newEdges = new ArrayList<>();
+        for (PendingEdge edge : toInsert) {
+            String key = edge.sourceId + "|" + edge.targetId + "|" + edge.type.name();
+            if (!existingEdgeKeys.contains(key)) {
+                newEdges.add(edge);
+            }
+        }
+
+        if (newEdges.isEmpty()) {
+            return;
+        }
+
+        String sql = "INSERT INTO graph_edges (id, source_id, target_id, type, weight, metadata, created_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?)";
+
+        synchronized (batchLock) {
+            try {
+                boolean originalAutoCommit = connection.getAutoCommit();
+                connection.setAutoCommit(false);
+
+                try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                    long now = Instant.now().toEpochMilli();
+
+                    for (PendingEdge edge : newEdges) {
+                        stmt.setString(1, UUID.randomUUID().toString());
+                        stmt.setString(2, edge.sourceId);
+                        stmt.setString(3, edge.targetId);
+                        stmt.setString(4, edge.type.name());
+                        stmt.setDouble(5, edge.weight);
+                        stmt.setString(6, edge.metadata);
+                        stmt.setLong(7, now);
+                        stmt.addBatch();
+
+                        // Add to in-memory graph
+                        if (!memoryGraph.containsVertex(edge.sourceId)) {
+                            memoryGraph.addVertex(edge.sourceId);
+                        }
+                        if (!memoryGraph.containsVertex(edge.targetId)) {
+                            memoryGraph.addVertex(edge.targetId);
+                        }
+                        LabeledEdge memEdge = new LabeledEdge(edge.type);
+                        memoryGraph.addEdge(edge.sourceId, edge.targetId, memEdge);
+                        edgeCount++;
+                    }
+
+                    stmt.executeBatch();
+                    connection.commit();
+                } catch (SQLException e) {
+                    connection.rollback();
+                    Msg.error(this, "Failed to batch insert edges: " + e.getMessage(), e);
+                } finally {
+                    connection.setAutoCommit(originalAutoCommit);
+                }
+            } catch (SQLException e) {
+                Msg.error(this, "Failed to manage transaction for edge batch insert: " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * Queue a community member for batch insertion.
+     */
+    public void queueCommunityMemberForBatch(String communityId, String nodeId, double score) {
+        pendingCommunityMembers.add(new PendingCommunityMember(communityId, nodeId, score));
+        if (pendingCommunityMembers.size() >= BATCH_SIZE) {
+            flushCommunityMemberBatch();
+        }
+    }
+
+    /**
+     * Flush all pending community members to the database.
+     */
+    public void flushCommunityMemberBatch() {
+        List<PendingCommunityMember> toInsert;
+        synchronized (batchLock) {
+            if (pendingCommunityMembers.isEmpty()) {
+                return;
+            }
+            toInsert = new ArrayList<>(pendingCommunityMembers);
+            pendingCommunityMembers.clear();
+        }
+
+        String sql = "INSERT OR REPLACE INTO community_members (community_id, node_id, membership_score) VALUES (?, ?, ?)";
+
+        synchronized (batchLock) {
+            try {
+                boolean originalAutoCommit = connection.getAutoCommit();
+                connection.setAutoCommit(false);
+
+                try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+                    for (PendingCommunityMember member : toInsert) {
+                        stmt.setString(1, member.communityId);
+                        stmt.setString(2, member.nodeId);
+                        stmt.setDouble(3, member.score);
+                        stmt.addBatch();
+                    }
+                    stmt.executeBatch();
+                    connection.commit();
+                } catch (SQLException e) {
+                    connection.rollback();
+                    Msg.error(this, "Failed to batch insert community members: " + e.getMessage(), e);
+                } finally {
+                    connection.setAutoCommit(originalAutoCommit);
+                }
+            } catch (SQLException e) {
+                Msg.error(this, "Failed to manage transaction for community member batch insert: " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * Flush all pending batches (nodes, edges, and community members).
+     * Call this at the end of batch operations to ensure all data is written.
+     */
+    public void flushAllBatches() {
+        flushNodeBatch();
+        flushEdgeBatch();
+        flushCommunityMemberBatch();
+    }
+
+    /**
+     * Get count of pending items in batches.
+     */
+    public int getPendingBatchCount() {
+        return pendingNodes.size() + pendingEdges.size() + pendingCommunityMembers.size();
     }
 
     /**
@@ -404,15 +889,30 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Get neighboring nodes within N hops.
+     * @deprecated Use {@link #getNeighborsBatch(String, int)} for better performance
      */
+    @Deprecated
     public List<KnowledgeNode> getNeighbors(String nodeId, int maxDepth) {
-        Set<String> visited = new HashSet<>();
-        List<KnowledgeNode> neighbors = new ArrayList<>();
+        // Delegate to batch version for better performance
+        return getNeighborsBatch(nodeId, maxDepth);
+    }
 
+    /**
+     * Get neighboring nodes within N hops using batch loading.
+     * This method first collects all neighbor IDs from the in-memory graph,
+     * then fetches all nodes in a single database query.
+     *
+     * @param nodeId   The starting node ID
+     * @param maxDepth Maximum number of hops from the starting node
+     * @return List of neighboring nodes within the specified depth
+     */
+    public List<KnowledgeNode> getNeighborsBatch(String nodeId, int maxDepth) {
         if (!memoryGraph.containsVertex(nodeId)) {
-            return neighbors;
+            return new ArrayList<>();
         }
 
+        // Phase 1: Collect all neighbor IDs using in-memory graph (fast)
+        Set<String> neighborIds = new HashSet<>();
         BreadthFirstIterator<String, LabeledEdge> iterator =
                 new BreadthFirstIterator<>(memoryGraph, nodeId);
 
@@ -431,62 +931,68 @@ public class BinaryKnowledgeGraph {
                 break;
             }
 
-            if (!visited.contains(vertexId)) {
-                visited.add(vertexId);
-                KnowledgeNode node = getNode(vertexId);
-                if (node != null) {
-                    neighbors.add(node);
-                }
-            }
+            neighborIds.add(vertexId);
         }
 
-        return neighbors;
+        // Phase 2: Batch fetch all nodes in a single query
+        Map<String, KnowledgeNode> nodeMap = getNodes(neighborIds);
+        return new ArrayList<>(nodeMap.values());
     }
 
     /**
      * Get all callers of a function (nodes that have CALLS edge to this function).
+     * Uses in-memory graph for topology (no DB hit) + batch fetch for node data.
      */
     public List<KnowledgeNode> getCallers(String functionId) {
-        List<KnowledgeNode> callers = new ArrayList<>();
-        String sql = "SELECT source_id FROM graph_edges WHERE target_id = ? AND type = ?";
-
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, functionId);
-            stmt.setString(2, EdgeType.CALLS.name());
-            ResultSet rs = stmt.executeQuery();
-            while (rs.next()) {
-                KnowledgeNode caller = getNode(rs.getString("source_id"));
-                if (caller != null) {
-                    callers.add(caller);
-                }
-            }
-        } catch (SQLException e) {
-            Msg.error(this, "Failed to get callers: " + e.getMessage(), e);
+        if (!memoryGraph.containsVertex(functionId)) {
+            return new ArrayList<>();
         }
-        return callers;
+
+        // Use in-memory graph for topology (no DB hit)
+        Set<LabeledEdge> inEdges = memoryGraph.incomingEdgesOf(functionId);
+
+        List<String> callerIds = new ArrayList<>();
+        for (LabeledEdge edge : inEdges) {
+            if (edge.getType() == EdgeType.CALLS) {
+                callerIds.add(memoryGraph.getEdgeSource(edge));
+            }
+        }
+
+        if (callerIds.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        // Batch fetch all caller nodes at once (uses cache)
+        Map<String, KnowledgeNode> nodeMap = getNodes(callerIds);
+        return new ArrayList<>(nodeMap.values());
     }
 
     /**
      * Get all callees of a function (nodes this function CALLS).
+     * Uses in-memory graph for topology (no DB hit) + batch fetch for node data.
      */
     public List<KnowledgeNode> getCallees(String functionId) {
-        List<KnowledgeNode> callees = new ArrayList<>();
-        String sql = "SELECT target_id FROM graph_edges WHERE source_id = ? AND type = ?";
-
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, functionId);
-            stmt.setString(2, EdgeType.CALLS.name());
-            ResultSet rs = stmt.executeQuery();
-            while (rs.next()) {
-                KnowledgeNode callee = getNode(rs.getString("target_id"));
-                if (callee != null) {
-                    callees.add(callee);
-                }
-            }
-        } catch (SQLException e) {
-            Msg.error(this, "Failed to get callees: " + e.getMessage(), e);
+        if (!memoryGraph.containsVertex(functionId)) {
+            return new ArrayList<>();
         }
-        return callees;
+
+        // Use in-memory graph for topology (no DB hit)
+        Set<LabeledEdge> outEdges = memoryGraph.outgoingEdgesOf(functionId);
+
+        List<String> calleeIds = new ArrayList<>();
+        for (LabeledEdge edge : outEdges) {
+            if (edge.getType() == EdgeType.CALLS) {
+                calleeIds.add(memoryGraph.getEdgeTarget(edge));
+            }
+        }
+
+        if (calleeIds.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        // Batch fetch all callee nodes at once (uses cache)
+        Map<String, KnowledgeNode> nodeMap = getNodes(calleeIds);
+        return new ArrayList<>(nodeMap.values());
     }
 
     /**

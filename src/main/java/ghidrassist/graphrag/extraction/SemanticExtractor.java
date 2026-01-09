@@ -127,28 +127,103 @@ public class SemanticExtractor {
 
     /**
      * Summarize a single node on-demand.
+     * For FUNCTION nodes, uses the full detailed prompt with context.
      */
     public boolean summarizeNode(KnowledgeNode node) {
-        if (node == null || node.getRawContent() == null || node.getRawContent().isEmpty()) {
+        Msg.info(this, "summarizeNode called for: " + (node != null ? node.getName() : "null"));
+
+        if (node == null) {
+            Msg.warn(this, "summarizeNode: node is null");
+            return false;
+        }
+        if (node.getRawContent() == null || node.getRawContent().isEmpty()) {
+            Msg.warn(this, "summarizeNode: rawContent is null or empty for node " + node.getName());
             return false;
         }
 
+        Msg.info(this, "summarizeNode: rawContent length = " + node.getRawContent().length());
+
         try {
-            // Generate summary
-            String summary = generateSummary(node);
-            if (summary != null && !summary.isEmpty()) {
-                node.setLlmSummary(summary);
-                node.setConfidence(0.8f); // Default confidence
+            String response;
+
+            // For FUNCTION nodes, use the full detailed prompt with context
+            if (node.getType() == NodeType.FUNCTION) {
+                // Get context (callers/callees) if graph is available
+                List<String> callers = new ArrayList<>();
+                List<String> callees = new ArrayList<>();
+
+                if (graph != null) {
+                    callers = graph.getCallers(node.getId()).stream()
+                            .map(n -> n.getName() != null ? n.getName() : "unknown")
+                            .limit(5)
+                            .collect(Collectors.toList());
+
+                    callees = graph.getCallees(node.getId()).stream()
+                            .map(n -> n.getName() != null ? n.getName() : "unknown")
+                            .limit(5)
+                            .collect(Collectors.toList());
+                }
+
+                // Generate full detailed prompt
+                String prompt = ExtractionPrompts.functionSummaryPrompt(
+                        node.getName() != null ? node.getName() : "unknown",
+                        node.getRawContent(),
+                        callers,
+                        callees
+                );
+
+                Msg.info(this, "summarizeNode: calling LLM with detailed function prompt...");
+                response = callLLM(prompt);
+
+                if (response != null && !response.isEmpty()) {
+                    node.setLlmSummary(response);
+                    node.setConfidence(0.85f);
+
+                    // Extract security flags if present (supports both old and new format)
+                    String security = ExtractionPrompts.extractSecurity(response);
+                    if (security == null) {
+                        security = ExtractionPrompts.extractSecurityNotes(response);
+                    }
+                    if (security != null && !security.toLowerCase().contains("none") &&
+                        !security.toLowerCase().contains("no security") &&
+                        !security.toLowerCase().contains("not applicable")) {
+                        node.addSecurityFlag("LLM_FLAGGED");
+                    }
+
+                    // Extract and store category if present
+                    String category = ExtractionPrompts.extractCategory(response);
+                    if (category != null && !category.isEmpty()) {
+                        node.addSecurityFlag("CATEGORY_" + category.toUpperCase().replace(" ", "_"));
+                    }
+                }
+            } else {
+                // For non-FUNCTION nodes, use the generic summary
+                Msg.info(this, "summarizeNode: calling generateSummary for non-function node...");
+                response = generateSummary(node);
+
+                if (response != null && !response.isEmpty()) {
+                    node.setLlmSummary(response);
+                    node.setConfidence(0.7f);
+                }
+            }
+
+            Msg.info(this, "summarizeNode: LLM returned " +
+                    (response != null ? response.length() + " chars" : "null"));
+
+            if (response != null && !response.isEmpty()) {
                 node.markUpdated();
 
                 // Try to generate embedding
                 tryGenerateEmbedding(node);
 
                 graph.upsertNode(node);
+                Msg.info(this, "summarizeNode: success");
                 return true;
+            } else {
+                Msg.warn(this, "summarizeNode: LLM returned null or empty response");
             }
         } catch (Exception e) {
-            Msg.error(this, "Failed to summarize node " + node.getId() + ": " + e.getMessage());
+            Msg.error(this, "Failed to summarize node " + node.getId() + ": " + e.getMessage(), e);
         }
         return false;
     }
@@ -375,9 +450,12 @@ public class SemanticExtractor {
 
     private String callLLM(String prompt) {
         if (provider == null) {
-            Msg.warn(this, "No LLM provider available for summarization");
+            Msg.warn(this, "callLLM: No LLM provider available for summarization");
             return null;
         }
+
+        Msg.info(this, "callLLM: calling provider " + provider.getClass().getSimpleName() +
+                " with prompt length " + prompt.length());
 
         try {
             List<ChatMessage> messages = new ArrayList<>();
@@ -385,9 +463,12 @@ public class SemanticExtractor {
                     "You are a binary analysis assistant. Provide concise, technical summaries focused on functionality and security."));
             messages.add(new ChatMessage("user", prompt));
 
-            return provider.createChatCompletion(messages);
+            String response = provider.createChatCompletion(messages);
+            Msg.info(this, "callLLM: received response " +
+                    (response != null ? response.length() + " chars" : "null"));
+            return response;
         } catch (APIProviderException e) {
-            Msg.warn(this, "LLM call failed: " + e.getMessage());
+            Msg.error(this, "callLLM failed: " + e.getMessage(), e);
             return null;
         }
     }
