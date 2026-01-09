@@ -28,6 +28,8 @@ import ghidrassist.graphrag.nodes.KnowledgeNode;
 import ghidrassist.graphrag.nodes.NodeType;
 
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Extracts structural information from Ghidra binaries and populates the knowledge graph.
@@ -48,15 +50,22 @@ public class StructureExtractor {
     private final String binaryId;
     private final TaskMonitor monitor;
 
-    // Statistics
-    private int functionsExtracted = 0;
-    private int callEdgesCreated = 0;
-    private int refEdgesCreated = 0;
-    private int dataDepEdgesCreated = 0;
-    private int vulnEdgesCreated = 0;
+    // Statistics (thread-safe)
+    private final AtomicInteger functionsExtracted = new AtomicInteger(0);
+    private final AtomicInteger callEdgesCreated = new AtomicInteger(0);
+    private final AtomicInteger refEdgesCreated = new AtomicInteger(0);
+    private final AtomicInteger dataDepEdgesCreated = new AtomicInteger(0);
+    private final AtomicInteger vulnEdgesCreated = new AtomicInteger(0);
 
-    // Decompiler instance (reused for efficiency)
+    // Decompiler instance (reused for efficiency) - only for single-threaded operations
     private DecompInterface decompiler;
+
+    // Thread pool for parallel extraction (limited to avoid diminishing returns)
+    private static final int DEFAULT_THREAD_COUNT = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+    private ExecutorService extractorPool;
+
+    // Thread-local decompilers for parallel extraction
+    private final ConcurrentHashMap<Long, DecompInterface> threadDecompilers = new ConcurrentHashMap<>();
 
     /**
      * Create a StructureExtractor for a program.
@@ -93,15 +102,37 @@ public class StructureExtractor {
             monitor.setMessage("Extracting functions and edges...");
             extractFunctions();
 
+            // Check for cancellation between phases
+            if (monitor.isCancelled()) {
+                Msg.info(this, "Extraction cancelled after function extraction");
+                return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
+                        refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(),
+                        System.currentTimeMillis() - startTime);
+            }
+
             // Phase 2: Optionally extract basic blocks
             if (includeBlocks) {
                 monitor.setMessage("Extracting basic blocks...");
                 extractBasicBlocks();
+
+                if (monitor.isCancelled()) {
+                    Msg.info(this, "Extraction cancelled after basic block extraction");
+                    return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
+                            refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(),
+                            System.currentTimeMillis() - startTime);
+                }
             }
 
             // Phase 3: Create binary-level node
             monitor.setMessage("Creating binary summary node...");
             createBinaryNode();
+
+            if (monitor.isCancelled()) {
+                Msg.info(this, "Extraction cancelled after binary node creation");
+                return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
+                        refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(),
+                        System.currentTimeMillis() - startTime);
+            }
 
             // Phase 4: Detect communities
             monitor.setMessage("Detecting function communities...");
@@ -116,9 +147,9 @@ public class StructureExtractor {
 
         long elapsed = System.currentTimeMillis() - startTime;
         Msg.info(this, String.format("Structure extraction completed in %dms: %d functions, %d call edges, %d ref edges, %d data-dep edges, %d vuln edges",
-                elapsed, functionsExtracted, callEdgesCreated, refEdgesCreated, dataDepEdgesCreated, vulnEdgesCreated));
+                elapsed, functionsExtracted.get(), callEdgesCreated.get(), refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get()));
 
-        return new ExtractionResult(functionsExtracted, callEdgesCreated, refEdgesCreated, dataDepEdgesCreated, vulnEdgesCreated, elapsed);
+        return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(), refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(), elapsed);
     }
 
     /**
@@ -152,8 +183,12 @@ public class StructureExtractor {
             if (node != null) {
                 graph.upsertNode(node);
 
-                // Extract calls from this function
+                // Extract outgoing calls from this function (what it calls)
                 extractFunctionCalls(function, node.getId());
+
+                // Extract incoming calls to this function (what calls it)
+                // This ensures callers list is populated for single-function extraction
+                extractFunctionCallers(function, node.getId());
 
                 // Extract references from this function (REFERENCES edges)
                 extractFunctionReferences(function, node);
@@ -164,7 +199,10 @@ public class StructureExtractor {
                 // Extract vulnerable call edges for this function (CALLS_VULNERABLE edges)
                 extractFunctionVulnerableCalls(function, node);
 
-                functionsExtracted++;
+                functionsExtracted.incrementAndGet();
+
+                // Flush batched items for single-function extraction
+                graph.flushAllBatches();
             }
 
             return node;
@@ -270,27 +308,222 @@ public class StructureExtractor {
 
     private void extractFunctions() {
         FunctionManager funcManager = program.getFunctionManager();
-        FunctionIterator functions = funcManager.getFunctions(true);
-
         int total = funcManager.getFunctionCount();
-        int processed = 0;
 
-        while (functions.hasNext() && !monitor.isCancelled()) {
+        // Collect all functions to process (excluding thunks and externals)
+        List<Function> functionsToProcess = new ArrayList<>();
+        FunctionIterator functions = funcManager.getFunctions(true);
+        while (functions.hasNext()) {
             Function func = functions.next();
-            processed++;
+            if (!func.isThunk() && !func.isExternal()) {
+                functionsToProcess.add(func);
+            }
+        }
 
-            if (processed % 100 == 0) {
-                monitor.setProgress(processed);
-                monitor.setMessage(String.format("Extracting functions... %d/%d", processed, total));
+        int actualTotal = functionsToProcess.size();
+        Msg.info(this, String.format("Starting parallel extraction of %d functions using %d threads",
+                actualTotal, DEFAULT_THREAD_COUNT));
+
+        // Initialize progress monitor with correct total
+        monitor.initialize(actualTotal);
+
+        // Create thread pool
+        extractorPool = Executors.newFixedThreadPool(DEFAULT_THREAD_COUNT, r -> {
+            Thread t = new Thread(r, "StructureExtractor-Worker");
+            t.setDaemon(true);
+            return t;
+        });
+
+        AtomicInteger processed = new AtomicInteger(0);
+        List<Future<?>> futures = new ArrayList<>();
+
+        try {
+            // Submit all functions to the thread pool
+            for (Function func : functionsToProcess) {
+                if (monitor.isCancelled()) {
+                    break;
+                }
+
+                futures.add(extractorPool.submit(() -> {
+                    if (monitor.isCancelled()) {
+                        return;
+                    }
+
+                    try {
+                        // Get thread-local decompiler for this worker
+                        DecompInterface threadDecompiler = getThreadDecompiler();
+
+                        // Extract function with decompilation
+                        extractFunctionParallel(func, threadDecompiler);
+
+                        // Update progress
+                        int current = processed.incrementAndGet();
+                        if (current % 100 == 0) {
+                            monitor.setProgress(current);
+                            monitor.setMessage(String.format("Extracting functions... %d/%d", current, actualTotal));
+                        }
+                    } catch (Exception e) {
+                        Msg.debug(StructureExtractor.this, "Error extracting " + func.getName() + ": " + e.getMessage());
+                    }
+                }));
             }
 
-            // Skip thunks and external functions
-            if (func.isThunk() || func.isExternal()) {
-                continue;
+            // Wait for all tasks to complete (with cancellation support)
+            boolean wasCancelled = false;
+            outerLoop:
+            for (Future<?> future : futures) {
+                // Wait for this future with periodic cancellation checks
+                while (!future.isDone()) {
+                    if (monitor.isCancelled()) {
+                        wasCancelled = true;
+                        break outerLoop;
+                    }
+                    try {
+                        // Use timeout to allow periodic cancellation checks
+                        future.get(100, TimeUnit.MILLISECONDS);
+                    } catch (TimeoutException e) {
+                        // Continue polling - will check cancellation on next iteration
+                        continue;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        wasCancelled = true;
+                        break outerLoop;
+                    } catch (ExecutionException e) {
+                        Msg.debug(this, "Task failed: " + e.getCause().getMessage());
+                        break; // Move to next future
+                    }
+                }
             }
 
-            // Extract function node AND all its edges
-            extractFunction(func);
+            // If cancelled, cancel all pending futures
+            if (wasCancelled) {
+                Msg.info(this, "Cancellation requested - stopping extraction...");
+                for (Future<?> future : futures) {
+                    future.cancel(true);
+                }
+            }
+        } finally {
+            // Shutdown thread pool - use shutdownNow if cancelled
+            if (monitor.isCancelled()) {
+                extractorPool.shutdownNow();
+            } else {
+                extractorPool.shutdown();
+            }
+            try {
+                if (!extractorPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                    extractorPool.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                extractorPool.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // Flush any remaining batched items to database
+        graph.flushAllBatches();
+
+        Msg.info(this, String.format("Parallel extraction complete: %d functions processed", processed.get()));
+    }
+
+    /**
+     * Get or create a decompiler for the current thread.
+     */
+    private DecompInterface getThreadDecompiler() {
+        long threadId = Thread.currentThread().getId();
+        return threadDecompilers.computeIfAbsent(threadId, id -> {
+            DecompInterface decomp = new DecompInterface();
+            decomp.openProgram(program);
+            return decomp;
+        });
+    }
+
+    /**
+     * Extract a function using a provided decompiler (for parallel execution).
+     */
+    private void extractFunctionParallel(Function function, DecompInterface threadDecompiler) {
+        if (function == null || function.isThunk()) {
+            return;
+        }
+
+        try {
+            long address = function.getEntryPoint().getOffset();
+
+            // Check if already cached (synchronized read)
+            KnowledgeNode existing = graph.getNodeByAddress(address);
+            if (existing != null && existing.getRawContent() != null) {
+                // Node exists - update edges in case new edge types were added
+                updateFunctionEdges(function, existing);
+                return;
+            }
+
+            // Create or update node
+            KnowledgeNode node = createFunctionNodeParallel(function, threadDecompiler);
+            if (node != null) {
+                // Queue for batch insert (thread-safe)
+                graph.queueNodeForBatch(node);
+
+                // Extract calls from this function
+                extractFunctionCalls(function, node.getId());
+
+                // Extract references from this function (REFERENCES edges)
+                extractFunctionReferences(function, node);
+
+                // Extract data dependencies for this function (DATA_DEPENDS edges)
+                extractFunctionDataDependencies(function, node);
+
+                // Extract vulnerable call edges for this function (CALLS_VULNERABLE edges)
+                extractFunctionVulnerableCalls(function, node);
+
+                functionsExtracted.incrementAndGet();
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Failed to extract function " + function.getName() + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Create a function node using a provided decompiler (for parallel execution).
+     * Uses thread-local decompiler for parallel decompilation.
+     */
+    private KnowledgeNode createFunctionNodeParallel(Function function, DecompInterface threadDecompiler) {
+        try {
+            long address = function.getEntryPoint().getOffset();
+            String name = function.getName();
+
+            // Check if node already exists
+            KnowledgeNode node = graph.getNodeByAddress(address);
+            if (node == null) {
+                node = KnowledgeNode.createFunction(binaryId, address, name);
+            } else {
+                node.setName(name); // Update name in case of rename
+            }
+
+            // Decompile using thread-local decompiler
+            String content = null;
+            if (threadDecompiler != null) {
+                DecompileResults results = threadDecompiler.decompileFunction(function, 30, monitor);
+                if (results != null && results.decompileCompleted()) {
+                    content = results.getDecompiledFunction().getC();
+                }
+            }
+
+            // Fall back to disassembly if decompilation failed
+            if (content == null || content.isEmpty()) {
+                content = getDisassembly(function);
+            }
+
+            node.setRawContent(content);
+
+            // Extract security features (network APIs, file I/O, strings)
+            extractSecurityFeatures(function, node);
+
+            // Mark as needing LLM summary
+            node.markStale();
+
+            return node;
+        } catch (Exception e) {
+            Msg.warn(this, "Failed to create node for " + function.getName() + ": " + e.getMessage());
+            return null;
         }
     }
 
@@ -378,6 +611,9 @@ public class StructureExtractor {
         }
     }
 
+    /**
+     * Extract outgoing calls from a function (what this function calls).
+     */
     private void extractFunctionCalls(Function caller, String callerNodeId) {
         Set<Function> calledFunctions = caller.getCalledFunctions(monitor);
 
@@ -400,9 +636,9 @@ public class StructureExtractor {
                 if (extNode == null) {
                     extNode = KnowledgeNode.createFunction(binaryId, 0, realCallee.getName());
                     extNode.setRawContent("// External function: " + realCallee.getName());
-                    graph.upsertNode(extNode);
+                    graph.queueNodeForBatch(extNode);
                 }
-                graph.addEdge(callerNodeId, extNode.getId(), EdgeType.CALLS);
+                graph.queueEdgeForBatch(callerNodeId, extNode.getId(), EdgeType.CALLS);
             } else {
                 KnowledgeNode calleeNode = graph.getNodeByAddress(realCallee.getEntryPoint().getOffset());
                 if (calleeNode == null) {
@@ -411,10 +647,53 @@ public class StructureExtractor {
                     calleeNode = KnowledgeNode.createFunction(binaryId,
                             realCallee.getEntryPoint().getOffset(), realCallee.getName());
                     calleeNode.markStale();
-                    graph.upsertNode(calleeNode);
+                    graph.queueNodeForBatch(calleeNode);
                 }
-                graph.addEdge(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
-                callEdgesCreated++;
+                graph.queueEdgeForBatch(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
+                callEdgesCreated.incrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * Extract incoming calls to a function (what calls this function).
+     * This ensures the callers list is populated for single-function extraction.
+     */
+    private void extractFunctionCallers(Function callee, String calleeNodeId) {
+        Set<Function> callingFunctions = callee.getCallingFunctions(monitor);
+
+        for (Function caller : callingFunctions) {
+            if (monitor.isCancelled()) {
+                break;
+            }
+
+            // Skip thunks - follow to real function
+            Function realCaller = caller;
+            while (realCaller.isThunk()) {
+                Function thunked = realCaller.getThunkedFunction(true);
+                if (thunked == null) break;
+                realCaller = thunked;
+            }
+
+            // Skip external callers (shouldn't happen but be safe)
+            if (realCaller.isExternal()) {
+                continue;
+            }
+
+            KnowledgeNode callerNode = graph.getNodeByAddress(realCaller.getEntryPoint().getOffset());
+            if (callerNode == null) {
+                // Create placeholder node for caller that hasn't been processed yet
+                callerNode = KnowledgeNode.createFunction(binaryId,
+                        realCaller.getEntryPoint().getOffset(), realCaller.getName());
+                callerNode.markStale();
+                graph.queueNodeForBatch(callerNode);
+            }
+
+            // Create edge: caller -> this function (callee)
+            // Check if edge already exists to avoid duplicates
+            if (!graph.hasEdgeBetween(callerNode.getId(), calleeNodeId, EdgeType.CALLS)) {
+                graph.queueEdgeForBatch(callerNode.getId(), calleeNodeId, EdgeType.CALLS);
+                callEdgesCreated.incrementAndGet();
             }
         }
     }
@@ -448,11 +727,11 @@ public class StructureExtractor {
                     KnowledgeNode blockNode = KnowledgeNode.createBlock(binaryId, blockAddr.getOffset());
                     blockNode.setRawContent(getBlockDisassembly(block));
                     blockNode.markStale();
-                    graph.upsertNode(blockNode);
+                    graph.queueNodeForBatch(blockNode);
                     blockNodes.put(blockAddr, blockNode);
 
                     // Function CONTAINS block
-                    graph.addEdge(funcNode.getId(), blockNode.getId(), EdgeType.CONTAINS);
+                    graph.queueEdgeForBatch(funcNode.getId(), blockNode.getId(), EdgeType.CONTAINS);
                 }
 
                 // Extract control flow edges between blocks
@@ -466,7 +745,7 @@ public class StructureExtractor {
                         Address destAddr = ref.getDestinationAddress();
                         KnowledgeNode destNode = blockNodes.get(destAddr);
                         if (destNode != null) {
-                            graph.addEdge(entry.getValue().getId(), destNode.getId(), EdgeType.FLOWS_TO);
+                            graph.queueEdgeForBatch(entry.getValue().getId(), destNode.getId(), EdgeType.FLOWS_TO);
                         }
                     }
                 }
@@ -488,6 +767,9 @@ public class StructureExtractor {
 
             int total = funcMgr.getFunctionCount();
             int processed = 0;
+
+            // Initialize progress for this phase
+            monitor.initialize(total);
 
             while (functions.hasNext() && !monitor.isCancelled()) {
                 Function func = functions.next();
@@ -536,7 +818,7 @@ public class StructureExtractor {
                                 // This is a data reference - for now we just track it
                                 // We could create DATA nodes if needed in the future
                                 referencedAddresses.add(toOffset);
-                                refEdgesCreated++; // Count it even without creating edge
+                                refEdgesCreated.incrementAndGet(); // Count it even without creating edge
                             }
                         } else {
                             // Other code references (jumps to other functions, etc.)
@@ -545,9 +827,9 @@ public class StructureExtractor {
                                 KnowledgeNode targetNode = graph.getNodeByAddress(
                                         targetFunc.getEntryPoint().getOffset());
                                 if (targetNode != null) {
-                                    graph.addEdge(funcNode.getId(), targetNode.getId(), EdgeType.REFERENCES);
+                                    graph.queueEdgeForBatch(funcNode.getId(), targetNode.getId(), EdgeType.REFERENCES);
                                     referencedAddresses.add(toOffset);
-                                    refEdgesCreated++;
+                                    refEdgesCreated.incrementAndGet();
                                 }
                             }
                         }
@@ -555,7 +837,7 @@ public class StructureExtractor {
                 }
             }
 
-            Msg.info(this, String.format("Extracted %d reference edges", refEdgesCreated));
+            Msg.info(this, String.format("Extracted %d reference edges", refEdgesCreated.get()));
         } catch (Exception e) {
             Msg.error(this, "Failed to extract references: " + e.getMessage(), e);
         }
@@ -579,6 +861,9 @@ public class StructureExtractor {
             FunctionIterator functions = funcMgr.getFunctions(true);
             int total = funcMgr.getFunctionCount();
             int processed = 0;
+
+            // Initialize progress for this phase
+            monitor.initialize(total);
 
             while (functions.hasNext() && !monitor.isCancelled()) {
                 Function func = functions.next();
@@ -647,16 +932,16 @@ public class StructureExtractor {
                         if (!reader.getId().equals(writer.getId())) {
                             String edgeKey = reader.getId() + "->" + writer.getId();
                             if (!createdEdges.contains(edgeKey)) {
-                                graph.addEdge(reader.getId(), writer.getId(), EdgeType.DATA_DEPENDS);
+                                graph.queueEdgeForBatch(reader.getId(), writer.getId(), EdgeType.DATA_DEPENDS);
                                 createdEdges.add(edgeKey);
-                                dataDepEdgesCreated++;
+                                dataDepEdgesCreated.incrementAndGet();
                             }
                         }
                     }
                 }
             }
 
-            Msg.info(this, String.format("Extracted %d data dependency edges", dataDepEdgesCreated));
+            Msg.info(this, String.format("Extracted %d data dependency edges", dataDepEdgesCreated.get()));
         } catch (Exception e) {
             Msg.error(this, "Failed to extract data dependencies: " + e.getMessage(), e);
         }
@@ -671,9 +956,12 @@ public class StructureExtractor {
             List<KnowledgeNode> functionNodes = graph.getNodesByType(NodeType.FUNCTION);
             Set<String> processedCallers = new HashSet<>();
 
-            monitor.setMessage("Extracting vulnerable call edges...");
             int total = functionNodes.size();
             int processed = 0;
+
+            // Initialize progress for this phase
+            monitor.initialize(total);
+            monitor.setMessage("Extracting vulnerable call edges...");
 
             for (KnowledgeNode node : functionNodes) {
                 if (monitor.isCancelled()) break;
@@ -699,8 +987,8 @@ public class StructureExtractor {
                 List<KnowledgeNode> callers = graph.getCallers(node.getId());
                 for (KnowledgeNode caller : callers) {
                     // Add CALLS_VULNERABLE edge
-                    graph.addEdge(caller.getId(), node.getId(), EdgeType.CALLS_VULNERABLE);
-                    vulnEdgesCreated++;
+                    graph.queueEdgeForBatch(caller.getId(), node.getId(), EdgeType.CALLS_VULNERABLE);
+                    vulnEdgesCreated.incrementAndGet();
 
                     // Add flag to caller if not already processed
                     if (!processedCallers.contains(caller.getId())) {
@@ -712,14 +1000,14 @@ public class StructureExtractor {
                             callerFlags = new ArrayList<>(callerFlags); // Make mutable copy
                             callerFlags.add("CALLS_VULNERABLE_FUNCTION");
                             caller.setSecurityFlags(callerFlags);
-                            graph.upsertNode(caller);
+                            graph.queueNodeForBatch(caller);
                         }
                         processedCallers.add(caller.getId());
                     }
                 }
             }
 
-            Msg.info(this, String.format("Extracted %d vulnerable call edges", vulnEdgesCreated));
+            Msg.info(this, String.format("Extracted %d vulnerable call edges", vulnEdgesCreated.get()));
         } catch (Exception e) {
             Msg.error(this, "Failed to extract vulnerable calls: " + e.getMessage(), e);
         }
@@ -769,9 +1057,9 @@ public class StructureExtractor {
                             KnowledgeNode targetNode = graph.getNodeByAddress(
                                     targetFunc.getEntryPoint().getOffset());
                             if (targetNode != null) {
-                                graph.addEdge(funcNode.getId(), targetNode.getId(), EdgeType.REFERENCES);
+                                graph.queueEdgeForBatch(funcNode.getId(), targetNode.getId(), EdgeType.REFERENCES);
                                 referencedAddresses.add(toOffset);
-                                refEdgesCreated++;
+                                refEdgesCreated.incrementAndGet();
                             }
                         }
                     }
@@ -843,9 +1131,9 @@ public class StructureExtractor {
                         if (writerNode != null) {
                             String edgeKey = funcNode.getId() + "->" + writerNode.getId();
                             if (!createdEdges.contains(edgeKey)) {
-                                graph.addEdge(funcNode.getId(), writerNode.getId(), EdgeType.DATA_DEPENDS);
+                                graph.queueEdgeForBatch(funcNode.getId(), writerNode.getId(), EdgeType.DATA_DEPENDS);
                                 createdEdges.add(edgeKey);
-                                dataDepEdgesCreated++;
+                                dataDepEdgesCreated.incrementAndGet();
                             }
                         }
                     }
@@ -875,8 +1163,8 @@ public class StructureExtractor {
                 // Mark all callers with CALLS_VULNERABLE edge
                 List<KnowledgeNode> callers = graph.getCallers(funcNode.getId());
                 for (KnowledgeNode caller : callers) {
-                    graph.addEdge(caller.getId(), funcNode.getId(), EdgeType.CALLS_VULNERABLE);
-                    vulnEdgesCreated++;
+                    graph.queueEdgeForBatch(caller.getId(), funcNode.getId(), EdgeType.CALLS_VULNERABLE);
+                    vulnEdgesCreated.incrementAndGet();
 
                     // Add flag to caller
                     List<String> callerFlags = caller.getSecurityFlags();
@@ -887,7 +1175,7 @@ public class StructureExtractor {
                         callerFlags = new ArrayList<>(callerFlags);
                         callerFlags.add("CALLS_VULNERABLE_FUNCTION");
                         caller.setSecurityFlags(callerFlags);
-                        graph.upsertNode(caller);
+                        graph.queueNodeForBatch(caller);
                     }
                 }
             }
@@ -900,8 +1188,8 @@ public class StructureExtractor {
 
                 if (calleeVuln) {
                     // This function calls a vulnerable function
-                    graph.addEdge(funcNode.getId(), callee.getId(), EdgeType.CALLS_VULNERABLE);
-                    vulnEdgesCreated++;
+                    graph.queueEdgeForBatch(funcNode.getId(), callee.getId(), EdgeType.CALLS_VULNERABLE);
+                    vulnEdgesCreated.incrementAndGet();
 
                     // Add flag to this function
                     if (flags == null) {
@@ -911,7 +1199,7 @@ public class StructureExtractor {
                         flags = new ArrayList<>(flags);
                         flags.add("CALLS_VULNERABLE_FUNCTION");
                         funcNode.setSecurityFlags(flags);
-                        graph.upsertNode(funcNode);
+                        graph.queueNodeForBatch(funcNode);
                     }
                 }
             }
@@ -944,12 +1232,15 @@ public class StructureExtractor {
 
         binaryNode.setRawContent(desc.toString());
         binaryNode.markStale(); // Needs LLM summary
-        graph.upsertNode(binaryNode);
+        graph.queueNodeForBatch(binaryNode);
 
         // Create CONTAINS edges from binary to all functions
         for (KnowledgeNode funcNode : graph.getNodesByType(NodeType.FUNCTION)) {
-            graph.addEdge(binaryNode.getId(), funcNode.getId(), EdgeType.CONTAINS);
+            graph.queueEdgeForBatch(binaryNode.getId(), funcNode.getId(), EdgeType.CONTAINS);
         }
+
+        // Flush any remaining batched items
+        graph.flushAllBatches();
     }
 
     // ========================================
@@ -1010,6 +1301,16 @@ public class StructureExtractor {
             decompiler.dispose();
             decompiler = null;
         }
+
+        // Dispose thread-local decompilers
+        for (DecompInterface decomp : threadDecompilers.values()) {
+            try {
+                decomp.dispose();
+            } catch (Exception e) {
+                // Ignore disposal errors
+            }
+        }
+        threadDecompilers.clear();
     }
 
     // ========================================

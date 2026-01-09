@@ -85,10 +85,102 @@ public class TaintAnalyzer {
             "PATH_TRAVERSAL_RISK", "SQL_INJECTION_RISK", "CALLS_VULNERABLE_FUNCTION"
     ));
 
+    // Network send APIs - functions that send data over the network
+    private static final Set<String> NETWORK_SEND_APIS = new HashSet<>(Arrays.asList(
+            // POSIX
+            "send", "sendto", "sendmsg", "write",
+            // WinSock
+            "WSASend", "WSASendTo", "WSASendMsg", "WSASendDisconnect",
+            // SSL/TLS
+            "SSL_write",
+            // WinHTTP
+            "WinHttpWriteData", "WinHttpSendRequest",
+            // WinINet
+            "InternetWriteFile", "HttpSendRequest", "HttpSendRequestA", "HttpSendRequestW",
+            "HttpSendRequestEx", "HttpSendRequestExA", "HttpSendRequestExW",
+            // libcurl
+            "curl_easy_send"
+    ));
+
+    // Network recv APIs - functions that receive data from the network
+    private static final Set<String> NETWORK_RECV_APIS = new HashSet<>(Arrays.asList(
+            // POSIX
+            "recv", "recvfrom", "recvmsg", "read",
+            // WinSock
+            "WSARecv", "WSARecvFrom", "WSARecvMsg", "WSARecvDisconnect",
+            // SSL/TLS
+            "SSL_read",
+            // WinHTTP
+            "WinHttpReadData", "WinHttpReceiveResponse",
+            // WinINet
+            "InternetReadFile", "InternetReadFileEx", "HttpQueryInfo", "HttpQueryInfoA", "HttpQueryInfoW",
+            // libcurl
+            "curl_easy_recv"
+    ));
+
     private final BinaryKnowledgeGraph graph;
+
+    // Cancellation support
+    private volatile boolean cancelRequested = false;
+
+    // Progress callback for reporting analysis progress
+    private volatile ProgressCallback progressCallback;
+
+    /**
+     * Callback interface for reporting analysis progress.
+     */
+    @FunctionalInterface
+    public interface ProgressCallback {
+        /**
+         * Called to report progress.
+         * @param current Current item being processed
+         * @param total Total items to process
+         * @param message Description of current phase
+         */
+        void onProgress(int current, int total, String message);
+    }
 
     public TaintAnalyzer(BinaryKnowledgeGraph graph) {
         this.graph = graph;
+    }
+
+    /**
+     * Set the progress callback for reporting analysis progress.
+     */
+    public void setProgressCallback(ProgressCallback callback) {
+        this.progressCallback = callback;
+    }
+
+    /**
+     * Report progress if a callback is set.
+     */
+    private void reportProgress(int current, int total, String message) {
+        ProgressCallback callback = progressCallback;
+        if (callback != null) {
+            callback.onProgress(current, total, message);
+        }
+    }
+
+    /**
+     * Request cancellation of ongoing analysis.
+     * Analysis methods will check this flag and exit early.
+     */
+    public void requestCancel() {
+        this.cancelRequested = true;
+    }
+
+    /**
+     * Check if cancellation has been requested.
+     */
+    public boolean isCancelRequested() {
+        return cancelRequested;
+    }
+
+    /**
+     * Reset cancellation flag (call before starting new analysis).
+     */
+    public void resetCancel() {
+        this.cancelRequested = false;
     }
 
     /**
@@ -688,6 +780,458 @@ public class TaintAnalyzer {
             public String getName() { return name; }
             public long getAddress() { return address; }
             public List<String> getFlags() { return flags; }
+        }
+    }
+
+    // ========================================
+    // Network Flow Analysis
+    // ========================================
+
+    /**
+     * Analyze network data flow and create NETWORK_SEND_PATH and NETWORK_RECV_PATH edges.
+     *
+     * @return NetworkFlowResult with statistics about edges created
+     */
+    public NetworkFlowResult analyzeNetworkFlow() {
+        Msg.info(this, "Starting network flow analysis...");
+        resetCancel();  // Reset cancellation flag at start
+
+        reportProgress(0, 100, "Finding network send functions...");
+
+        // Find network send/recv nodes
+        List<KnowledgeNode> sendNodes = findNetworkSendNodes();
+        if (cancelRequested) {
+            Msg.info(this, "Network flow analysis cancelled during send node discovery");
+            return new NetworkFlowResult(0, 0, Collections.emptyList(), Collections.emptyList());
+        }
+
+        reportProgress(2, 100, "Finding network recv functions...");
+
+        List<KnowledgeNode> recvNodes = findNetworkRecvNodes();
+        if (cancelRequested) {
+            Msg.info(this, "Network flow analysis cancelled during recv node discovery");
+            return new NetworkFlowResult(0, 0, Collections.emptyList(), Collections.emptyList());
+        }
+
+        Msg.info(this, String.format("Found %d functions that send network data", sendNodes.size()));
+        Msg.info(this, String.format("Found %d functions that receive network data", recvNodes.size()));
+
+        reportProgress(5, 100, String.format("Found %d send, %d recv functions. Creating send edges...",
+                sendNodes.size(), recvNodes.size()));
+
+        // Create edges (these methods check cancelRequested internally and report progress)
+        int sendEdges = createNetworkSendEdges(sendNodes);
+        if (cancelRequested) {
+            Msg.info(this, "Network flow analysis cancelled during send edge creation");
+            return new NetworkFlowResult(sendEdges, 0,
+                    sendNodes.stream().map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress())).collect(Collectors.toList()),
+                    Collections.emptyList());
+        }
+
+        int recvEdges = createNetworkRecvEdges(recvNodes);
+
+        // Collect function names for the result
+        List<String> sendFunctionNames = sendNodes.stream()
+                .map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress()))
+                .collect(Collectors.toList());
+
+        List<String> recvFunctionNames = recvNodes.stream()
+                .map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress()))
+                .collect(Collectors.toList());
+
+        if (cancelRequested) {
+            Msg.info(this, "Network flow analysis cancelled");
+        } else {
+            reportProgress(100, 100, String.format("Complete: %d send edges, %d recv edges", sendEdges, recvEdges));
+            Msg.info(this, String.format("Network flow analysis complete: %d send edges, %d recv edges",
+                    sendEdges, recvEdges));
+        }
+
+        return new NetworkFlowResult(sendEdges, recvEdges, sendFunctionNames, recvFunctionNames);
+    }
+
+    /**
+     * Find functions that call network send APIs.
+     * Uses Set for O(1) deduplication.
+     */
+    public List<KnowledgeNode> findNetworkSendNodes() {
+        Set<String> seenIds = new HashSet<>();
+        List<KnowledgeNode> sendNodes = new ArrayList<>();
+
+        for (KnowledgeNode node : graph.getNodesByType(NodeType.FUNCTION)) {
+            // Check if function name is a known send API (for external function nodes)
+            String name = node.getName();
+            if (name != null && isNetworkSendAPI(name)) {
+                if (seenIds.add(node.getId())) {
+                    sendNodes.add(node);
+                }
+                continue;
+            }
+
+            // Check callees for network send functions
+            for (KnowledgeNode callee : graph.getCallees(node.getId())) {
+                if (callee.getName() != null && isNetworkSendAPI(callee.getName())) {
+                    if (seenIds.add(node.getId())) {
+                        sendNodes.add(node);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return sendNodes;
+    }
+
+    /**
+     * Find functions that call network recv APIs.
+     * Uses Set for O(1) deduplication.
+     */
+    public List<KnowledgeNode> findNetworkRecvNodes() {
+        Set<String> seenIds = new HashSet<>();
+        List<KnowledgeNode> recvNodes = new ArrayList<>();
+
+        for (KnowledgeNode node : graph.getNodesByType(NodeType.FUNCTION)) {
+            // Check if function name is a known recv API (for external function nodes)
+            String name = node.getName();
+            if (name != null && isNetworkRecvAPI(name)) {
+                if (seenIds.add(node.getId())) {
+                    recvNodes.add(node);
+                }
+                continue;
+            }
+
+            // Check callees for network recv functions
+            for (KnowledgeNode callee : graph.getCallees(node.getId())) {
+                if (callee.getName() != null && isNetworkRecvAPI(callee.getName())) {
+                    if (seenIds.add(node.getId())) {
+                        recvNodes.add(node);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return recvNodes;
+    }
+
+    /**
+     * Check if a function name is a network send API.
+     */
+    private boolean isNetworkSendAPI(String name) {
+        if (name == null) return false;
+        // Normalize name (remove __imp_, leading _, trailing @N)
+        String normalized = normalizeFunctionName(name);
+        return NETWORK_SEND_APIS.contains(name) || NETWORK_SEND_APIS.contains(normalized);
+    }
+
+    /**
+     * Check if a function name is a network recv API.
+     */
+    private boolean isNetworkRecvAPI(String name) {
+        if (name == null) return false;
+        // Normalize name (remove __imp_, leading _, trailing @N)
+        String normalized = normalizeFunctionName(name);
+        return NETWORK_RECV_APIS.contains(name) || NETWORK_RECV_APIS.contains(normalized);
+    }
+
+    /**
+     * Normalize a function name by removing common decorations.
+     */
+    private String normalizeFunctionName(String name) {
+        if (name == null) return null;
+
+        String normalized = name;
+
+        // Remove __imp_ prefix (import thunk)
+        if (normalized.startsWith("__imp_")) {
+            normalized = normalized.substring(6);
+        }
+
+        // Remove leading underscores (one or two)
+        while (normalized.startsWith("_") && normalized.length() > 1) {
+            normalized = normalized.substring(1);
+        }
+
+        // Remove trailing @N (stdcall decoration)
+        int atIndex = normalized.lastIndexOf('@');
+        if (atIndex > 0) {
+            String suffix = normalized.substring(atIndex + 1);
+            if (suffix.matches("\\d+")) {
+                normalized = normalized.substring(0, atIndex);
+            }
+        }
+
+        return normalized;
+    }
+
+    /**
+     * Create NETWORK_SEND_PATH edges from entry points to send functions.
+     * Also creates edges from direct callers.
+     * Uses parallel processing and BFS for performance.
+     */
+    private int createNetworkSendEdges(List<KnowledgeNode> sendNodes) {
+        if (sendNodes.isEmpty()) {
+            return 0;
+        }
+
+        // Find entry points
+        List<KnowledgeNode> entryPoints = findEntryPoints();
+        Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
+
+        final int totalEntryPoints = entryPoints.size();
+        final int totalSendNodes = sendNodes.size();
+        Msg.info(this, String.format("Processing %d entry points × %d send nodes...",
+                totalEntryPoints, totalSendNodes));
+
+        // Use atomic counters for thread-safe counting
+        java.util.concurrent.atomic.AtomicInteger edgesCreated = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger entryPointsProcessed = new java.util.concurrent.atomic.AtomicInteger(0);
+
+        // Progress reporting: send edges phase is 5-80% of total (75% range)
+        final int PROGRESS_START = 5;
+        final int PROGRESS_END = 80;
+
+        // Process entry→send pairs in parallel
+        // Create BFS instance per-thread for thread safety
+        entryPoints.parallelStream().forEach(entry -> {
+            // Check for cancellation at start of each entry point processing
+            if (cancelRequested) {
+                return;
+            }
+
+            // Each thread gets its own BFS instance (not thread-safe)
+            org.jgrapht.alg.shortestpath.BFSShortestPath<String, LabeledEdge> bfs =
+                    new org.jgrapht.alg.shortestpath.BFSShortestPath<>(memGraph);
+
+            for (KnowledgeNode sendNode : sendNodes) {
+                // Check for cancellation periodically within the inner loop
+                if (cancelRequested) {
+                    return;
+                }
+
+                if (entry.getId().equals(sendNode.getId())) {
+                    continue;
+                }
+
+                if (!memGraph.containsVertex(entry.getId()) ||
+                    !memGraph.containsVertex(sendNode.getId())) {
+                    continue;
+                }
+
+                // Skip if edge already exists
+                if (graph.hasEdgeBetween(entry.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
+                    continue;
+                }
+
+                try {
+                    // BFS finds shortest path only - much faster than AllDirectedPaths
+                    GraphPath<String, LabeledEdge> path = bfs.getPath(entry.getId(), sendNode.getId());
+
+                    if (path != null && path.getLength() <= MAX_PATH_LENGTH) {
+                        String sendAPI = getSendAPIName(sendNode);
+                        String metadata = String.format(
+                                "{\"path_length\":%d,\"send_api\":\"%s\",\"entry_point\":\"%s\"}",
+                                path.getLength(), sendAPI, entry.getName());
+
+                        // Synchronize graph modification
+                        synchronized (graph) {
+                            if (!graph.hasEdgeBetween(entry.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
+                                graph.addEdge(entry.getId(), sendNode.getId(),
+                                        EdgeType.NETWORK_SEND_PATH, 1.0, metadata);
+                                edgesCreated.incrementAndGet();
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    // Path finding can throw on disconnected graphs - ignore
+                }
+            }
+
+            // Update progress after completing each entry point
+            int completed = entryPointsProcessed.incrementAndGet();
+            if (totalEntryPoints > 0) {
+                int percent = PROGRESS_START + (completed * (PROGRESS_END - PROGRESS_START) / totalEntryPoints);
+                reportProgress(completed, totalEntryPoints,
+                        String.format("Send paths: %d/%d entry points (%d%%), %d edges",
+                                completed, totalEntryPoints, percent, edgesCreated.get()));
+            }
+        });
+
+        // Check cancellation before direct caller processing
+        if (cancelRequested) {
+            return edgesCreated.get();
+        }
+
+        // Also add direct caller edges for completeness (sequential - usually small)
+        for (KnowledgeNode sendNode : sendNodes) {
+            if (cancelRequested) {
+                break;
+            }
+            for (KnowledgeNode caller : graph.getCallers(sendNode.getId())) {
+                if (!graph.hasEdgeBetween(caller.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
+                    String sendAPI = getSendAPIName(sendNode);
+                    String metadata = String.format(
+                            "{\"direct_caller\":true,\"send_api\":\"%s\"}", sendAPI);
+
+                    graph.addEdge(caller.getId(), sendNode.getId(),
+                            EdgeType.NETWORK_SEND_PATH, 0.5, metadata);
+                    edgesCreated.incrementAndGet();
+                }
+            }
+        }
+
+        return edgesCreated.get();
+    }
+
+    /**
+     * Create NETWORK_RECV_PATH edges from recv functions to their callers.
+     * Shows where received network data flows.
+     * Uses parallel processing for performance.
+     */
+    private int createNetworkRecvEdges(List<KnowledgeNode> recvNodes) {
+        if (recvNodes.isEmpty()) {
+            return 0;
+        }
+
+        final int totalRecvNodes = recvNodes.size();
+        Msg.info(this, String.format("Processing %d recv nodes for caller tracing...", totalRecvNodes));
+
+        // Use atomic counters for thread-safe counting
+        java.util.concurrent.atomic.AtomicInteger edgesCreated = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger recvNodesProcessed = new java.util.concurrent.atomic.AtomicInteger(0);
+
+        // Progress reporting: recv edges phase is 80-98% of total (18% range)
+        final int PROGRESS_START = 80;
+        final int PROGRESS_END = 98;
+
+        // Process recv nodes in parallel
+        recvNodes.parallelStream().forEach(recvNode -> {
+            // Check for cancellation at start of each recv node processing
+            if (cancelRequested) {
+                return;
+            }
+
+            String recvAPI = getRecvAPIName(recvNode);
+
+            // Get direct callers (1-hop)
+            List<KnowledgeNode> callers = graph.getCallers(recvNode.getId());
+
+            for (KnowledgeNode caller : callers) {
+                // Check for cancellation periodically
+                if (cancelRequested) {
+                    return;
+                }
+
+                // Edge: recv -> caller (showing data flow direction)
+                synchronized (graph) {
+                    if (!graph.hasEdgeBetween(recvNode.getId(), caller.getId(), EdgeType.NETWORK_RECV_PATH)) {
+                        String metadata = String.format(
+                                "{\"recv_api\":\"%s\",\"hop\":1}", recvAPI);
+
+                        graph.addEdge(recvNode.getId(), caller.getId(),
+                                EdgeType.NETWORK_RECV_PATH, 1.0, metadata);
+                        edgesCreated.incrementAndGet();
+                    }
+                }
+
+                // Also trace 2-hop callers (for data propagation tracking)
+                for (KnowledgeNode grandCaller : graph.getCallers(caller.getId())) {
+                    synchronized (graph) {
+                        if (!graph.hasEdgeBetween(recvNode.getId(), grandCaller.getId(), EdgeType.NETWORK_RECV_PATH)) {
+                            String metadata2 = String.format(
+                                    "{\"recv_api\":\"%s\",\"hop\":2,\"via\":\"%s\"}",
+                                    recvAPI, caller.getName());
+
+                            graph.addEdge(recvNode.getId(), grandCaller.getId(),
+                                    EdgeType.NETWORK_RECV_PATH, 0.5, metadata2);
+                            edgesCreated.incrementAndGet();
+                        }
+                    }
+                }
+            }
+
+            // Update progress after completing each recv node
+            int completed = recvNodesProcessed.incrementAndGet();
+            if (totalRecvNodes > 0) {
+                int percent = PROGRESS_START + (completed * (PROGRESS_END - PROGRESS_START) / totalRecvNodes);
+                reportProgress(completed, totalRecvNodes,
+                        String.format("Recv paths: %d/%d recv nodes (%d%%), %d edges",
+                                completed, totalRecvNodes, percent, edgesCreated.get()));
+            }
+        });
+
+        return edgesCreated.get();
+    }
+
+    /**
+     * Get the name of the send API called by a node.
+     */
+    private String getSendAPIName(KnowledgeNode node) {
+        // If the node itself is a send API
+        if (node.getName() != null && isNetworkSendAPI(node.getName())) {
+            return normalizeFunctionName(node.getName());
+        }
+
+        // Check callees
+        for (KnowledgeNode callee : graph.getCallees(node.getId())) {
+            if (callee.getName() != null && isNetworkSendAPI(callee.getName())) {
+                return normalizeFunctionName(callee.getName());
+            }
+        }
+
+        return "unknown";
+    }
+
+    /**
+     * Get the name of the recv API called by a node.
+     */
+    private String getRecvAPIName(KnowledgeNode node) {
+        // If the node itself is a recv API
+        if (node.getName() != null && isNetworkRecvAPI(node.getName())) {
+            return normalizeFunctionName(node.getName());
+        }
+
+        // Check callees
+        for (KnowledgeNode callee : graph.getCallees(node.getId())) {
+            if (callee.getName() != null && isNetworkRecvAPI(callee.getName())) {
+                return normalizeFunctionName(callee.getName());
+            }
+        }
+
+        return "unknown";
+    }
+
+    /**
+     * Result of network flow analysis.
+     */
+    public static class NetworkFlowResult {
+        private final int sendPathEdges;
+        private final int recvPathEdges;
+        private final List<String> sendFunctions;
+        private final List<String> recvFunctions;
+
+        public NetworkFlowResult(int sendPathEdges, int recvPathEdges,
+                                  List<String> sendFunctions, List<String> recvFunctions) {
+            this.sendPathEdges = sendPathEdges;
+            this.recvPathEdges = recvPathEdges;
+            this.sendFunctions = sendFunctions;
+            this.recvFunctions = recvFunctions;
+        }
+
+        public int getSendPathEdges() { return sendPathEdges; }
+        public int getRecvPathEdges() { return recvPathEdges; }
+        public List<String> getSendFunctions() { return sendFunctions; }
+        public List<String> getRecvFunctions() { return recvFunctions; }
+
+        public String toSummary() {
+            return String.format(
+                    "Network Flow Analysis Complete:\n" +
+                    "- Found %d functions that send network data\n" +
+                    "- Created %d NETWORK_SEND_PATH edges\n" +
+                    "- Found %d functions that receive network data\n" +
+                    "- Created %d NETWORK_RECV_PATH edges",
+                    sendFunctions.size(), sendPathEdges,
+                    recvFunctions.size(), recvPathEdges);
         }
     }
 }

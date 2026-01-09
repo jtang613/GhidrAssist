@@ -36,8 +36,10 @@ public class SemanticGraphTab extends JPanel {
     private JButton reindexButton;
     private JButton semanticAnalysisButton;
     private JButton securityAnalysisButton;
+    private JButton networkFlowButton;
     private JButton refreshNamesButton;
     private JLabel statsLabel;
+    private JProgressBar progressBar;
 
     // State
     private String currentNodeId;
@@ -83,10 +85,17 @@ public class SemanticGraphTab extends JPanel {
         securityAnalysisButton = new JButton("Security Analysis");
         securityAnalysisButton.setToolTipText("Run taint analysis and create vulnerability edges (source→sink paths)");
 
+        networkFlowButton = new JButton("Network Flow Analysis");
+        networkFlowButton.setToolTipText("Trace network data flow paths (send/recv API calls)");
+
         refreshNamesButton = new JButton("Refresh Names");
         refreshNamesButton.setToolTipText("Update function names in graph to match current Ghidra names");
 
         statsLabel = new JLabel("Graph Stats: Not loaded");
+
+        progressBar = new JProgressBar(0, 100);
+        progressBar.setStringPainted(true);
+        progressBar.setVisible(false);
     }
 
     private void layoutComponents() {
@@ -123,10 +132,16 @@ public class SemanticGraphTab extends JPanel {
         buttonRow.add(reindexButton);
         buttonRow.add(semanticAnalysisButton);
         buttonRow.add(securityAnalysisButton);
+        buttonRow.add(networkFlowButton);
         buttonRow.add(refreshNamesButton);
 
+        // Stats and progress row
+        JPanel statusRow = new JPanel(new BorderLayout(5, 0));
+        statusRow.add(statsLabel, BorderLayout.WEST);
+        statusRow.add(progressBar, BorderLayout.CENTER);
+
         bottomPanel.add(buttonRow, BorderLayout.NORTH);
-        bottomPanel.add(statsLabel, BorderLayout.SOUTH);
+        bottomPanel.add(statusRow, BorderLayout.SOUTH);
 
         add(bottomPanel, BorderLayout.SOUTH);
     }
@@ -149,6 +164,9 @@ public class SemanticGraphTab extends JPanel {
 
         // Security Analysis button
         securityAnalysisButton.addActionListener(e -> handleSecurityAnalysis());
+
+        // Network Flow Analysis button
+        networkFlowButton.addActionListener(e -> handleNetworkFlowAnalysis());
 
         // Refresh names button
         refreshNamesButton.addActionListener(e -> handleRefreshNames());
@@ -287,6 +305,13 @@ public class SemanticGraphTab extends JPanel {
     }
 
     private void handleReindex() {
+        // If running, just stop (no confirmation needed)
+        if (isReindexRunning()) {
+            controller.handleSemanticGraphReindex();
+            return;
+        }
+
+        // Otherwise confirm before starting
         int result = JOptionPane.showConfirmDialog(this,
                 "ReIndex the entire binary?\n" +
                 "This may take a while for large binaries.",
@@ -304,6 +329,13 @@ public class SemanticGraphTab extends JPanel {
     }
 
     private void handleSemanticAnalysis() {
+        // If running, just stop (no confirmation needed)
+        if (isSemanticAnalysisRunning()) {
+            controller.handleSemanticGraphSemanticAnalysis();
+            return;
+        }
+
+        // Otherwise confirm before starting
         int result = JOptionPane.showConfirmDialog(this,
                 "Run Semantic Analysis on all stale nodes?\n" +
                 "This will use the LLM to generate summaries for unsummarized functions.\n" +
@@ -318,6 +350,13 @@ public class SemanticGraphTab extends JPanel {
     }
 
     private void handleSecurityAnalysis() {
+        // If running, just stop (no confirmation needed)
+        if (isSecurityAnalysisRunning()) {
+            controller.handleSemanticGraphSecurityAnalysis();
+            return;
+        }
+
+        // Otherwise confirm before starting
         int result = JOptionPane.showConfirmDialog(this,
                 "Run Security Analysis?\n" +
                 "This will:\n" +
@@ -331,6 +370,30 @@ public class SemanticGraphTab extends JPanel {
 
         if (result == JOptionPane.YES_OPTION) {
             controller.handleSemanticGraphSecurityAnalysis();
+        }
+    }
+
+    private void handleNetworkFlowAnalysis() {
+        // If running, just stop (no confirmation needed)
+        if (isNetworkFlowRunning()) {
+            controller.handleSemanticGraphNetworkFlowAnalysis();
+            return;
+        }
+
+        // Otherwise confirm before starting
+        int result = JOptionPane.showConfirmDialog(this,
+                "Run Network Flow Analysis?\n" +
+                "This will:\n" +
+                "• Find functions that call send/recv APIs (WSASend, recv, etc.)\n" +
+                "• Create NETWORK_SEND_PATH edges from entry points to send functions\n" +
+                "• Create NETWORK_RECV_PATH edges from recv functions to their callers\n\n" +
+                "This requires an indexed binary.",
+                "Network Flow Analysis",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (result == JOptionPane.YES_OPTION) {
+            controller.handleSemanticGraphNetworkFlowAnalysis();
         }
     }
 
@@ -348,5 +411,106 @@ public class SemanticGraphTab extends JPanel {
      */
     public TabController getController() {
         return controller;
+    }
+
+    // ===== Progress and Button State Management =====
+
+    /**
+     * Show progress bar with given percentage and message.
+     */
+    public void showProgress(int percent, String message) {
+        progressBar.setVisible(true);
+        progressBar.setValue(percent);
+        progressBar.setString(message);
+        progressBar.setIndeterminate(false);
+    }
+
+    /**
+     * Show indeterminate progress bar with message.
+     */
+    public void showIndeterminateProgress(String message) {
+        progressBar.setVisible(true);
+        progressBar.setIndeterminate(true);
+        progressBar.setString(message);
+    }
+
+    /**
+     * Hide the progress bar.
+     */
+    public void hideProgress() {
+        progressBar.setVisible(false);
+        progressBar.setValue(0);
+        progressBar.setString("");
+        progressBar.setIndeterminate(false);
+    }
+
+    /**
+     * Set reindex button to running state (shows "Stop" text).
+     */
+    public void setReindexRunning(boolean running) {
+        reindexButton.setText(running ? "Stop" : "ReIndex Binary");
+    }
+
+    /**
+     * Set semantic analysis button to running state (shows "Stop" text).
+     */
+    public void setSemanticAnalysisRunning(boolean running) {
+        semanticAnalysisButton.setText(running ? "Stop" : "Semantic Analysis");
+    }
+
+    /**
+     * Set security analysis button to running state (shows "Stop" text).
+     */
+    public void setSecurityAnalysisRunning(boolean running) {
+        securityAnalysisButton.setText(running ? "Stop" : "Security Analysis");
+    }
+
+    /**
+     * Set refresh names button to running state (shows "Stop" text).
+     */
+    public void setRefreshNamesRunning(boolean running) {
+        refreshNamesButton.setText(running ? "Stop" : "Refresh Names");
+    }
+
+    /**
+     * Check if reindex is currently running.
+     */
+    public boolean isReindexRunning() {
+        return "Stop".equals(reindexButton.getText());
+    }
+
+    /**
+     * Check if semantic analysis is currently running.
+     */
+    public boolean isSemanticAnalysisRunning() {
+        return "Stop".equals(semanticAnalysisButton.getText());
+    }
+
+    /**
+     * Check if security analysis is currently running.
+     */
+    public boolean isSecurityAnalysisRunning() {
+        return "Stop".equals(securityAnalysisButton.getText());
+    }
+
+    /**
+     * Check if refresh names is currently running.
+     */
+    public boolean isRefreshNamesRunning() {
+        return "Stop".equals(refreshNamesButton.getText());
+    }
+
+    /**
+     * Set network flow analysis button to running state (shows "Stop" text).
+     */
+    public void setNetworkFlowRunning(boolean running) {
+        networkFlowButton.setText(running ? "Stop" : "Network Flow Analysis");
+    }
+
+    /**
+     * Check if network flow analysis is currently running.
+     */
+    public boolean isNetworkFlowRunning() {
+        return "Stop".equals(networkFlowButton.getText());
     }
 }

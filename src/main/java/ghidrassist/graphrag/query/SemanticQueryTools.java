@@ -205,21 +205,22 @@ public class SemanticQueryTools {
                 )
         ));
 
-        // 9. ga.index_binary
-        tools.add(createTool(
-                TOOL_PREFIX + "index_binary",
-                "Trigger full binary indexing to populate the knowledge graph. Extracts all functions, " +
-                "call graph, cross-references (REFERENCES edges), data dependencies (DATA_DEPENDS edges), " +
-                "and vulnerable call edges (CALLS_VULNERABLE edges). This is required for comprehensive " +
-                "graph queries. NO LLM call - uses Ghidra analysis only. May take time for large binaries.",
-                createSchema(
-                        Map.of(
-                                "include_blocks", Map.of("type", "boolean", "description", "Include basic block extraction (increases graph size, default: false)"),
-                                "force", Map.of("type", "boolean", "description", "Force re-indexing even if already indexed (default: false)")
-                        ),
-                        List.of() // None required
-                )
-        ));
+        // 9. ga.index_binary - TEMPORARILY DISABLED (tool hidden from LLM but execution code preserved)
+        // TODO: Re-enable when indexing stability is improved
+        // tools.add(createTool(
+        //         TOOL_PREFIX + "index_binary",
+        //         "Trigger full binary indexing to populate the knowledge graph. Extracts all functions, " +
+        //         "call graph, cross-references (REFERENCES edges), data dependencies (DATA_DEPENDS edges), " +
+        //         "and vulnerable call edges (CALLS_VULNERABLE edges). This is required for comprehensive " +
+        //         "graph queries. NO LLM call - uses Ghidra analysis only. May take time for large binaries.",
+        //         createSchema(
+        //                 Map.of(
+        //                         "include_blocks", Map.of("type", "boolean", "description", "Include basic block extraction (increases graph size, default: false)"),
+        //                         "force", Map.of("type", "boolean", "description", "Force re-indexing even if already indexed (default: false)")
+        //                 ),
+        //                 List.of() // None required
+        //         )
+        // ));
 
         // 10. ga.record_vulnerability
         tools.add(createTool(
@@ -292,23 +293,24 @@ public class SemanticQueryTools {
                 )
         ));
 
-        // 14. ga.find_taint_paths
-        tools.add(createTool(
-                TOOL_PREFIX + "find_taint_paths",
-                "Find data flow paths from taint sources (network input, file reads, user input) " +
-                "to taint sinks (dangerous functions like strcpy, system, sprintf). " +
-                "Identifies potential vulnerability chains where untrusted data flows to dangerous operations. " +
-                "Can optionally create TAINT_FLOWS_TO edges in the graph. NO LLM call.",
-                createSchema(
-                        Map.of(
-                                "source_address", Map.of("type", "string", "description", "Optional: Find paths from this specific source function (hex address)"),
-                                "sink_address", Map.of("type", "string", "description", "Optional: Find paths to this specific sink function (hex address)"),
-                                "max_paths", Map.of("type", "integer", "description", "Maximum number of paths to return (default: 20)"),
-                                "create_edges", Map.of("type", "boolean", "description", "Create TAINT_FLOWS_TO edges along found paths (default: false)")
-                        ),
-                        List.of() // None required
-                )
-        ));
+        // 14. ga.find_taint_paths - TEMPORARILY DISABLED (tool hidden from LLM but execution code preserved)
+        // TODO: Re-enable when taint analysis is stable
+        // tools.add(createTool(
+        //         TOOL_PREFIX + "find_taint_paths",
+        //         "Find data flow paths from taint sources (network input, file reads, user input) " +
+        //         "to taint sinks (dangerous functions like strcpy, system, sprintf). " +
+        //         "Identifies potential vulnerability chains where untrusted data flows to dangerous operations. " +
+        //         "Can optionally create TAINT_FLOWS_TO edges in the graph. NO LLM call.",
+        //         createSchema(
+        //                 Map.of(
+        //                         "source_address", Map.of("type", "string", "description", "Optional: Find paths from this specific source function (hex address)"),
+        //                         "sink_address", Map.of("type", "string", "description", "Optional: Find paths to this specific sink function (hex address)"),
+        //                         "max_paths", Map.of("type", "integer", "description", "Maximum number of paths to return (default: 20)"),
+        //                         "create_edges", Map.of("type", "boolean", "description", "Create TAINT_FLOWS_TO edges along found paths (default: false)")
+        //                 ),
+        //                 List.of() // None required
+        //         )
+        // ));
 
         // 15. ga.create_edge
         tools.add(createTool(
