@@ -6,9 +6,6 @@ import java.util.List;
 import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
-import docking.ActionContext;
-import docking.action.DockingAction;
-import docking.action.MenuData;
 import ghidra.app.decompiler.DecompilerLocation;
 import ghidra.app.plugin.PluginCategoryNames;
 import ghidra.app.plugin.ProgramPlugin;
@@ -45,32 +42,12 @@ public class GhidrAssistPlugin extends ProgramPlugin {
     }
 
     @Override
-    public void init() {
-        super.init();
-
-        // Add a menu action for settings
-        DockingAction settingsAction = new DockingAction("GhidrAssist Settings", getName()) {
-            @Override
-            public void actionPerformed(ActionContext context) {
-                showSettingsDialog();
-            }
-        };
-        settingsAction.setMenuBarData(new MenuData(new String[] { "Tools", "GhidrAssist Settings" }, null, "GhidrAssist"));
-        tool.addAction(settingsAction);
-    }
-
-    @Override
     protected void dispose() {
         if (provider != null) {
             tool.removeComponentProvider(provider);
             provider = null;
         }
         super.dispose();
-    }
-
-    private void showSettingsDialog() {
-        SettingsDialog dialog = new SettingsDialog(tool.getToolFrame(), "GhidrAssist Settings", this);
-        tool.showDialog(dialog);
     }
 
     @Override
