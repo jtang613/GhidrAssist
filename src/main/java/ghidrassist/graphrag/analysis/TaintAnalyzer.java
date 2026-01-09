@@ -5,7 +5,7 @@ import java.util.stream.Collectors;
 
 import org.jgrapht.Graph;
 import org.jgrapht.GraphPath;
-import org.jgrapht.alg.shortestpath.AllDirectedPaths;
+import org.jgrapht.alg.shortestpath.BFSShortestPath;
 
 import ghidra.util.Msg;
 
@@ -208,9 +208,9 @@ public class TaintAnalyzer {
             return allPaths;
         }
 
-        // Use JGraphT to find paths
+        // Use BFS for fast shortest path finding (linear time vs exponential for AllDirectedPaths)
         Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
-        AllDirectedPaths<String, LabeledEdge> pathFinder = new AllDirectedPaths<>(memGraph);
+        BFSShortestPath<String, LabeledEdge> bfs = new BFSShortestPath<>(memGraph);
 
         for (KnowledgeNode source : sourceNodes) {
             if (allPaths.size() >= maxPaths) break;
@@ -226,13 +226,10 @@ public class TaintAnalyzer {
                 }
 
                 try {
-                    // Find all paths up to MAX_PATH_LENGTH
-                    List<GraphPath<String, LabeledEdge>> paths = pathFinder.getAllPaths(
-                            source.getId(), sink.getId(), true, MAX_PATH_LENGTH);
+                    // Find shortest path only (BFS is O(V+E) vs O(k^n) for all paths)
+                    GraphPath<String, LabeledEdge> path = bfs.getPath(source.getId(), sink.getId());
 
-                    for (GraphPath<String, LabeledEdge> path : paths) {
-                        if (allPaths.size() >= maxPaths) break;
-
+                    if (path != null && path.getLength() <= MAX_PATH_LENGTH) {
                         TaintPath taintPath = buildTaintPath(source, sink, path);
                         allPaths.add(taintPath);
 
@@ -264,7 +261,7 @@ public class TaintAnalyzer {
         List<TaintPath> allPaths = new ArrayList<>();
         List<KnowledgeNode> sinkNodes = findSinkNodes();
         Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
-        AllDirectedPaths<String, LabeledEdge> pathFinder = new AllDirectedPaths<>(memGraph);
+        BFSShortestPath<String, LabeledEdge> bfs = new BFSShortestPath<>(memGraph);
 
         for (KnowledgeNode sink : sinkNodes) {
             if (allPaths.size() >= maxPaths) break;
@@ -276,11 +273,9 @@ public class TaintAnalyzer {
             }
 
             try {
-                List<GraphPath<String, LabeledEdge>> paths = pathFinder.getAllPaths(
-                        sourceNode.getId(), sink.getId(), true, MAX_PATH_LENGTH);
+                GraphPath<String, LabeledEdge> path = bfs.getPath(sourceNode.getId(), sink.getId());
 
-                for (GraphPath<String, LabeledEdge> path : paths) {
-                    if (allPaths.size() >= maxPaths) break;
+                if (path != null && path.getLength() <= MAX_PATH_LENGTH) {
                     TaintPath taintPath = buildTaintPath(sourceNode, sink, path);
                     allPaths.add(taintPath);
 
@@ -308,7 +303,7 @@ public class TaintAnalyzer {
         List<TaintPath> allPaths = new ArrayList<>();
         List<KnowledgeNode> sourceNodes = findSourceNodes();
         Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
-        AllDirectedPaths<String, LabeledEdge> pathFinder = new AllDirectedPaths<>(memGraph);
+        BFSShortestPath<String, LabeledEdge> bfs = new BFSShortestPath<>(memGraph);
 
         for (KnowledgeNode source : sourceNodes) {
             if (allPaths.size() >= maxPaths) break;
@@ -320,11 +315,9 @@ public class TaintAnalyzer {
             }
 
             try {
-                List<GraphPath<String, LabeledEdge>> paths = pathFinder.getAllPaths(
-                        source.getId(), sinkNode.getId(), true, MAX_PATH_LENGTH);
+                GraphPath<String, LabeledEdge> path = bfs.getPath(source.getId(), sinkNode.getId());
 
-                for (GraphPath<String, LabeledEdge> path : paths) {
-                    if (allPaths.size() >= maxPaths) break;
+                if (path != null && path.getLength() <= MAX_PATH_LENGTH) {
                     TaintPath taintPath = buildTaintPath(source, sinkNode, path);
                     allPaths.add(taintPath);
 
@@ -533,8 +526,9 @@ public class TaintAnalyzer {
             return 0;
         }
 
-        // Use JGraphT to check path existence
+        // Use JGraphT to check path existence - BFS is O(V+E) per query vs exponential for AllDirectedPaths
         Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
+        BFSShortestPath<String, LabeledEdge> bfs = new BFSShortestPath<>(memGraph);
 
         for (KnowledgeNode entry : entryPoints) {
             for (KnowledgeNode vulnerable : vulnerableNodes) {
@@ -550,17 +544,15 @@ public class TaintAnalyzer {
 
                 // Check if there's a path from entry to vulnerable
                 try {
-                    AllDirectedPaths<String, LabeledEdge> pathFinder = new AllDirectedPaths<>(memGraph);
-                    List<GraphPath<String, LabeledEdge>> paths = pathFinder.getAllPaths(
-                            entry.getId(), vulnerable.getId(), true, MAX_PATH_LENGTH);
+                    GraphPath<String, LabeledEdge> path = bfs.getPath(entry.getId(), vulnerable.getId());
 
-                    if (!paths.isEmpty()) {
+                    if (path != null && path.getLength() <= MAX_PATH_LENGTH) {
                         // Path exists - create VULNERABLE_VIA edge
                         if (!graph.hasEdgeBetween(entry.getId(), vulnerable.getId(), EdgeType.VULNERABLE_VIA)) {
                             // Get the vulnerability type from the vulnerable node's flags
                             String vulnType = getVulnerabilityType(vulnerable);
                             String metadata = String.format("{\"path_length\":%d,\"vuln_type\":\"%s\"}",
-                                    paths.get(0).getLength(), vulnType);
+                                    path.getLength(), vulnType);
 
                             graph.addEdge(entry.getId(), vulnerable.getId(),
                                     EdgeType.VULNERABLE_VIA, 1.0, metadata);
@@ -796,13 +788,21 @@ public class TaintAnalyzer {
         Msg.info(this, "Starting network flow analysis...");
         resetCancel();  // Reset cancellation flag at start
 
+        // Debug: Log memory graph statistics
+        Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
+        int totalVertices = memGraph.vertexSet().size();
+        int totalEdges = memGraph.edgeSet().size();
+        long callEdges = memGraph.edgeSet().stream().filter(e -> e.getType() == EdgeType.CALLS).count();
+        Msg.debug(this, String.format("Memory graph stats: %d vertices, %d edges (%d CALLS edges)",
+                totalVertices, totalEdges, callEdges));
+
         reportProgress(0, 100, "Finding network send functions...");
 
         // Find network send/recv nodes
         List<KnowledgeNode> sendNodes = findNetworkSendNodes();
         if (cancelRequested) {
             Msg.info(this, "Network flow analysis cancelled during send node discovery");
-            return new NetworkFlowResult(0, 0, Collections.emptyList(), Collections.emptyList());
+            return new NetworkFlowResult(0, 0, 0, 0, Collections.emptyList(), Collections.emptyList());
         }
 
         reportProgress(2, 100, "Finding network recv functions...");
@@ -810,7 +810,7 @@ public class TaintAnalyzer {
         List<KnowledgeNode> recvNodes = findNetworkRecvNodes();
         if (cancelRequested) {
             Msg.info(this, "Network flow analysis cancelled during recv node discovery");
-            return new NetworkFlowResult(0, 0, Collections.emptyList(), Collections.emptyList());
+            return new NetworkFlowResult(0, 0, 0, 0, Collections.emptyList(), Collections.emptyList());
         }
 
         Msg.info(this, String.format("Found %d functions that send network data", sendNodes.size()));
@@ -820,15 +820,21 @@ public class TaintAnalyzer {
                 sendNodes.size(), recvNodes.size()));
 
         // Create edges (these methods check cancelRequested internally and report progress)
-        int sendEdges = createNetworkSendEdges(sendNodes);
+        // Returns int[]{created, existing}
+        int[] sendResult = createNetworkSendEdges(sendNodes);
+        int sendEdgesCreated = sendResult[0];
+        int sendEdgesExisting = sendResult[1];
+
         if (cancelRequested) {
             Msg.info(this, "Network flow analysis cancelled during send edge creation");
-            return new NetworkFlowResult(sendEdges, 0,
+            return new NetworkFlowResult(sendEdgesCreated, 0, sendEdgesExisting, 0,
                     sendNodes.stream().map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress())).collect(Collectors.toList()),
                     Collections.emptyList());
         }
 
-        int recvEdges = createNetworkRecvEdges(recvNodes);
+        int[] recvResult = createNetworkRecvEdges(recvNodes);
+        int recvEdgesCreated = recvResult[0];
+        int recvEdgesExisting = recvResult[1];
 
         // Collect function names for the result
         List<String> sendFunctionNames = sendNodes.stream()
@@ -839,15 +845,21 @@ public class TaintAnalyzer {
                 .map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress()))
                 .collect(Collectors.toList());
 
+        int totalSendEdges = sendEdgesCreated + sendEdgesExisting;
+        int totalRecvEdges = recvEdgesCreated + recvEdgesExisting;
+
         if (cancelRequested) {
             Msg.info(this, "Network flow analysis cancelled");
         } else {
-            reportProgress(100, 100, String.format("Complete: %d send edges, %d recv edges", sendEdges, recvEdges));
-            Msg.info(this, String.format("Network flow analysis complete: %d send edges, %d recv edges",
-                    sendEdges, recvEdges));
+            reportProgress(100, 100, String.format("Complete: %d send edges (%d new), %d recv edges (%d new)",
+                    totalSendEdges, sendEdgesCreated, totalRecvEdges, recvEdgesCreated));
+            Msg.info(this, String.format("Network flow analysis complete: %d send edges (%d new, %d existing), %d recv edges (%d new, %d existing)",
+                    totalSendEdges, sendEdgesCreated, sendEdgesExisting,
+                    totalRecvEdges, recvEdgesCreated, recvEdgesExisting));
         }
 
-        return new NetworkFlowResult(sendEdges, recvEdges, sendFunctionNames, recvFunctionNames);
+        return new NetworkFlowResult(sendEdgesCreated, recvEdgesCreated, sendEdgesExisting, recvEdgesExisting,
+                sendFunctionNames, recvFunctionNames);
     }
 
     /**
@@ -889,6 +901,8 @@ public class TaintAnalyzer {
     public List<KnowledgeNode> findNetworkRecvNodes() {
         Set<String> seenIds = new HashSet<>();
         List<KnowledgeNode> recvNodes = new ArrayList<>();
+        int foundByName = 0;
+        int foundByCallee = 0;
 
         for (KnowledgeNode node : graph.getNodesByType(NodeType.FUNCTION)) {
             // Check if function name is a known recv API (for external function nodes)
@@ -896,6 +910,8 @@ public class TaintAnalyzer {
             if (name != null && isNetworkRecvAPI(name)) {
                 if (seenIds.add(node.getId())) {
                     recvNodes.add(node);
+                    foundByName++;
+                    Msg.debug(this, String.format("Found recv API by name: %s (id=%s)", name, node.getId()));
                 }
                 continue;
             }
@@ -905,12 +921,17 @@ public class TaintAnalyzer {
                 if (callee.getName() != null && isNetworkRecvAPI(callee.getName())) {
                     if (seenIds.add(node.getId())) {
                         recvNodes.add(node);
+                        foundByCallee++;
+                        Msg.debug(this, String.format("Found function calling recv API: %s calls %s",
+                                name != null ? name : "sub_" + Long.toHexString(node.getAddress()),
+                                callee.getName()));
                     }
                     break;
                 }
             }
         }
 
+        Msg.info(this, String.format("Recv nodes breakdown: %d by API name, %d by callee match", foundByName, foundByCallee));
         return recvNodes;
     }
 
@@ -967,11 +988,11 @@ public class TaintAnalyzer {
     /**
      * Create NETWORK_SEND_PATH edges from entry points to send functions.
      * Also creates edges from direct callers.
-     * Uses parallel processing and BFS for performance.
+     * @return int array: [0] = edges created, [1] = edges already existing
      */
-    private int createNetworkSendEdges(List<KnowledgeNode> sendNodes) {
+    private int[] createNetworkSendEdges(List<KnowledgeNode> sendNodes) {
         if (sendNodes.isEmpty()) {
-            return 0;
+            return new int[]{0, 0};
         }
 
         // Find entry points
@@ -983,31 +1004,48 @@ public class TaintAnalyzer {
         Msg.info(this, String.format("Processing %d entry points × %d send nodes...",
                 totalEntryPoints, totalSendNodes));
 
+        // Debug: Log entry points and send nodes
+        for (KnowledgeNode entry : entryPoints) {
+            String name = entry.getName() != null ? entry.getName() : "sub_" + Long.toHexString(entry.getAddress());
+            boolean inGraph = memGraph.containsVertex(entry.getId());
+            int outEdges = inGraph ? memGraph.outgoingEdgesOf(entry.getId()).size() : 0;
+            Msg.debug(this, String.format("Entry point '%s': inMemGraph=%b, outgoingEdges=%d",
+                    name, inGraph, outEdges));
+        }
+        for (KnowledgeNode send : sendNodes) {
+            String name = send.getName() != null ? send.getName() : "sub_" + Long.toHexString(send.getAddress());
+            boolean inGraph = memGraph.containsVertex(send.getId());
+            int inEdges = inGraph ? memGraph.incomingEdgesOf(send.getId()).size() : 0;
+            Msg.debug(this, String.format("Send node '%s': inMemGraph=%b, incomingEdges=%d",
+                    name, inGraph, inEdges));
+        }
+
         // Use atomic counters for thread-safe counting
         java.util.concurrent.atomic.AtomicInteger edgesCreated = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger edgesExisting = new java.util.concurrent.atomic.AtomicInteger(0);
         java.util.concurrent.atomic.AtomicInteger entryPointsProcessed = new java.util.concurrent.atomic.AtomicInteger(0);
 
         // Progress reporting: send edges phase is 5-80% of total (75% range)
         final int PROGRESS_START = 5;
         final int PROGRESS_END = 80;
 
-        // Process entry→send pairs in parallel
-        // Create BFS instance per-thread for thread safety
-        entryPoints.parallelStream().forEach(entry -> {
-            // Check for cancellation at start of each entry point processing
+        // Process entry→send pairs sequentially for debugging
+        org.jgrapht.alg.shortestpath.BFSShortestPath<String, LabeledEdge> bfs =
+                new org.jgrapht.alg.shortestpath.BFSShortestPath<>(memGraph);
+
+        for (KnowledgeNode entry : entryPoints) {
             if (cancelRequested) {
-                return;
+                break;
             }
 
-            // Each thread gets its own BFS instance (not thread-safe)
-            org.jgrapht.alg.shortestpath.BFSShortestPath<String, LabeledEdge> bfs =
-                    new org.jgrapht.alg.shortestpath.BFSShortestPath<>(memGraph);
+            String entryName = entry.getName() != null ? entry.getName() : "sub_" + Long.toHexString(entry.getAddress());
 
             for (KnowledgeNode sendNode : sendNodes) {
-                // Check for cancellation periodically within the inner loop
                 if (cancelRequested) {
-                    return;
+                    break;
                 }
+
+                String sendName = sendNode.getName() != null ? sendNode.getName() : "sub_" + Long.toHexString(sendNode.getAddress());
 
                 if (entry.getId().equals(sendNode.getId())) {
                     continue;
@@ -1015,11 +1053,14 @@ public class TaintAnalyzer {
 
                 if (!memGraph.containsVertex(entry.getId()) ||
                     !memGraph.containsVertex(sendNode.getId())) {
+                    Msg.debug(this, String.format("Skipping %s -> %s: vertex not in graph", entryName, sendName));
                     continue;
                 }
 
                 // Skip if edge already exists
                 if (graph.hasEdgeBetween(entry.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
+                    Msg.debug(this, String.format("SEND edge already exists: %s -> %s", entryName, sendName));
+                    edgesExisting.incrementAndGet();
                     continue;
                 }
 
@@ -1027,23 +1068,27 @@ public class TaintAnalyzer {
                     // BFS finds shortest path only - much faster than AllDirectedPaths
                     GraphPath<String, LabeledEdge> path = bfs.getPath(entry.getId(), sendNode.getId());
 
-                    if (path != null && path.getLength() <= MAX_PATH_LENGTH) {
-                        String sendAPI = getSendAPIName(sendNode);
-                        String metadata = String.format(
-                                "{\"path_length\":%d,\"send_api\":\"%s\",\"entry_point\":\"%s\"}",
-                                path.getLength(), sendAPI, entry.getName());
+                    if (path != null) {
+                        if (path.getLength() <= MAX_PATH_LENGTH) {
+                            String sendAPI = getSendAPIName(sendNode);
+                            String metadata = String.format(
+                                    "{\"path_length\":%d,\"send_api\":\"%s\",\"entry_point\":\"%s\"}",
+                                    path.getLength(), sendAPI, entry.getName());
 
-                        // Synchronize graph modification
-                        synchronized (graph) {
-                            if (!graph.hasEdgeBetween(entry.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
-                                graph.addEdge(entry.getId(), sendNode.getId(),
-                                        EdgeType.NETWORK_SEND_PATH, 1.0, metadata);
-                                edgesCreated.incrementAndGet();
-                            }
+                            graph.addEdge(entry.getId(), sendNode.getId(),
+                                    EdgeType.NETWORK_SEND_PATH, 1.0, metadata);
+                            edgesCreated.incrementAndGet();
+                            Msg.info(this, String.format("Created SEND edge: %s -> %s (path length %d)",
+                                    entryName, sendName, path.getLength()));
+                        } else {
+                            Msg.debug(this, String.format("Path too long %s -> %s: %d > %d",
+                                    entryName, sendName, path.getLength(), MAX_PATH_LENGTH));
                         }
+                    } else {
+                        Msg.debug(this, String.format("No path found: %s -> %s", entryName, sendName));
                     }
                 } catch (Exception e) {
-                    // Path finding can throw on disconnected graphs - ignore
+                    Msg.debug(this, String.format("Path finding error %s -> %s: %s", entryName, sendName, e.getMessage()));
                 }
             }
 
@@ -1055,11 +1100,11 @@ public class TaintAnalyzer {
                         String.format("Send paths: %d/%d entry points (%d%%), %d edges",
                                 completed, totalEntryPoints, percent, edgesCreated.get()));
             }
-        });
+        }
 
         // Check cancellation before direct caller processing
         if (cancelRequested) {
-            return edgesCreated.get();
+            return new int[]{edgesCreated.get(), edgesExisting.get()};
         }
 
         // Also add direct caller edges for completeness (sequential - usually small)
@@ -1076,67 +1121,92 @@ public class TaintAnalyzer {
                     graph.addEdge(caller.getId(), sendNode.getId(),
                             EdgeType.NETWORK_SEND_PATH, 0.5, metadata);
                     edgesCreated.incrementAndGet();
+                } else {
+                    edgesExisting.incrementAndGet();
                 }
             }
         }
 
-        return edgesCreated.get();
+        return new int[]{edgesCreated.get(), edgesExisting.get()};
     }
 
     /**
      * Create NETWORK_RECV_PATH edges from recv functions to their callers.
      * Shows where received network data flows.
-     * Uses parallel processing for performance.
+     * @return int array: [0] = edges created, [1] = edges already existing
      */
-    private int createNetworkRecvEdges(List<KnowledgeNode> recvNodes) {
+    private int[] createNetworkRecvEdges(List<KnowledgeNode> recvNodes) {
         if (recvNodes.isEmpty()) {
-            return 0;
+            return new int[]{0, 0};
         }
 
         final int totalRecvNodes = recvNodes.size();
         Msg.info(this, String.format("Processing %d recv nodes for caller tracing...", totalRecvNodes));
 
+        // Debug: Check if recv nodes exist in memory graph and have callers
+        Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
+        for (KnowledgeNode recvNode : recvNodes) {
+            boolean inGraph = memGraph.containsVertex(recvNode.getId());
+            int incomingEdgeCount = inGraph ? memGraph.incomingEdgesOf(recvNode.getId()).size() : 0;
+            List<KnowledgeNode> callers = graph.getCallers(recvNode.getId());
+            Msg.debug(this, String.format("Recv node '%s': inMemGraph=%b, incomingEdges=%d, callers=%d",
+                    recvNode.getName() != null ? recvNode.getName() : "sub_" + Long.toHexString(recvNode.getAddress()),
+                    inGraph, incomingEdgeCount, callers.size()));
+        }
+
         // Use atomic counters for thread-safe counting
         java.util.concurrent.atomic.AtomicInteger edgesCreated = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger edgesExisting = new java.util.concurrent.atomic.AtomicInteger(0);
         java.util.concurrent.atomic.AtomicInteger recvNodesProcessed = new java.util.concurrent.atomic.AtomicInteger(0);
 
         // Progress reporting: recv edges phase is 80-98% of total (18% range)
         final int PROGRESS_START = 80;
         final int PROGRESS_END = 98;
 
-        // Process recv nodes in parallel
-        recvNodes.parallelStream().forEach(recvNode -> {
+        // Process recv nodes
+        for (KnowledgeNode recvNode : recvNodes) {
             // Check for cancellation at start of each recv node processing
             if (cancelRequested) {
-                return;
+                break;
             }
 
             String recvAPI = getRecvAPIName(recvNode);
+            String recvNodeName = recvNode.getName() != null ? recvNode.getName() : "sub_" + Long.toHexString(recvNode.getAddress());
 
             // Get direct callers (1-hop)
             List<KnowledgeNode> callers = graph.getCallers(recvNode.getId());
+            Msg.debug(this, String.format("Processing recv node '%s': found %d callers", recvNodeName, callers.size()));
 
             for (KnowledgeNode caller : callers) {
                 // Check for cancellation periodically
                 if (cancelRequested) {
-                    return;
+                    break;
                 }
 
+                String callerName = caller.getName() != null ? caller.getName() : "sub_" + Long.toHexString(caller.getAddress());
+
                 // Edge: recv -> caller (showing data flow direction)
-                synchronized (graph) {
-                    if (!graph.hasEdgeBetween(recvNode.getId(), caller.getId(), EdgeType.NETWORK_RECV_PATH)) {
+                try {
+                    boolean alreadyExists = graph.hasEdgeBetween(recvNode.getId(), caller.getId(), EdgeType.NETWORK_RECV_PATH);
+                    if (!alreadyExists) {
                         String metadata = String.format(
                                 "{\"recv_api\":\"%s\",\"hop\":1}", recvAPI);
 
                         graph.addEdge(recvNode.getId(), caller.getId(),
                                 EdgeType.NETWORK_RECV_PATH, 1.0, metadata);
                         edgesCreated.incrementAndGet();
+                        Msg.debug(this, String.format("Created NETWORK_RECV_PATH edge: %s -> %s", recvNodeName, callerName));
+                    } else {
+                        edgesExisting.incrementAndGet();
+                        Msg.debug(this, String.format("Edge already exists: %s -> %s", recvNodeName, callerName));
                     }
+                } catch (Exception e) {
+                    Msg.error(this, String.format("Failed to create edge %s -> %s: %s", recvNodeName, callerName, e.getMessage()));
                 }
 
                 // Also trace 2-hop callers (for data propagation tracking)
                 for (KnowledgeNode grandCaller : graph.getCallers(caller.getId())) {
-                    synchronized (graph) {
+                    try {
                         if (!graph.hasEdgeBetween(recvNode.getId(), grandCaller.getId(), EdgeType.NETWORK_RECV_PATH)) {
                             String metadata2 = String.format(
                                     "{\"recv_api\":\"%s\",\"hop\":2,\"via\":\"%s\"}",
@@ -1145,7 +1215,11 @@ public class TaintAnalyzer {
                             graph.addEdge(recvNode.getId(), grandCaller.getId(),
                                     EdgeType.NETWORK_RECV_PATH, 0.5, metadata2);
                             edgesCreated.incrementAndGet();
+                        } else {
+                            edgesExisting.incrementAndGet();
                         }
+                    } catch (Exception e) {
+                        Msg.debug(this, "Failed to create 2-hop edge: " + e.getMessage());
                     }
                 }
             }
@@ -1158,9 +1232,9 @@ public class TaintAnalyzer {
                         String.format("Recv paths: %d/%d recv nodes (%d%%), %d edges",
                                 completed, totalRecvNodes, percent, edgesCreated.get()));
             }
-        });
+        }
 
-        return edgesCreated.get();
+        return new int[]{edgesCreated.get(), edgesExisting.get()};
     }
 
     /**
@@ -1205,33 +1279,42 @@ public class TaintAnalyzer {
      * Result of network flow analysis.
      */
     public static class NetworkFlowResult {
-        private final int sendPathEdges;
-        private final int recvPathEdges;
+        private final int sendPathEdgesCreated;
+        private final int recvPathEdgesCreated;
+        private final int sendPathEdgesExisting;
+        private final int recvPathEdgesExisting;
         private final List<String> sendFunctions;
         private final List<String> recvFunctions;
 
-        public NetworkFlowResult(int sendPathEdges, int recvPathEdges,
+        public NetworkFlowResult(int sendPathEdgesCreated, int recvPathEdgesCreated,
+                                  int sendPathEdgesExisting, int recvPathEdgesExisting,
                                   List<String> sendFunctions, List<String> recvFunctions) {
-            this.sendPathEdges = sendPathEdges;
-            this.recvPathEdges = recvPathEdges;
+            this.sendPathEdgesCreated = sendPathEdgesCreated;
+            this.recvPathEdgesCreated = recvPathEdgesCreated;
+            this.sendPathEdgesExisting = sendPathEdgesExisting;
+            this.recvPathEdgesExisting = recvPathEdgesExisting;
             this.sendFunctions = sendFunctions;
             this.recvFunctions = recvFunctions;
         }
 
-        public int getSendPathEdges() { return sendPathEdges; }
-        public int getRecvPathEdges() { return recvPathEdges; }
+        public int getSendPathEdges() { return sendPathEdgesCreated + sendPathEdgesExisting; }
+        public int getRecvPathEdges() { return recvPathEdgesCreated + recvPathEdgesExisting; }
+        public int getSendPathEdgesCreated() { return sendPathEdgesCreated; }
+        public int getRecvPathEdgesCreated() { return recvPathEdgesCreated; }
         public List<String> getSendFunctions() { return sendFunctions; }
         public List<String> getRecvFunctions() { return recvFunctions; }
 
         public String toSummary() {
+            int totalSend = sendPathEdgesCreated + sendPathEdgesExisting;
+            int totalRecv = recvPathEdgesCreated + recvPathEdgesExisting;
             return String.format(
                     "Network Flow Analysis Complete:\n" +
-                    "- Found %d functions that send network data\n" +
-                    "- Created %d NETWORK_SEND_PATH edges\n" +
-                    "- Found %d functions that receive network data\n" +
-                    "- Created %d NETWORK_RECV_PATH edges",
-                    sendFunctions.size(), sendPathEdges,
-                    recvFunctions.size(), recvPathEdges);
+                    "- Found %d functions calling send APIs\n" +
+                    "- NETWORK_SEND_PATH edges: %d total (%d new, %d existing)\n" +
+                    "- Found %d functions calling recv APIs\n" +
+                    "- NETWORK_RECV_PATH edges: %d total (%d new, %d existing)",
+                    sendFunctions.size(), totalSend, sendPathEdgesCreated, sendPathEdgesExisting,
+                    recvFunctions.size(), totalRecv, recvPathEdgesCreated, recvPathEdgesExisting);
         }
     }
 }
