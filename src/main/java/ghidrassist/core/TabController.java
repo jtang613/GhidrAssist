@@ -93,7 +93,7 @@ public class TabController {
     private QueryTab queryTab;
     private ActionsTab actionsTab;
     private RAGManagementTab ragManagementTab;
-    private AnalysisOptionsTab analysisOptionsTab;
+    private SettingsTab settingsTab;
     private SemanticGraphTab semanticGraphTab;
 
     // Background workers for non-blocking analysis
@@ -141,8 +141,14 @@ public class TabController {
     }
     public void setActionsTab(ActionsTab tab) { this.actionsTab = tab; }
     public void setRAGManagementTab(RAGManagementTab tab) { this.ragManagementTab = tab; }
-    public void setAnalysisOptionsTab(AnalysisOptionsTab tab) { this.analysisOptionsTab = tab; }
     public void setSemanticGraphTab(SemanticGraphTab tab) { this.semanticGraphTab = tab; }
+    public void setSettingsTab(SettingsTab tab) { this.settingsTab = tab; }
+
+    // ==== Plugin Access ====
+
+    public GhidrAssistPlugin getPlugin() {
+        return plugin;
+    }
 
     // ==== Reasoning Configuration ====
 
@@ -776,13 +782,13 @@ public class TabController {
     }
 
     // ==== Analysis Data Operations ====
-    
+
     public void handleContextSave(String context) {
         try {
             analysisDataService.saveContext(context);
-            Msg.showInfo(this, analysisOptionsTab, "Success", "Context saved successfully.");
+            Msg.showInfo(this, settingsTab, "Success", "Context saved successfully.");
         } catch (Exception e) {
-            Msg.showError(this, analysisOptionsTab, "Error", 
+            Msg.showError(this, settingsTab, "Error",
                 "Failed to save context: " + e.getMessage());
         }
     }
@@ -790,12 +796,13 @@ public class TabController {
     public void handleContextLoad() {
         try {
             String currentContext = analysisDataService.getContext();
-            analysisOptionsTab.setContextText(currentContext);
-            // Also reload reasoning effort and max tool calls when context is loaded
-            analysisOptionsTab.loadReasoningEffort();
-            analysisOptionsTab.loadMaxToolCalls();
+            if (settingsTab != null) {
+                settingsTab.setContextText(currentContext);
+                settingsTab.loadReasoningEffort();
+                settingsTab.loadMaxToolCalls();
+            }
         } catch (Exception e) {
-            Msg.showError(this, analysisOptionsTab, "Error",
+            Msg.showError(this, settingsTab, "Error",
                 "Failed to load context: " + e.getMessage());
         }
     }
@@ -803,9 +810,11 @@ public class TabController {
     public void handleContextRevert() {
         try {
             String defaultContext = analysisDataService.revertToDefaultContext();
-            analysisOptionsTab.setContextText(defaultContext);
+            if (settingsTab != null) {
+                settingsTab.setContextText(defaultContext);
+            }
         } catch (Exception e) {
-            Msg.showError(this, analysisOptionsTab, "Error", 
+            Msg.showError(this, settingsTab, "Error",
                 "Failed to revert context: " + e.getMessage());
         }
     }
