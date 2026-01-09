@@ -26,6 +26,12 @@ public class AzureOpenAIProvider extends APIProvider
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String AZURE_API_VERSION = "2025-01-01-preview";
     private static final String AZURE_EMBEDDING_MODEL = "text-embedding-ada-002";
+
+    // Retry settings for streaming calls
+    private static final int MAX_STREAMING_RETRIES = 10;
+    private static final int MIN_RETRY_BACKOFF_MS = 10000;  // 10 seconds
+    private static final int MAX_RETRY_BACKOFF_MS = 30000;  // 30 seconds
+
     private volatile boolean isCancelled = false;
 
     // Azure OpenAI requires a deployment name
@@ -140,6 +146,19 @@ public class AzureOpenAIProvider extends APIProvider
     public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler)
             throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, true);
+        executeStreamingWithRetry(payload, handler, "stream_chat_completion", 0);
+    }
+
+    /**
+     * Execute streaming request with retry logic for rate limits and transient errors.
+     */
+    private void executeStreamingWithRetry(JsonObject payload, LlmApi.LlmResponseHandler handler,
+                                           String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         String endpoint = buildChatCompletionUrl();
         Request request = new Request.Builder()
@@ -152,15 +171,29 @@ public class AzureOpenAIProvider extends APIProvider
 
             @Override
             public void onFailure(Call call, IOException e) {
-                if (!isCancelled) {
-                    handler.onError(handleNetworkError(e, "streamChatCompletion"));
+                if (call.isCanceled()) {
+                    handler.onError(new StreamCancelledException(name, operation,
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
+                }
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
                 }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 if (!response.isSuccessful()) {
-                    handler.onError(handleHttpError(response, "streamChatCompletion"));
+                    APIProviderException error = handleHttpError(response, operation);
+                    if (shouldRetryStreaming(error, attemptNumber)) {
+                        retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                    } else {
+                        handler.onError(error);
+                    }
                     return;
                 }
 
@@ -191,7 +224,7 @@ public class AzureOpenAIProvider extends APIProvider
                                     handler.onUpdate(content);
                                 }
                             } catch (JsonSyntaxException e) {
-                                handler.onError(new ResponseException(name, "streamChatCompletion",
+                                handler.onError(new ResponseException(name, operation,
                                         ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                                 return;
                             }
@@ -199,21 +232,78 @@ public class AzureOpenAIProvider extends APIProvider
                     }
 
                     if (isCancelled) {
-                        handler.onError(new StreamCancelledException(name, "streamChatCompletion",
+                        handler.onError(new StreamCancelledException(name, operation,
                                 StreamCancelledException.CancellationReason.USER_REQUESTED));
                     } else if (!handler.shouldContinue()) {
-                        handler.onError(new StreamCancelledException(name, "streamChatCompletion",
+                        handler.onError(new StreamCancelledException(name, operation,
                                 StreamCancelledException.CancellationReason.USER_REQUESTED));
                     } else {
                         handler.onComplete(contentBuilder.toString());
                     }
                 } catch (IOException e) {
                     if (!isCancelled) {
-                        handler.onError(handleNetworkError(e, "streamChatCompletion"));
+                        handler.onError(handleNetworkError(e, operation));
                     }
                 }
             }
         });
+    }
+
+    /**
+     * Check if a streaming error should be retried.
+     */
+    private boolean shouldRetryStreaming(APIProviderException error, int attemptNumber) {
+        if (attemptNumber >= MAX_STREAMING_RETRIES) {
+            return false;
+        }
+        switch (error.getCategory()) {
+            case RATE_LIMIT:
+            case NETWORK:
+            case TIMEOUT:
+            case SERVICE_ERROR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Retry streaming request after appropriate delay.
+     */
+    private void retryStreamingAfterDelay(JsonObject payload, LlmApi.LlmResponseHandler handler,
+                                          String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        ghidra.util.Msg.warn(this, String.format("Streaming retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "AzureOpenAIProvider-StreamRetry").start();
+    }
+
+    /**
+     * Calculate wait time for streaming retry with jitter.
+     */
+    private int calculateStreamingRetryWait(APIProviderException error) {
+        if (error.getCategory() == APIProviderException.ErrorCategory.RATE_LIMIT) {
+            Integer retryAfter = error.getRetryAfterSeconds();
+            if (retryAfter != null && retryAfter > 0) {
+                return retryAfter * 1000;
+            }
+        }
+        return MIN_RETRY_BACKOFF_MS + (int) (Math.random() * (MAX_RETRY_BACKOFF_MS - MIN_RETRY_BACKOFF_MS));
     }
 
     @Override
@@ -358,6 +448,19 @@ public class AzureOpenAIProvider extends APIProvider
     public void getEmbeddingsAsync(String text, EmbeddingCallback callback) {
         JsonObject payload = new JsonObject();
         payload.addProperty("input", text);
+        executeEmbeddingsWithRetry(payload, callback, "get_embeddings", 0);
+    }
+
+    /**
+     * Execute embeddings request with retry logic for rate limits and transient errors.
+     */
+    private void executeEmbeddingsWithRetry(JsonObject payload, EmbeddingCallback callback,
+                                            String operation, int attemptNumber) {
+        if (isCancelled) {
+            callback.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         String endpoint = buildEmbeddingsUrl();
         Request request = new Request.Builder()
@@ -368,13 +471,29 @@ public class AzureOpenAIProvider extends APIProvider
         client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                callback.onError(handleNetworkError(e, "getEmbeddingsAsync"));
+                if (call.isCanceled()) {
+                    callback.onError(new StreamCancelledException(name, operation,
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
+                }
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryEmbeddingsAfterDelay(payload, callback, operation, attemptNumber, error);
+                } else {
+                    callback.onError(error);
+                }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 if (!response.isSuccessful()) {
-                    callback.onError(handleHttpError(response, "getEmbeddingsAsync"));
+                    APIProviderException error = handleHttpError(response, operation);
+                    if (shouldRetryStreaming(error, attemptNumber)) {
+                        retryEmbeddingsAfterDelay(payload, callback, operation, attemptNumber, error);
+                    } else {
+                        callback.onError(error);
+                    }
                     return;
                 }
 
@@ -393,15 +512,41 @@ public class AzureOpenAIProvider extends APIProvider
 
                         callback.onSuccess(embedding);
                     } else {
-                        callback.onError(new ResponseException(name, "getEmbeddingsAsync",
+                        callback.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                     }
                 } catch (JsonSyntaxException e) {
-                    callback.onError(new ResponseException(name, "getEmbeddingsAsync",
+                    callback.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                 }
             }
         });
+    }
+
+    /**
+     * Retry embeddings request after appropriate delay.
+     */
+    private void retryEmbeddingsAfterDelay(JsonObject payload, EmbeddingCallback callback,
+                                           String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        ghidra.util.Msg.warn(this, String.format("Embeddings retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeEmbeddingsWithRetry(payload, callback, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                callback.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "AzureOpenAIProvider-EmbeddingsRetry").start();
     }
 
     private String buildChatCompletionUrl() {
