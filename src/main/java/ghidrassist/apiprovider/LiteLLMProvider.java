@@ -34,10 +34,16 @@ public class LiteLLMProvider extends OpenAIProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
 
+    // Retry settings for streaming calls
+    private static final int MAX_STREAMING_RETRIES = 10;
+    private static final int MIN_RETRY_BACKOFF_MS = 10000;  // 10 seconds
+    private static final int MAX_RETRY_BACKOFF_MS = 30000;  // 30 seconds
+
     private final String modelFamily;
     private final boolean isBedrock;
     private final boolean isAnthropicCompatible;
     private boolean warnedAboutThinking = false;
+    private volatile boolean isCancelled = false;
 
     public LiteLLMProvider(String name, String model, Integer maxTokens, String url,
                            String key, boolean disableTlsVerification, Integer timeout) {
@@ -326,10 +332,21 @@ public class LiteLLMProvider extends OpenAIProvider {
             List<Map<String, Object>> functions,
             StreamingFunctionHandler handler
     ) throws APIProviderException {
-
         JsonObject payload = buildLiteLLMPayload(messages, true, functions);
-
         Msg.debug(this, "LiteLLM request payload: " + payload.toString());
+        executeStreamingFunctionsWithRetry(payload, handler, "stream_chat_completion_with_functions", 0);
+    }
+
+    /**
+     * Execute streaming with functions request with retry logic for rate limits and transient errors.
+     */
+    private void executeStreamingFunctionsWithRetry(JsonObject payload, StreamingFunctionHandler handler,
+                                                    String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         Request request = new Request.Builder()
                 .url(url + "chat/completions")
@@ -339,27 +356,35 @@ public class LiteLLMProvider extends OpenAIProvider {
         client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                APIProviderException apiException;
                 if (call.isCanceled()) {
-                    apiException = new StreamCancelledException(name, "stream_chat_completion_with_functions",
-                            StreamCancelledException.CancellationReason.USER_REQUESTED, e);
-                } else {
-                    apiException = handleNetworkError(e, "stream_chat_completion_with_functions");
+                    handler.onError(new StreamCancelledException(name, operation,
+                            StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
                 }
-                handler.onError(apiException);
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingFunctionsAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
+                }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        APIProviderException apiException = handleHttpError(response, "stream_chat_completion_with_functions");
-                        handler.onError(apiException);
+                        APIProviderException error = handleHttpError(response, operation);
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryStreamingFunctionsAfterDelay(payload, handler, operation, attemptNumber, error);
+                        } else {
+                            handler.onError(error);
+                        }
                         return;
                     }
 
                     if (responseBody == null) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                        handler.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                         return;
                     }
@@ -370,7 +395,7 @@ public class LiteLLMProvider extends OpenAIProvider {
                     String finishReason = "stop";
 
                     try {
-                        while (!source.exhausted() && handler.shouldContinue()) {
+                        while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
                             String line = source.readUtf8Line();
                             if (line == null || line.isEmpty()) continue;
 
@@ -444,19 +469,22 @@ public class LiteLLMProvider extends OpenAIProvider {
                                         }
                                     }
                                 } catch (com.google.gson.JsonSyntaxException e) {
-                                    handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                                    handler.onError(new ResponseException(name, operation,
                                             ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                                     return;
                                 }
                             }
                         }
 
-                        if (!handler.shouldContinue()) {
-                            handler.onError(new StreamCancelledException(name, "stream_chat_completion_with_functions",
+                        if (isCancelled) {
+                            handler.onError(new StreamCancelledException(name, operation,
+                                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+                        } else if (!handler.shouldContinue()) {
+                            handler.onError(new StreamCancelledException(name, operation,
                                     StreamCancelledException.CancellationReason.USER_REQUESTED));
                         }
                     } catch (IOException e) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                        handler.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                     }
                 }
@@ -465,13 +493,51 @@ public class LiteLLMProvider extends OpenAIProvider {
     }
 
     /**
+     * Retry streaming with functions request after appropriate delay.
+     */
+    private void retryStreamingFunctionsAfterDelay(JsonObject payload, StreamingFunctionHandler handler,
+                                                   String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        Msg.warn(this, String.format("LiteLLM streaming functions retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingFunctionsWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "LiteLLMProvider-StreamFunctionsRetry").start();
+    }
+
+    /**
      * Override standard streaming to use LiteLLM-specific payload building.
      */
     @Override
     public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler)
             throws APIProviderException {
-
         JsonObject payload = buildLiteLLMPayload(messages, true, null);
+        executeStreamingWithRetry(payload, handler, "stream_chat_completion", 0);
+    }
+
+    /**
+     * Execute streaming request with retry logic for rate limits and transient errors.
+     */
+    private void executeStreamingWithRetry(JsonObject payload, LlmApi.LlmResponseHandler handler,
+                                           String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         Request request = new Request.Builder()
                 .url(url + "chat/completions")
@@ -483,27 +549,35 @@ public class LiteLLMProvider extends OpenAIProvider {
 
             @Override
             public void onFailure(Call call, IOException e) {
-                APIProviderException apiException;
                 if (call.isCanceled()) {
-                    apiException = new StreamCancelledException(name, "stream_chat_completion",
-                            StreamCancelledException.CancellationReason.USER_REQUESTED, e);
-                } else {
-                    apiException = handleNetworkError(e, "stream_chat_completion");
+                    handler.onError(new StreamCancelledException(name, operation,
+                            StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
                 }
-                handler.onError(apiException);
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
+                }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        APIProviderException apiException = handleHttpError(response, "stream_chat_completion");
-                        handler.onError(apiException);
+                        APIProviderException error = handleHttpError(response, operation);
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                        } else {
+                            handler.onError(error);
+                        }
                         return;
                     }
 
                     if (responseBody == null) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion",
+                        handler.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                         return;
                     }
@@ -512,7 +586,7 @@ public class LiteLLMProvider extends OpenAIProvider {
                     StringBuilder contentBuilder = new StringBuilder();
 
                     try {
-                        while (!source.exhausted() && handler.shouldContinue()) {
+                        while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
                             String line = source.readUtf8Line();
                             if (line == null || line.isEmpty()) continue;
 
@@ -536,24 +610,93 @@ public class LiteLLMProvider extends OpenAIProvider {
                                         handler.onUpdate(content);
                                     }
                                 } catch (com.google.gson.JsonSyntaxException e) {
-                                    handler.onError(new ResponseException(name, "stream_chat_completion",
+                                    handler.onError(new ResponseException(name, operation,
                                             ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                                     return;
                                 }
                             }
                         }
 
-                        if (!handler.shouldContinue()) {
-                            handler.onError(new StreamCancelledException(name, "stream_chat_completion",
+                        if (isCancelled) {
+                            handler.onError(new StreamCancelledException(name, operation,
+                                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+                        } else if (!handler.shouldContinue()) {
+                            handler.onError(new StreamCancelledException(name, operation,
                                     StreamCancelledException.CancellationReason.USER_REQUESTED));
                         }
                     } catch (IOException e) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion",
+                        handler.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                     }
                 }
             }
         });
+    }
+
+    /**
+     * Retry streaming request after appropriate delay.
+     */
+    private void retryStreamingAfterDelay(JsonObject payload, LlmApi.LlmResponseHandler handler,
+                                          String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        Msg.warn(this, String.format("LiteLLM streaming retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "LiteLLMProvider-StreamRetry").start();
+    }
+
+    /**
+     * Check if a streaming error should be retried.
+     */
+    private boolean shouldRetryStreaming(APIProviderException error, int attemptNumber) {
+        if (attemptNumber >= MAX_STREAMING_RETRIES) {
+            return false;
+        }
+        switch (error.getCategory()) {
+            case RATE_LIMIT:
+            case NETWORK:
+            case TIMEOUT:
+            case SERVICE_ERROR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Calculate wait time for streaming retry with jitter.
+     */
+    private int calculateStreamingRetryWait(APIProviderException error) {
+        if (error.getCategory() == APIProviderException.ErrorCategory.RATE_LIMIT) {
+            Integer retryAfter = error.getRetryAfterSeconds();
+            if (retryAfter != null && retryAfter > 0) {
+                return retryAfter * 1000;
+            }
+        }
+        return MIN_RETRY_BACKOFF_MS + (int) (Math.random() * (MAX_RETRY_BACKOFF_MS - MIN_RETRY_BACKOFF_MS));
+    }
+
+    /**
+     * Cancel any ongoing requests.
+     */
+    @Override
+    public void cancelRequest() {
+        isCancelled = true;
+        super.cancelRequest();
     }
 
     /**

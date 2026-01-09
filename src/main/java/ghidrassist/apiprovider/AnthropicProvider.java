@@ -24,7 +24,12 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String ANTHROPIC_MESSAGES_ENDPOINT = "v1/messages";
     private static final String ANTHROPIC_MODELS_ENDPOINT = "v1/models";
-    private static final int MAX_RETRY_ATTEMPTS = 3;
+
+    // Retry settings for streaming calls (matching RetryHandler defaults)
+    private static final int MAX_STREAMING_RETRIES = 10;
+    private static final int MIN_RETRY_BACKOFF_MS = 10000;  // 10 seconds
+    private static final int MAX_RETRY_BACKOFF_MS = 30000;  // 30 seconds
+
     private volatile boolean isCancelled = false;
 
     public AnthropicProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
@@ -109,6 +114,19 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
     @Override
     public void streamChatCompletion(List<ChatMessage> messages, LlmResponseHandler handler) throws APIProviderException {
         JsonObject payload = buildMessagesPayload(messages, true);
+        executeStreamingWithRetry(payload, handler, "streamChatCompletion", 0);
+    }
+
+    /**
+     * Execute streaming request with retry logic for rate limits and transient errors.
+     */
+    private void executeStreamingWithRetry(JsonObject payload, LlmResponseHandler handler,
+                                           String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                name, operation, "Request cancelled"));
+            return;
+        }
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
@@ -121,7 +139,12 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
             @Override
             public void onFailure(Call call, IOException e) {
-                handler.onError(handleNetworkError(e, "streamChatCompletion"));
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
+                }
             }
 
             @Override
@@ -129,7 +152,13 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
                         String errorBody = responseBody != null ? responseBody.string() : null;
-                        handler.onError(handleHttpError(response, errorBody, "streamChatCompletion"));
+                        APIProviderException error = handleHttpError(response, errorBody, operation);
+
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                        } else {
+                            handler.onError(error);
+                        }
                         return;
                     }
 
@@ -137,13 +166,13 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                     while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
                         String line = source.readUtf8Line();
                         if (line == null || line.isEmpty()) continue;
-                        
+
                         // Skip ping events
                         if (line.equals("event: ping")) {
                             source.readUtf8Line(); // Skip data line
                             continue;
                         }
-                        
+
                         if (line.startsWith("data: ")) {
                             String data = line.substring(6).trim();
                             if (data.equals("[DONE]")) {
@@ -152,14 +181,14 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                             }
 
                             JsonObject event = gson.fromJson(data, JsonObject.class);
-                            
+
                             // Check for error events
                             if (event.has("type") && event.get("type").getAsString().equals("error")) {
                                 handler.onError(new APIProviderException(APIProviderException.ErrorCategory.SERVICE_ERROR,
-                                    name, "streamChatCompletion", event.get("error").getAsString()));
+                                    name, operation, event.get("error").getAsString()));
                                 return;
                             }
-                            
+
                             // Extract content from delta
                             if (event.has("type") && event.get("type").getAsString().equals("content_block_delta")) {
                                 JsonObject delta = event.getAsJsonObject("delta");
@@ -182,13 +211,101 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
                     if (isCancelled) {
                         handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
-                            name, "streamChatCompletion", "Request cancelled"));
+                            name, operation, "Request cancelled"));
                     } else {
                         handler.onComplete(contentBuilder.toString());
                     }
                 }
             }
         });
+    }
+
+    /**
+     * Check if a streaming error should be retried.
+     */
+    private boolean shouldRetryStreaming(APIProviderException error, int attemptNumber) {
+        if (attemptNumber >= MAX_STREAMING_RETRIES) {
+            return false;
+        }
+
+        switch (error.getCategory()) {
+            case RATE_LIMIT:
+            case NETWORK:
+            case TIMEOUT:
+            case SERVICE_ERROR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Retry streaming request after appropriate delay.
+     */
+    private void retryStreamingAfterDelay(JsonObject payload, LlmResponseHandler handler,
+                                          String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        Msg.warn(this, String.format("Streaming retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        // Schedule retry on a background thread
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                    name, operation, "Retry interrupted"));
+            }
+        }, "AnthropicProvider-StreamRetry").start();
+    }
+
+    /**
+     * Calculate wait time for streaming retry with jitter.
+     */
+    private int calculateStreamingRetryWait(APIProviderException error) {
+        // For rate limits, use retry-after if available
+        if (error.getCategory() == APIProviderException.ErrorCategory.RATE_LIMIT) {
+            Integer retryAfter = error.getRetryAfterSeconds();
+            if (retryAfter != null && retryAfter > 0) {
+                return retryAfter * 1000;
+            }
+        }
+        // Random backoff between MIN and MAX
+        return MIN_RETRY_BACKOFF_MS + (int) (Math.random() * (MAX_RETRY_BACKOFF_MS - MIN_RETRY_BACKOFF_MS));
+    }
+
+    /**
+     * Retry streaming function call request after appropriate delay.
+     */
+    private void retryStreamingFunctionsAfterDelay(JsonObject payload, StreamingFunctionHandler handler,
+                                                   String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        Msg.warn(this, String.format("Streaming functions retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        // Schedule retry on a background thread
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingFunctionsWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                    name, operation, "Retry interrupted"));
+            }
+        }, "AnthropicProvider-StreamFunctionsRetry").start();
     }
 
     @Override
@@ -428,6 +545,20 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         payload.add("tools", anthropicTools);
 
+        executeStreamingFunctionsWithRetry(payload, handler, "streamChatCompletionWithFunctions", 0);
+    }
+
+    /**
+     * Execute streaming function call request with retry logic.
+     */
+    private void executeStreamingFunctionsWithRetry(JsonObject payload, StreamingFunctionHandler handler,
+                                                    String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
+                name, operation, "Request cancelled"));
+            return;
+        }
+
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
             .post(RequestBody.create(JSON, gson.toJson(payload)))
@@ -439,7 +570,12 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
             @Override
             public void onFailure(Call call, IOException e) {
-                handler.onError(handleNetworkError(e, "streamChatCompletionWithFunctions"));
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingFunctionsAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
+                }
             }
 
             @Override
@@ -447,7 +583,13 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
                         String errorBody = responseBody != null ? responseBody.string() : null;
-                        handler.onError(handleHttpError(response, errorBody, "streamChatCompletionWithFunctions"));
+                        APIProviderException error = handleHttpError(response, errorBody, operation);
+
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryStreamingFunctionsAfterDelay(payload, handler, operation, attemptNumber, error);
+                        } else {
+                            handler.onError(error);
+                        }
                         return;
                     }
 

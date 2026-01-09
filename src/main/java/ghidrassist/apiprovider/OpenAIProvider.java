@@ -30,6 +30,12 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
     private static final String OPENAI_MODELS_ENDPOINT = "models";
     private static final String OPENAI_EMBEDDINGS_ENDPOINT = "embeddings";
     private static final String OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002";
+
+    // Retry settings for streaming calls
+    private static final int MAX_STREAMING_RETRIES = 10;
+    private static final int MIN_RETRY_BACKOFF_MS = 10000;  // 10 seconds
+    private static final int MAX_RETRY_BACKOFF_MS = 30000;  // 30 seconds
+
     private volatile boolean isCancelled = false;
 
     public OpenAIProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
@@ -121,6 +127,19 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
     @Override
     public void streamChatCompletion(List<ChatMessage> messages, LlmApi.LlmResponseHandler handler) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, true);
+        executeStreamingWithRetry(payload, handler, "stream_chat_completion", 0);
+    }
+
+    /**
+     * Execute streaming request with retry logic for rate limits and transient errors.
+     */
+    private void executeStreamingWithRetry(JsonObject payload, LlmApi.LlmResponseHandler handler,
+                                           String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
@@ -132,27 +151,35 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
 
             @Override
             public void onFailure(Call call, IOException e) {
-                APIProviderException apiException;
                 if (call.isCanceled()) {
-                    apiException = new StreamCancelledException(name, "stream_chat_completion", 
-                        StreamCancelledException.CancellationReason.USER_REQUESTED, e);
-                } else {
-                    apiException = handleNetworkError(e, "stream_chat_completion");
+                    handler.onError(new StreamCancelledException(name, operation,
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
                 }
-                handler.onError(apiException);
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
+                }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        APIProviderException apiException = handleHttpError(response, "stream_chat_completion");
-                        handler.onError(apiException);
+                        APIProviderException error = handleHttpError(response, operation);
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryStreamingAfterDelay(payload, handler, operation, attemptNumber, error);
+                        } else {
+                            handler.onError(error);
+                        }
                         return;
                     }
 
                     if (responseBody == null) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion", 
+                        handler.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                         return;
                     }
@@ -164,7 +191,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                         while (!source.exhausted() && !isCancelled && handler.shouldContinue()) {
                             String line = source.readUtf8Line();
                             if (line == null || line.isEmpty()) continue;
-                            
+
                             if (line.startsWith("data: ")) {
                                 String data = line.substring(6).trim();
                                 if (data.equals("[DONE]")) {
@@ -175,7 +202,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                                 try {
                                     JsonObject chunk = gson.fromJson(data, JsonObject.class);
                                     String content = extractDeltaContent(chunk);
-                                    
+
                                     if (content != null) {
                                         if (isFirst) {
                                             handler.onStart();
@@ -185,7 +212,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                                         handler.onUpdate(content);
                                     }
                                 } catch (JsonSyntaxException e) {
-                                    handler.onError(new ResponseException(name, "stream_chat_completion", 
+                                    handler.onError(new ResponseException(name, operation,
                                         ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                                     return;
                                 }
@@ -193,19 +220,76 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                         }
 
                         if (isCancelled) {
-                            handler.onError(new StreamCancelledException(name, "stream_chat_completion", 
+                            handler.onError(new StreamCancelledException(name, operation,
                                 StreamCancelledException.CancellationReason.USER_REQUESTED));
                         } else if (!handler.shouldContinue()) {
-                            handler.onError(new StreamCancelledException(name, "stream_chat_completion", 
+                            handler.onError(new StreamCancelledException(name, operation,
                                 StreamCancelledException.CancellationReason.USER_REQUESTED));
                         }
                     } catch (IOException e) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion", 
+                        handler.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                     }
                 }
             }
         });
+    }
+
+    /**
+     * Check if a streaming error should be retried.
+     */
+    private boolean shouldRetryStreaming(APIProviderException error, int attemptNumber) {
+        if (attemptNumber >= MAX_STREAMING_RETRIES) {
+            return false;
+        }
+        switch (error.getCategory()) {
+            case RATE_LIMIT:
+            case NETWORK:
+            case TIMEOUT:
+            case SERVICE_ERROR:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Retry streaming request after appropriate delay.
+     */
+    private void retryStreamingAfterDelay(JsonObject payload, LlmApi.LlmResponseHandler handler,
+                                          String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        ghidra.util.Msg.warn(this, String.format("Streaming retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "OpenAIProvider-StreamRetry").start();
+    }
+
+    /**
+     * Calculate wait time for streaming retry with jitter.
+     */
+    private int calculateStreamingRetryWait(APIProviderException error) {
+        if (error.getCategory() == APIProviderException.ErrorCategory.RATE_LIMIT) {
+            Integer retryAfter = error.getRetryAfterSeconds();
+            if (retryAfter != null && retryAfter > 0) {
+                return retryAfter * 1000;
+            }
+        }
+        return MIN_RETRY_BACKOFF_MS + (int) (Math.random() * (MAX_RETRY_BACKOFF_MS - MIN_RETRY_BACKOFF_MS));
     }
 
     @Override
@@ -382,6 +466,19 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         JsonObject payload = new JsonObject();
         payload.addProperty("model", OPENAI_EMBEDDING_MODEL);
         payload.addProperty("input", text);
+        executeEmbeddingsWithRetry(payload, callback, "get_embeddings", 0);
+    }
+
+    /**
+     * Execute embeddings request with retry logic for rate limits and transient errors.
+     */
+    private void executeEmbeddingsWithRetry(JsonObject payload, EmbeddingCallback callback,
+                                            String operation, int attemptNumber) {
+        if (isCancelled) {
+            callback.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENAI_EMBEDDINGS_ENDPOINT)
@@ -391,27 +488,35 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                APIProviderException apiException;
                 if (call.isCanceled()) {
-                    apiException = new StreamCancelledException(name, "get_embeddings", 
-                        StreamCancelledException.CancellationReason.USER_REQUESTED, e);
-                } else {
-                    apiException = handleNetworkError(e, "get_embeddings");
+                    callback.onError(new StreamCancelledException(name, operation,
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
                 }
-                callback.onError(apiException);
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryEmbeddingsAfterDelay(payload, callback, operation, attemptNumber, error);
+                } else {
+                    callback.onError(error);
+                }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        APIProviderException apiException = handleHttpError(response, "get_embeddings");
-                        callback.onError(apiException);
+                        APIProviderException error = handleHttpError(response, operation);
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryEmbeddingsAfterDelay(payload, callback, operation, attemptNumber, error);
+                        } else {
+                            callback.onError(error);
+                        }
                         return;
                     }
 
                     if (responseBody == null) {
-                        callback.onError(new ResponseException(name, "get_embeddings", 
+                        callback.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                         return;
                     }
@@ -419,48 +524,74 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                     try {
                         String responseBodyStr = responseBody.string();
                         JsonObject responseObj = gson.fromJson(responseBodyStr, JsonObject.class);
-                        
+
                         if (!responseObj.has("data")) {
-                            callback.onError(new ResponseException(name, "get_embeddings", 
+                            callback.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.MISSING_REQUIRED_FIELD));
                             return;
                         }
-                        
+
                         JsonArray dataArray = responseObj.getAsJsonArray("data");
                         if (dataArray.size() == 0) {
-                            callback.onError(new ResponseException(name, "get_embeddings", 
+                            callback.onError(new ResponseException(name, operation,
                                 "No embedding data in response"));
                             return;
                         }
-                        
+
                         JsonObject firstElement = dataArray.get(0).getAsJsonObject();
                         if (!firstElement.has("embedding")) {
-                            callback.onError(new ResponseException(name, "get_embeddings", 
+                            callback.onError(new ResponseException(name, operation,
                                 ResponseException.ResponseErrorType.MISSING_REQUIRED_FIELD));
                             return;
                         }
-                        
+
                         JsonArray embedding = firstElement.getAsJsonArray("embedding");
 
                         double[] embeddingArray = new double[embedding.size()];
                         for (int i = 0; i < embedding.size(); i++) {
                             embeddingArray[i] = embedding.get(i).getAsDouble();
                         }
-                        
+
                         callback.onSuccess(embeddingArray);
                     } catch (JsonSyntaxException e) {
-                        callback.onError(new ResponseException(name, "get_embeddings", 
+                        callback.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                     } catch (NumberFormatException e) {
-                        callback.onError(new ResponseException(name, "get_embeddings", 
+                        callback.onError(new ResponseException(name, operation,
                             "Invalid embedding format: " + e.getMessage()));
                     }
                 } catch (IOException e) {
-                    callback.onError(new ResponseException(name, "get_embeddings", 
+                    callback.onError(new ResponseException(name, operation,
                         ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                 }
             }
         });
+    }
+
+    /**
+     * Retry embeddings request after appropriate delay.
+     */
+    private void retryEmbeddingsAfterDelay(JsonObject payload, EmbeddingCallback callback,
+                                           String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        ghidra.util.Msg.warn(this, String.format("Embeddings retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeEmbeddingsWithRetry(payload, callback, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                callback.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "OpenAIProvider-EmbeddingsRetry").start();
     }
 
     private JsonObject buildChatCompletionPayload(List<ChatMessage> messages, boolean stream) {
@@ -589,6 +720,19 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
     ) throws APIProviderException {
         JsonObject payload = buildChatCompletionPayload(messages, true);
         payload.add("tools", gson.toJsonTree(functions));
+        executeStreamingFunctionsWithRetry(payload, handler, "stream_chat_completion_with_functions", 0);
+    }
+
+    /**
+     * Execute streaming with functions request with retry logic for rate limits and transient errors.
+     */
+    private void executeStreamingFunctionsWithRetry(JsonObject payload, StreamingFunctionHandler handler,
+                                                    String operation, int attemptNumber) {
+        if (isCancelled) {
+            handler.onError(new StreamCancelledException(name, operation,
+                StreamCancelledException.CancellationReason.USER_REQUESTED));
+            return;
+        }
 
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
@@ -598,27 +742,35 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                APIProviderException apiException;
                 if (call.isCanceled()) {
-                    apiException = new StreamCancelledException(name, "stream_chat_completion_with_functions",
-                        StreamCancelledException.CancellationReason.USER_REQUESTED, e);
-                } else {
-                    apiException = handleNetworkError(e, "stream_chat_completion_with_functions");
+                    handler.onError(new StreamCancelledException(name, operation,
+                        StreamCancelledException.CancellationReason.USER_REQUESTED, e));
+                    return;
                 }
-                handler.onError(apiException);
+
+                APIProviderException error = handleNetworkError(e, operation);
+                if (shouldRetryStreaming(error, attemptNumber)) {
+                    retryStreamingFunctionsAfterDelay(payload, handler, operation, attemptNumber, error);
+                } else {
+                    handler.onError(error);
+                }
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
                 try (ResponseBody responseBody = response.body()) {
                     if (!response.isSuccessful()) {
-                        APIProviderException apiException = handleHttpError(response, "stream_chat_completion_with_functions");
-                        handler.onError(apiException);
+                        APIProviderException error = handleHttpError(response, operation);
+                        if (shouldRetryStreaming(error, attemptNumber)) {
+                            retryStreamingFunctionsAfterDelay(payload, handler, operation, attemptNumber, error);
+                        } else {
+                            handler.onError(error);
+                        }
                         return;
                     }
 
                     if (responseBody == null) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                        handler.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.EMPTY_RESPONSE));
                         return;
                     }
@@ -706,7 +858,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                                         }
                                     }
                                 } catch (JsonSyntaxException e) {
-                                    handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                                    handler.onError(new ResponseException(name, operation,
                                         ResponseException.ResponseErrorType.MALFORMED_JSON, e));
                                     return;
                                 }
@@ -714,19 +866,45 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                         }
 
                         if (isCancelled) {
-                            handler.onError(new StreamCancelledException(name, "stream_chat_completion_with_functions",
+                            handler.onError(new StreamCancelledException(name, operation,
                                 StreamCancelledException.CancellationReason.USER_REQUESTED));
                         } else if (!handler.shouldContinue()) {
-                            handler.onError(new StreamCancelledException(name, "stream_chat_completion_with_functions",
+                            handler.onError(new StreamCancelledException(name, operation,
                                 StreamCancelledException.CancellationReason.USER_REQUESTED));
                         }
                     } catch (IOException e) {
-                        handler.onError(new ResponseException(name, "stream_chat_completion_with_functions",
+                        handler.onError(new ResponseException(name, operation,
                             ResponseException.ResponseErrorType.STREAM_INTERRUPTED, e));
                     }
                 }
             }
         });
+    }
+
+    /**
+     * Retry streaming with functions request after appropriate delay.
+     */
+    private void retryStreamingFunctionsAfterDelay(JsonObject payload, StreamingFunctionHandler handler,
+                                                   String operation, int attemptNumber, APIProviderException error) {
+        int nextAttempt = attemptNumber + 1;
+        int waitTimeMs = calculateStreamingRetryWait(error);
+
+        ghidra.util.Msg.warn(this, String.format("Streaming functions retry %d/%d for %s: %s. Waiting %d seconds...",
+            nextAttempt, MAX_STREAMING_RETRIES, operation,
+            error.getCategory().getDisplayName(), waitTimeMs / 1000));
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(waitTimeMs);
+                if (!isCancelled) {
+                    executeStreamingFunctionsWithRetry(payload, handler, operation, nextAttempt);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                handler.onError(new StreamCancelledException(name, operation,
+                    StreamCancelledException.CancellationReason.USER_REQUESTED));
+            }
+        }, "OpenAIProvider-StreamFunctionsRetry").start();
     }
 
     /**
