@@ -100,7 +100,8 @@ public class ListViewPanel extends JPanel {
         edgesTable.getColumnModel().getColumn(3).setPreferredWidth(100);
 
         // Edge type filter
-        String[] filterOptions = {"All Types", "CALLS", "REFERENCES", "DATA_DEPENDS", "CALLS_VULNERABLE", "SIMILAR_PURPOSE"};
+        String[] filterOptions = {"All Types", "CALLS", "REFERENCES", "CALLS_VULNERABLE", "SIMILAR_PURPOSE",
+                                  "TAINT_FLOWS_TO", "VULNERABLE_VIA", "NETWORK_SEND", "NETWORK_RECV"};
         edgeTypeFilter = new JComboBox<>(filterOptions);
 
         // Security flags panel (will be populated dynamically)

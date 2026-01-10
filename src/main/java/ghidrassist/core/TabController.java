@@ -2232,8 +2232,8 @@ public class TabController {
             Msg.showInfo(this, null, "Network Flow Analysis Complete",
                     String.format("Found %d functions calling send APIs\n" +
                             "Found %d functions calling recv APIs\n" +
-                            "Created %d NETWORK_SEND_PATH edges\n" +
-                            "Created %d NETWORK_RECV_PATH edges",
+                            "Created %d NETWORK_SEND edges\n" +
+                            "Created %d NETWORK_RECV edges",
                             result.sendFunctionsFound, result.recvFunctionsFound,
                             result.sendPathEdges, result.recvPathEdges));
         });
@@ -2408,13 +2408,61 @@ public class TabController {
                 }
 
                 java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> allEdges = new java.util.ArrayList<>();
+                java.util.Set<String> addedEdgeKeys = new java.util.HashSet<>();
+
+                // Collect nodes to add after iteration (to avoid ConcurrentModificationException)
+                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> nodesToAdd = new java.util.ArrayList<>();
+
                 for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
+                    // Collect outgoing edges
                     for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getOutgoingEdges(node.getId())) {
-                        if (nodeIds.contains(edge.getTargetId()) && edgeTypes.contains(edge.getType())) {
-                            allEdges.add(edge);
+                        ghidrassist.graphrag.nodes.EdgeType type = edge.getType();
+                        boolean isNetworkEdge = (type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_SEND ||
+                                                  type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_RECV);
+                        boolean targetInNeighborhood = nodeIds.contains(edge.getTargetId());
+
+                        // Include edge if: (target in neighborhood) OR (NETWORK edge with checkbox enabled)
+                        if (edgeTypes.contains(type) && (targetInNeighborhood || isNetworkEdge)) {
+                            String edgeKey = edge.getSourceId() + "->" + edge.getTargetId() + ":" + type;
+                            if (addedEdgeKeys.add(edgeKey)) {
+                                allEdges.add(edge);
+                                // Queue target node to add if outside neighborhood (for NETWORK edges)
+                                if (isNetworkEdge && !targetInNeighborhood) {
+                                    ghidrassist.graphrag.nodes.KnowledgeNode targetNode = graph.getNode(edge.getTargetId());
+                                    if (targetNode != null && nodeIds.add(targetNode.getId())) {
+                                        nodesToAdd.add(targetNode);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Also collect incoming NETWORK edges
+                    // NETWORK edges may originate from external API nodes outside the N-hop neighborhood
+                    if (edgeTypes.contains(ghidrassist.graphrag.nodes.EdgeType.NETWORK_SEND) ||
+                        edgeTypes.contains(ghidrassist.graphrag.nodes.EdgeType.NETWORK_RECV)) {
+                        for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getIncomingEdges(node.getId())) {
+                            ghidrassist.graphrag.nodes.EdgeType type = edge.getType();
+                            if (type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_SEND ||
+                                type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_RECV) {
+                                String edgeKey = edge.getSourceId() + "->" + edge.getTargetId() + ":" + type;
+                                if (addedEdgeKeys.add(edgeKey)) {
+                                    allEdges.add(edge);
+                                    // Queue source node to add if outside neighborhood
+                                    if (!nodeIds.contains(edge.getSourceId())) {
+                                        ghidrassist.graphrag.nodes.KnowledgeNode sourceNode = graph.getNode(edge.getSourceId());
+                                        if (sourceNode != null && nodeIds.add(sourceNode.getId())) {
+                                            nodesToAdd.add(sourceNode);
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+
+                // Add collected network source nodes after iteration completes
+                allNodes.addAll(nodesToAdd);
 
                 graphView.buildGraph(centerNode, allNodes, allEdges);
 

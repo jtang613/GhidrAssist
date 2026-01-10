@@ -780,7 +780,7 @@ public class TaintAnalyzer {
     // ========================================
 
     /**
-     * Analyze network data flow and create NETWORK_SEND_PATH and NETWORK_RECV_PATH edges.
+     * Analyze network data flow and create NETWORK_SEND and NETWORK_RECV edges.
      *
      * @return NetworkFlowResult with statistics about edges created
      */
@@ -903,35 +903,45 @@ public class TaintAnalyzer {
         List<KnowledgeNode> recvNodes = new ArrayList<>();
         int foundByName = 0;
         int foundByCallee = 0;
+        int totalFunctions = 0;
 
-        for (KnowledgeNode node : graph.getNodesByType(NodeType.FUNCTION)) {
-            // Check if function name is a known recv API (for external function nodes)
+        List<KnowledgeNode> allFunctions = graph.getNodesByType(NodeType.FUNCTION);
+        Msg.info(this, String.format("Scanning %d function nodes for recv APIs...", allFunctions.size()));
+
+        for (KnowledgeNode node : allFunctions) {
+            totalFunctions++;
             String name = node.getName();
+
+            // Check if function name is a known recv API (for external function nodes)
             if (name != null && isNetworkRecvAPI(name)) {
                 if (seenIds.add(node.getId())) {
                     recvNodes.add(node);
                     foundByName++;
-                    Msg.debug(this, String.format("Found recv API by name: %s (id=%s)", name, node.getId()));
+                    Msg.info(this, String.format("Found recv API by name: '%s' (normalized: '%s', id=%s)",
+                            name, normalizeFunctionName(name), node.getId()));
                 }
                 continue;
             }
 
             // Check callees for network recv functions
-            for (KnowledgeNode callee : graph.getCallees(node.getId())) {
-                if (callee.getName() != null && isNetworkRecvAPI(callee.getName())) {
+            List<KnowledgeNode> callees = graph.getCallees(node.getId());
+            for (KnowledgeNode callee : callees) {
+                String calleeName = callee.getName();
+                if (calleeName != null && isNetworkRecvAPI(calleeName)) {
                     if (seenIds.add(node.getId())) {
                         recvNodes.add(node);
                         foundByCallee++;
-                        Msg.debug(this, String.format("Found function calling recv API: %s calls %s",
+                        Msg.info(this, String.format("Found function calling recv API: '%s' calls '%s' (normalized: '%s')",
                                 name != null ? name : "sub_" + Long.toHexString(node.getAddress()),
-                                callee.getName()));
+                                calleeName, normalizeFunctionName(calleeName)));
                     }
                     break;
                 }
             }
         }
 
-        Msg.info(this, String.format("Recv nodes breakdown: %d by API name, %d by callee match", foundByName, foundByCallee));
+        Msg.info(this, String.format("Recv nodes breakdown: %d by API name, %d by callee match (scanned %d functions)",
+                foundByName, foundByCallee, totalFunctions));
         return recvNodes;
     }
 
@@ -963,6 +973,24 @@ public class TaintAnalyzer {
 
         String normalized = name;
 
+        // Remove library prefix (e.g., "WS2_32.dll::" or "KERNEL32.DLL_")
+        int colonIdx = normalized.indexOf("::");
+        if (colonIdx > 0) {
+            normalized = normalized.substring(colonIdx + 2);
+        }
+        // Also handle underscore-separated library prefix (e.g., "WS2_32.DLL_WSARecvFrom")
+        if (normalized.contains(".DLL_") || normalized.contains(".dll_")) {
+            int dllIdx = normalized.toLowerCase().indexOf(".dll_");
+            if (dllIdx > 0) {
+                normalized = normalized.substring(dllIdx + 5);
+            }
+        }
+
+        // Remove <EXTERNAL>:: prefix
+        if (normalized.startsWith("<EXTERNAL>::")) {
+            normalized = normalized.substring(12);
+        }
+
         // Remove __imp_ prefix (import thunk)
         if (normalized.startsWith("__imp_")) {
             normalized = normalized.substring(6);
@@ -986,7 +1014,7 @@ public class TaintAnalyzer {
     }
 
     /**
-     * Create NETWORK_SEND_PATH edges from entry points to send functions.
+     * Create NETWORK_SEND edges from entry points to send functions.
      * Also creates edges from direct callers.
      * @return int array: [0] = edges created, [1] = edges already existing
      */
@@ -1058,7 +1086,7 @@ public class TaintAnalyzer {
                 }
 
                 // Skip if edge already exists
-                if (graph.hasEdgeBetween(entry.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
+                if (graph.hasEdgeBetween(entry.getId(), sendNode.getId(), EdgeType.NETWORK_SEND)) {
                     Msg.debug(this, String.format("SEND edge already exists: %s -> %s", entryName, sendName));
                     edgesExisting.incrementAndGet();
                     continue;
@@ -1076,7 +1104,7 @@ public class TaintAnalyzer {
                                     path.getLength(), sendAPI, entry.getName());
 
                             graph.addEdge(entry.getId(), sendNode.getId(),
-                                    EdgeType.NETWORK_SEND_PATH, 1.0, metadata);
+                                    EdgeType.NETWORK_SEND, 1.0, metadata);
                             edgesCreated.incrementAndGet();
                             Msg.info(this, String.format("Created SEND edge: %s -> %s (path length %d)",
                                     entryName, sendName, path.getLength()));
@@ -1113,13 +1141,13 @@ public class TaintAnalyzer {
                 break;
             }
             for (KnowledgeNode caller : graph.getCallers(sendNode.getId())) {
-                if (!graph.hasEdgeBetween(caller.getId(), sendNode.getId(), EdgeType.NETWORK_SEND_PATH)) {
+                if (!graph.hasEdgeBetween(caller.getId(), sendNode.getId(), EdgeType.NETWORK_SEND)) {
                     String sendAPI = getSendAPIName(sendNode);
                     String metadata = String.format(
                             "{\"direct_caller\":true,\"send_api\":\"%s\"}", sendAPI);
 
                     graph.addEdge(caller.getId(), sendNode.getId(),
-                            EdgeType.NETWORK_SEND_PATH, 0.5, metadata);
+                            EdgeType.NETWORK_SEND, 0.5, metadata);
                     edgesCreated.incrementAndGet();
                 } else {
                     edgesExisting.incrementAndGet();
@@ -1131,7 +1159,7 @@ public class TaintAnalyzer {
     }
 
     /**
-     * Create NETWORK_RECV_PATH edges from recv functions to their callers.
+     * Create NETWORK_RECV edges from recv functions to their callers.
      * Shows where received network data flows.
      * @return int array: [0] = edges created, [1] = edges already existing
      */
@@ -1146,12 +1174,33 @@ public class TaintAnalyzer {
         // Debug: Check if recv nodes exist in memory graph and have callers
         Graph<String, LabeledEdge> memGraph = graph.getMemoryGraph();
         for (KnowledgeNode recvNode : recvNodes) {
+            String recvName = recvNode.getName() != null ? recvNode.getName() : "sub_" + Long.toHexString(recvNode.getAddress());
             boolean inGraph = memGraph.containsVertex(recvNode.getId());
             int incomingEdgeCount = inGraph ? memGraph.incomingEdgesOf(recvNode.getId()).size() : 0;
             List<KnowledgeNode> callers = graph.getCallers(recvNode.getId());
-            Msg.debug(this, String.format("Recv node '%s': inMemGraph=%b, incomingEdges=%d, callers=%d",
-                    recvNode.getName() != null ? recvNode.getName() : "sub_" + Long.toHexString(recvNode.getAddress()),
-                    inGraph, incomingEdgeCount, callers.size()));
+            Msg.info(this, String.format("Recv node '%s' (id=%s): inMemGraph=%b, incomingEdges=%d, callers=%d",
+                    recvName, recvNode.getId(), inGraph, incomingEdgeCount, callers.size()));
+
+            // Log caller names for debugging
+            if (callers.isEmpty() && incomingEdgeCount > 0) {
+                Msg.warn(this, String.format("Recv node '%s' has %d incoming edges but getCallers() returned 0 - possible edge type mismatch",
+                        recvName, incomingEdgeCount));
+                // Log the actual edge types
+                if (inGraph) {
+                    for (LabeledEdge edge : memGraph.incomingEdgesOf(recvNode.getId())) {
+                        String sourceId = memGraph.getEdgeSource(edge);
+                        KnowledgeNode sourceNode = graph.getNode(sourceId);
+                        String sourceName = sourceNode != null ? sourceNode.getName() : sourceId;
+                        Msg.info(this, String.format("  Incoming edge: %s -[%s]-> %s",
+                                sourceName, edge.getType(), recvName));
+                    }
+                }
+            } else if (!callers.isEmpty()) {
+                for (KnowledgeNode caller : callers) {
+                    String callerName = caller.getName() != null ? caller.getName() : "sub_" + Long.toHexString(caller.getAddress());
+                    Msg.info(this, String.format("  Caller of '%s': '%s'", recvName, callerName));
+                }
+            }
         }
 
         // Use atomic counters for thread-safe counting
@@ -1187,15 +1236,15 @@ public class TaintAnalyzer {
 
                 // Edge: recv -> caller (showing data flow direction)
                 try {
-                    boolean alreadyExists = graph.hasEdgeBetween(recvNode.getId(), caller.getId(), EdgeType.NETWORK_RECV_PATH);
+                    boolean alreadyExists = graph.hasEdgeBetween(recvNode.getId(), caller.getId(), EdgeType.NETWORK_RECV);
                     if (!alreadyExists) {
                         String metadata = String.format(
                                 "{\"recv_api\":\"%s\",\"hop\":1}", recvAPI);
 
                         graph.addEdge(recvNode.getId(), caller.getId(),
-                                EdgeType.NETWORK_RECV_PATH, 1.0, metadata);
+                                EdgeType.NETWORK_RECV, 1.0, metadata);
                         edgesCreated.incrementAndGet();
-                        Msg.debug(this, String.format("Created NETWORK_RECV_PATH edge: %s -> %s", recvNodeName, callerName));
+                        Msg.debug(this, String.format("Created NETWORK_RECV edge: %s -> %s", recvNodeName, callerName));
                     } else {
                         edgesExisting.incrementAndGet();
                         Msg.debug(this, String.format("Edge already exists: %s -> %s", recvNodeName, callerName));
@@ -1207,13 +1256,13 @@ public class TaintAnalyzer {
                 // Also trace 2-hop callers (for data propagation tracking)
                 for (KnowledgeNode grandCaller : graph.getCallers(caller.getId())) {
                     try {
-                        if (!graph.hasEdgeBetween(recvNode.getId(), grandCaller.getId(), EdgeType.NETWORK_RECV_PATH)) {
+                        if (!graph.hasEdgeBetween(recvNode.getId(), grandCaller.getId(), EdgeType.NETWORK_RECV)) {
                             String metadata2 = String.format(
                                     "{\"recv_api\":\"%s\",\"hop\":2,\"via\":\"%s\"}",
                                     recvAPI, caller.getName());
 
                             graph.addEdge(recvNode.getId(), grandCaller.getId(),
-                                    EdgeType.NETWORK_RECV_PATH, 0.5, metadata2);
+                                    EdgeType.NETWORK_RECV, 0.5, metadata2);
                             edgesCreated.incrementAndGet();
                         } else {
                             edgesExisting.incrementAndGet();
@@ -1310,9 +1359,9 @@ public class TaintAnalyzer {
             return String.format(
                     "Network Flow Analysis Complete:\n" +
                     "- Found %d functions calling send APIs\n" +
-                    "- NETWORK_SEND_PATH edges: %d total (%d new, %d existing)\n" +
+                    "- NETWORK_SEND edges: %d total (%d new, %d existing)\n" +
                     "- Found %d functions calling recv APIs\n" +
-                    "- NETWORK_RECV_PATH edges: %d total (%d new, %d existing)",
+                    "- NETWORK_RECV edges: %d total (%d new, %d existing)",
                     sendFunctions.size(), totalSend, sendPathEdgesCreated, sendPathEdgesExisting,
                     recvFunctions.size(), totalRecv, recvPathEdgesCreated, recvPathEdgesExisting);
         }

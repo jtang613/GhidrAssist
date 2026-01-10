@@ -54,7 +54,6 @@ public class StructureExtractor {
     private final AtomicInteger functionsExtracted = new AtomicInteger(0);
     private final AtomicInteger callEdgesCreated = new AtomicInteger(0);
     private final AtomicInteger refEdgesCreated = new AtomicInteger(0);
-    private final AtomicInteger dataDepEdgesCreated = new AtomicInteger(0);
     private final AtomicInteger vulnEdgesCreated = new AtomicInteger(0);
 
     // Decompiler instance (reused for efficiency) - only for single-threaded operations
@@ -97,7 +96,7 @@ public class StructureExtractor {
             decompiler.openProgram(program);
 
             // Phase 1: Extract all functions as nodes AND their edges
-            // Note: extractFunction() also extracts CALLS, REFERENCES, DATA_DEPENDS, and
+            // Note: extractFunction() also extracts CALLS, REFERENCES, and
             // CALLS_VULNERABLE edges for each function, so we don't need separate bulk phases
             monitor.setMessage("Extracting functions and edges...");
             extractFunctions();
@@ -106,7 +105,7 @@ public class StructureExtractor {
             if (monitor.isCancelled()) {
                 Msg.info(this, "Extraction cancelled after function extraction");
                 return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
-                        refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(),
+                        refEdgesCreated.get(), vulnEdgesCreated.get(),
                         System.currentTimeMillis() - startTime);
             }
 
@@ -118,7 +117,7 @@ public class StructureExtractor {
                 if (monitor.isCancelled()) {
                     Msg.info(this, "Extraction cancelled after basic block extraction");
                     return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
-                            refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(),
+                            refEdgesCreated.get(), vulnEdgesCreated.get(),
                             System.currentTimeMillis() - startTime);
                 }
             }
@@ -130,7 +129,7 @@ public class StructureExtractor {
             if (monitor.isCancelled()) {
                 Msg.info(this, "Extraction cancelled after binary node creation");
                 return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
-                        refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(),
+                        refEdgesCreated.get(), vulnEdgesCreated.get(),
                         System.currentTimeMillis() - startTime);
             }
 
@@ -146,10 +145,10 @@ public class StructureExtractor {
         }
 
         long elapsed = System.currentTimeMillis() - startTime;
-        Msg.info(this, String.format("Structure extraction completed in %dms: %d functions, %d call edges, %d ref edges, %d data-dep edges, %d vuln edges",
-                elapsed, functionsExtracted.get(), callEdgesCreated.get(), refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get()));
+        Msg.info(this, String.format("Structure extraction completed in %dms: %d functions, %d call edges, %d ref edges, %d vuln edges",
+                elapsed, functionsExtracted.get(), callEdgesCreated.get(), refEdgesCreated.get(), vulnEdgesCreated.get()));
 
-        return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(), refEdgesCreated.get(), dataDepEdgesCreated.get(), vulnEdgesCreated.get(), elapsed);
+        return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(), refEdgesCreated.get(), vulnEdgesCreated.get(), elapsed);
     }
 
     /**
@@ -193,9 +192,6 @@ public class StructureExtractor {
                 // Extract references from this function (REFERENCES edges)
                 extractFunctionReferences(function, node);
 
-                // Extract data dependencies for this function (DATA_DEPENDS edges)
-                extractFunctionDataDependencies(function, node);
-
                 // Extract vulnerable call edges for this function (CALLS_VULNERABLE edges)
                 extractFunctionVulnerableCalls(function, node);
 
@@ -228,17 +224,11 @@ public class StructureExtractor {
             // Check if edges need updating by looking for presence of new edge types
             // We use a simple heuristic: if there are no REFERENCES edges from this node, update
             boolean hasReferencesEdges = graph.hasEdgesOfType(node.getId(), EdgeType.REFERENCES);
-            boolean hasDataDependsEdges = graph.hasEdgesOfType(node.getId(), EdgeType.DATA_DEPENDS);
             boolean hasVulnerableEdges = graph.hasEdgesOfType(node.getId(), EdgeType.CALLS_VULNERABLE);
 
             if (!hasReferencesEdges) {
                 Msg.debug(this, "Updating REFERENCES edges for: " + function.getName());
                 extractFunctionReferences(function, node);
-            }
-
-            if (!hasDataDependsEdges) {
-                Msg.debug(this, "Updating DATA_DEPENDS edges for: " + function.getName());
-                extractFunctionDataDependencies(function, node);
             }
 
             if (!hasVulnerableEdges) {
@@ -460,16 +450,14 @@ public class StructureExtractor {
             KnowledgeNode node = createFunctionNodeParallel(function, threadDecompiler);
             if (node != null) {
                 // Queue for batch insert (thread-safe)
-                graph.queueNodeForBatch(node);
+                // Use returned node - may be existing canonical node if duplicate
+                node = graph.queueNodeForBatch(node);
 
-                // Extract calls from this function
+                // Extract calls from this function (use canonical node ID)
                 extractFunctionCalls(function, node.getId());
 
                 // Extract references from this function (REFERENCES edges)
                 extractFunctionReferences(function, node);
-
-                // Extract data dependencies for this function (DATA_DEPENDS edges)
-                extractFunctionDataDependencies(function, node);
 
                 // Extract vulnerable call edges for this function (CALLS_VULNERABLE edges)
                 extractFunctionVulnerableCalls(function, node);
@@ -636,7 +624,8 @@ public class StructureExtractor {
                 if (extNode == null) {
                     extNode = KnowledgeNode.createFunction(binaryId, 0, realCallee.getName());
                     extNode.setRawContent("// External function: " + realCallee.getName());
-                    graph.queueNodeForBatch(extNode);
+                    // Use returned canonical node to ensure correct ID for edge
+                    extNode = graph.queueNodeForBatch(extNode);
                 }
                 graph.queueEdgeForBatch(callerNodeId, extNode.getId(), EdgeType.CALLS);
             } else {
@@ -647,7 +636,8 @@ public class StructureExtractor {
                     calleeNode = KnowledgeNode.createFunction(binaryId,
                             realCallee.getEntryPoint().getOffset(), realCallee.getName());
                     calleeNode.markStale();
-                    graph.queueNodeForBatch(calleeNode);
+                    // Use returned canonical node to ensure correct ID for edge
+                    calleeNode = graph.queueNodeForBatch(calleeNode);
                 }
                 graph.queueEdgeForBatch(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
                 callEdgesCreated.incrementAndGet();
@@ -686,7 +676,8 @@ public class StructureExtractor {
                 callerNode = KnowledgeNode.createFunction(binaryId,
                         realCaller.getEntryPoint().getOffset(), realCaller.getName());
                 callerNode.markStale();
-                graph.queueNodeForBatch(callerNode);
+                // Use returned canonical node to ensure correct ID for edge
+                callerNode = graph.queueNodeForBatch(callerNode);
             }
 
             // Create edge: caller -> this function (callee)
@@ -844,110 +835,6 @@ public class StructureExtractor {
     }
 
     /**
-     * Extract data dependency edges between functions that share global data.
-     * Creates DATA_DEPENDS edges where reader depends on writer.
-     */
-    private void extractDataDependencies() {
-        try {
-            ReferenceManager refMgr = program.getReferenceManager();
-            FunctionManager funcMgr = program.getFunctionManager();
-
-            // Map: global address -> list of functions that READ from it
-            Map<Long, List<KnowledgeNode>> dataReaders = new HashMap<>();
-            // Map: global address -> list of functions that WRITE to it
-            Map<Long, List<KnowledgeNode>> dataWriters = new HashMap<>();
-
-            // First pass: collect all data reads and writes
-            FunctionIterator functions = funcMgr.getFunctions(true);
-            int total = funcMgr.getFunctionCount();
-            int processed = 0;
-
-            // Initialize progress for this phase
-            monitor.initialize(total);
-
-            while (functions.hasNext() && !monitor.isCancelled()) {
-                Function func = functions.next();
-                processed++;
-
-                if (processed % 100 == 0) {
-                    monitor.setProgress(processed);
-                    monitor.setMessage(String.format("Analyzing data dependencies... %d/%d (pass 1)", processed, total));
-                }
-
-                if (func.isThunk() || func.isExternal()) {
-                    continue;
-                }
-
-                KnowledgeNode funcNode = graph.getNodeByAddress(func.getEntryPoint().getOffset());
-                if (funcNode == null) {
-                    continue;
-                }
-
-                AddressSetView body = func.getBody();
-                for (Address addr : body.getAddresses(true)) {
-                    if (monitor.isCancelled()) break;
-
-                    Reference[] refs = refMgr.getReferencesFrom(addr);
-                    for (Reference ref : refs) {
-                        if (!ref.getReferenceType().isData()) {
-                            continue;
-                        }
-
-                        Address toAddr = ref.getToAddress();
-                        MemoryBlock block = program.getMemory().getBlock(toAddr);
-
-                        // Only consider references to data sections (not code)
-                        if (block == null || block.isExecute()) {
-                            continue;
-                        }
-
-                        long dataAddr = toAddr.getOffset();
-
-                        // Determine if this is a read or write based on reference type
-                        if (ref.getReferenceType().isWrite()) {
-                            dataWriters.computeIfAbsent(dataAddr, k -> new ArrayList<>()).add(funcNode);
-                        } else if (ref.getReferenceType().isRead()) {
-                            dataReaders.computeIfAbsent(dataAddr, k -> new ArrayList<>()).add(funcNode);
-                        } else {
-                            // Unknown access type - assume read
-                            dataReaders.computeIfAbsent(dataAddr, k -> new ArrayList<>()).add(funcNode);
-                        }
-                    }
-                }
-            }
-
-            // Second pass: create DATA_DEPENDS edges (reader depends on writer)
-            monitor.setMessage("Creating data dependency edges...");
-            Set<String> createdEdges = new HashSet<>(); // Avoid duplicates
-
-            for (Map.Entry<Long, List<KnowledgeNode>> entry : dataReaders.entrySet()) {
-                if (monitor.isCancelled()) break;
-
-                Long dataAddr = entry.getKey();
-                List<KnowledgeNode> readers = entry.getValue();
-                List<KnowledgeNode> writers = dataWriters.getOrDefault(dataAddr, List.of());
-
-                for (KnowledgeNode reader : readers) {
-                    for (KnowledgeNode writer : writers) {
-                        if (!reader.getId().equals(writer.getId())) {
-                            String edgeKey = reader.getId() + "->" + writer.getId();
-                            if (!createdEdges.contains(edgeKey)) {
-                                graph.queueEdgeForBatch(reader.getId(), writer.getId(), EdgeType.DATA_DEPENDS);
-                                createdEdges.add(edgeKey);
-                                dataDepEdgesCreated.incrementAndGet();
-                            }
-                        }
-                    }
-                }
-            }
-
-            Msg.info(this, String.format("Extracted %d data dependency edges", dataDepEdgesCreated.get()));
-        } catch (Exception e) {
-            Msg.error(this, "Failed to extract data dependencies: " + e.getMessage(), e);
-        }
-    }
-
-    /**
      * Extract CALLS_VULNERABLE edges from callers to functions with vulnerability risks.
      * Also propagates the CALLS_VULNERABLE_FUNCTION flag to callers.
      */
@@ -1067,80 +954,6 @@ public class StructureExtractor {
             }
         } catch (Exception e) {
             Msg.debug(this, "Failed to extract references for " + function.getName() + ": " + e.getMessage());
-        }
-    }
-
-    /**
-     * Extract DATA_DEPENDS edges for a single function.
-     * Creates edges from this function to functions that write data this function reads.
-     *
-     * @param function The function to extract data dependencies for
-     * @param funcNode The function's knowledge node
-     */
-    private void extractFunctionDataDependencies(Function function, KnowledgeNode funcNode) {
-        try {
-            ReferenceManager refMgr = program.getReferenceManager();
-            FunctionManager funcMgr = program.getFunctionManager();
-            AddressSetView body = function.getBody();
-            Set<String> createdEdges = new HashSet<>();
-
-            // Find data addresses this function reads from
-            Set<Long> readAddresses = new HashSet<>();
-            for (Address addr : body.getAddresses(true)) {
-                if (monitor.isCancelled()) break;
-
-                Reference[] refs = refMgr.getReferencesFrom(addr);
-                for (Reference ref : refs) {
-                    if (!ref.getReferenceType().isData()) {
-                        continue;
-                    }
-
-                    Address toAddr = ref.getToAddress();
-                    MemoryBlock block = program.getMemory().getBlock(toAddr);
-
-                    // Only consider references to data sections (not code)
-                    if (block == null || block.isExecute()) {
-                        continue;
-                    }
-
-                    // If this is a read, track the address
-                    if (ref.getReferenceType().isRead() || !ref.getReferenceType().isWrite()) {
-                        readAddresses.add(toAddr.getOffset());
-                    }
-                }
-            }
-
-            // For each read address, find functions that write to it
-            for (Long dataAddr : readAddresses) {
-                if (monitor.isCancelled()) break;
-
-                Address addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(dataAddr);
-                ReferenceIterator refsTo = refMgr.getReferencesTo(addr);
-
-                while (refsTo.hasNext()) {
-                    Reference ref = refsTo.next();
-                    if (!ref.getReferenceType().isWrite()) {
-                        continue;
-                    }
-
-                    // Find the function containing this write
-                    Function writerFunc = funcMgr.getFunctionContaining(ref.getFromAddress());
-                    if (writerFunc != null && !writerFunc.equals(function)) {
-                        KnowledgeNode writerNode = graph.getNodeByAddress(
-                                writerFunc.getEntryPoint().getOffset());
-                        if (writerNode != null) {
-                            String edgeKey = funcNode.getId() + "->" + writerNode.getId();
-                            if (!createdEdges.contains(edgeKey)) {
-                                graph.queueEdgeForBatch(funcNode.getId(), writerNode.getId(), EdgeType.DATA_DEPENDS);
-                                createdEdges.add(edgeKey);
-                                dataDepEdgesCreated.incrementAndGet();
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Msg.debug(this, "Failed to extract data dependencies for " + function.getName() + ": " + e.getMessage());
         }
     }
 
@@ -1324,23 +1137,21 @@ public class StructureExtractor {
         public final int functionsExtracted;
         public final int callEdgesCreated;
         public final int refEdgesCreated;
-        public final int dataDepEdgesCreated;
         public final int vulnEdgesCreated;
         public final long elapsedMs;
 
-        public ExtractionResult(int functions, int calls, int refs, int dataDeps, int vulns, long elapsed) {
+        public ExtractionResult(int functions, int calls, int refs, int vulns, long elapsed) {
             this.functionsExtracted = functions;
             this.callEdgesCreated = calls;
             this.refEdgesCreated = refs;
-            this.dataDepEdgesCreated = dataDeps;
             this.vulnEdgesCreated = vulns;
             this.elapsedMs = elapsed;
         }
 
         @Override
         public String toString() {
-            return String.format("Extracted %d functions, %d call edges, %d ref edges, %d data-dep edges, %d vuln edges in %dms",
-                    functionsExtracted, callEdgesCreated, refEdgesCreated, dataDepEdgesCreated, vulnEdgesCreated, elapsedMs);
+            return String.format("Extracted %d functions, %d call edges, %d ref edges, %d vuln edges in %dms",
+                    functionsExtracted, callEdgesCreated, refEdgesCreated, vulnEdgesCreated, elapsedMs);
         }
     }
 }

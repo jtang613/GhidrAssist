@@ -131,9 +131,34 @@ public class BinaryKnowledgeGraph {
     }
 
     /**
+     * Get a pending node by address (not yet committed to database).
+     * Thread-safe - checks the pending batch.
+     * This is critical for parallel extraction to avoid creating duplicate nodes.
+     */
+    public KnowledgeNode getPendingNodeByAddress(long address) {
+        synchronized (pendingNodes) {
+            for (KnowledgeNode node : pendingNodes) {
+                if (node.getAddress() != null && node.getAddress() == address) {
+                    return node;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Get a node by its Ghidra address within this binary.
+     * Checks pending nodes first (for parallel extraction), then database.
      */
     public KnowledgeNode getNodeByAddress(long address) {
+        // FIRST check pending nodes (not yet committed to database)
+        // This prevents duplicate node creation during parallel extraction
+        KnowledgeNode pending = getPendingNodeByAddress(address);
+        if (pending != null) {
+            return pending;
+        }
+
+        // Then check database
         String sql = "SELECT * FROM graph_nodes WHERE binary_id = ? AND address = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, binaryId);
@@ -149,9 +174,33 @@ public class BinaryKnowledgeGraph {
     }
 
     /**
+     * Get a pending node by name (not yet committed to database).
+     * Thread-safe - checks the pending batch.
+     */
+    public KnowledgeNode getPendingNodeByName(String name) {
+        synchronized (pendingNodes) {
+            for (KnowledgeNode node : pendingNodes) {
+                if (name != null && name.equals(node.getName())) {
+                    return node;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Get a function node by name.
+     * Checks pending nodes first (for parallel extraction), then database.
      */
     public KnowledgeNode getNodeByName(String name) {
+        // FIRST check pending nodes (not yet committed to database)
+        // This prevents duplicate external function node creation during parallel extraction
+        KnowledgeNode pending = getPendingNodeByName(name);
+        if (pending != null) {
+            return pending;
+        }
+
+        // Then check database
         String sql = "SELECT * FROM graph_nodes WHERE binary_id = ? AND name = ? AND type = ?";
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, binaryId);
@@ -327,27 +376,18 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Internal upsert implementation with retry support for FTS corruption.
+     * Uses INSERT OR IGNORE to preserve existing nodes and their edge references.
      */
     private void upsertNodeInternal(KnowledgeNode node, boolean isRetry) {
-        String sql = "INSERT INTO graph_nodes "
+        // Use INSERT OR IGNORE to keep existing nodes intact.
+        // This preserves node IDs that edges may reference.
+        // If we need to update an existing node, use updateNode() instead.
+        String sql = "INSERT OR IGNORE INTO graph_nodes "
                 + "(id, type, address, binary_id, name, raw_content, llm_summary, confidence, "
                 + "embedding, security_flags, network_apis, file_io_apis, ip_addresses, urls, "
                 + "file_paths, domains, registry_keys, risk_level, activity_profile, analysis_depth, "
                 + "created_at, updated_at, is_stale, user_edited) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                + "ON CONFLICT(id) DO UPDATE SET "
-                + "type = excluded.type, address = excluded.address, name = excluded.name, "
-                + "raw_content = excluded.raw_content, llm_summary = excluded.llm_summary, "
-                + "confidence = excluded.confidence, embedding = excluded.embedding, "
-                + "security_flags = excluded.security_flags, "
-                + "network_apis = excluded.network_apis, file_io_apis = excluded.file_io_apis, "
-                + "ip_addresses = excluded.ip_addresses, urls = excluded.urls, "
-                + "file_paths = excluded.file_paths, domains = excluded.domains, "
-                + "registry_keys = excluded.registry_keys, "
-                + "risk_level = excluded.risk_level, activity_profile = excluded.activity_profile, "
-                + "analysis_depth = excluded.analysis_depth, "
-                + "updated_at = excluded.updated_at, is_stale = excluded.is_stale, "
-                + "user_edited = excluded.user_edited";
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, node.getId());
@@ -496,14 +536,42 @@ public class BinaryKnowledgeGraph {
     // ========================================
 
     /**
-     * Queue a node for batch insertion.
-     * Automatically flushes when batch size is reached.
+     * Queue a node for batch insertion, returning the canonical node for this address/name.
+     * This method is thread-safe and ensures no duplicate nodes are queued.
+     * If a node with the same address (or name for external functions) already exists
+     * in pending, returns the existing node instead of adding a duplicate.
+     *
+     * @param node The node to queue
+     * @return The canonical node (either the input node if added, or existing node if duplicate)
      */
-    public void queueNodeForBatch(KnowledgeNode node) {
-        pendingNodes.add(node);
+    public KnowledgeNode queueNodeForBatch(KnowledgeNode node) {
+        synchronized (pendingNodes) {
+            // Check if a node with same address already exists in pending
+            if (node.getAddress() != null && node.getAddress() != 0) {
+                for (KnowledgeNode existing : pendingNodes) {
+                    if (existing.getAddress() != null &&
+                        existing.getAddress().equals(node.getAddress())) {
+                        return existing; // Return existing node, don't add duplicate
+                    }
+                }
+            } else if (node.getName() != null) {
+                // External function - check by name
+                for (KnowledgeNode existing : pendingNodes) {
+                    if (node.getName().equals(existing.getName()) &&
+                        (existing.getAddress() == null || existing.getAddress() == 0)) {
+                        return existing; // Return existing node, don't add duplicate
+                    }
+                }
+            }
+
+            // No duplicate found, add the node
+            pendingNodes.add(node);
+        }
+
         if (pendingNodes.size() >= BATCH_SIZE) {
             flushNodeBatch();
         }
+        return node;
     }
 
     /**
@@ -537,25 +605,40 @@ public class BinaryKnowledgeGraph {
             pendingNodes.clear();
         }
 
-        String sql = "INSERT INTO graph_nodes "
+        // Deduplicate within the batch to avoid constraint violations
+        // - By address for regular functions (preserves original node ID)
+        // - By name for external functions (address=0 or null)
+        Map<Long, KnowledgeNode> addressToNode = new LinkedHashMap<>();
+        Map<String, KnowledgeNode> nameToNode = new LinkedHashMap<>();
+        List<KnowledgeNode> deduped = new ArrayList<>();
+        for (KnowledgeNode node : toInsert) {
+            if (node.getAddress() != null && node.getAddress() != 0) {
+                // Regular function with address - dedupe by address
+                if (!addressToNode.containsKey(node.getAddress())) {
+                    addressToNode.put(node.getAddress(), node);
+                    deduped.add(node);
+                }
+            } else if (node.getName() != null) {
+                // External function (no address) - dedupe by name
+                if (!nameToNode.containsKey(node.getName())) {
+                    nameToNode.put(node.getName(), node);
+                    deduped.add(node);
+                }
+            } else {
+                // No address and no name - just add it
+                deduped.add(node);
+            }
+        }
+
+        // Use INSERT OR IGNORE to keep existing nodes intact.
+        // This preserves node IDs that edges may reference.
+        // Duplicates are already filtered by getPendingNodeByAddress() check.
+        String sql = "INSERT OR IGNORE INTO graph_nodes "
                 + "(id, type, address, binary_id, name, raw_content, llm_summary, confidence, "
                 + "embedding, security_flags, network_apis, file_io_apis, ip_addresses, urls, "
                 + "file_paths, domains, registry_keys, risk_level, activity_profile, analysis_depth, "
                 + "created_at, updated_at, is_stale, user_edited) "
-                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                + "ON CONFLICT(id) DO UPDATE SET "
-                + "type = excluded.type, address = excluded.address, name = excluded.name, "
-                + "raw_content = excluded.raw_content, llm_summary = excluded.llm_summary, "
-                + "confidence = excluded.confidence, embedding = excluded.embedding, "
-                + "security_flags = excluded.security_flags, "
-                + "network_apis = excluded.network_apis, file_io_apis = excluded.file_io_apis, "
-                + "ip_addresses = excluded.ip_addresses, urls = excluded.urls, "
-                + "file_paths = excluded.file_paths, domains = excluded.domains, "
-                + "registry_keys = excluded.registry_keys, "
-                + "risk_level = excluded.risk_level, activity_profile = excluded.activity_profile, "
-                + "analysis_depth = excluded.analysis_depth, "
-                + "updated_at = excluded.updated_at, is_stale = excluded.is_stale, "
-                + "user_edited = excluded.user_edited";
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         synchronized (batchLock) {
             try {
@@ -563,7 +646,7 @@ public class BinaryKnowledgeGraph {
                 connection.setAutoCommit(false);
 
                 try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-                    for (KnowledgeNode node : toInsert) {
+                    for (KnowledgeNode node : deduped) {
                         stmt.setString(1, node.getId());
                         stmt.setString(2, node.getType().name());
                         if (node.getAddress() != null) {
@@ -768,11 +851,103 @@ public class BinaryKnowledgeGraph {
     }
 
     /**
+     * Resolve pending edge node IDs to their actual database IDs.
+     * This fixes UUID mismatches that occur when upsertNode() changes a node's ID
+     * to match an existing node with the same address.
+     *
+     * Called automatically before flushEdgeBatch() to ensure edges reference valid node IDs.
+     */
+    private void resolvePendingEdgeIds() {
+        if (pendingEdges.isEmpty()) {
+            return;
+        }
+
+        // Build lookup of address -> actual node ID from database
+        Map<Long, String> addressToId = new HashMap<>();
+        String sql = "SELECT id, address FROM graph_nodes WHERE binary_id = ? AND address IS NOT NULL AND address != 0";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            ResultSet rs = stmt.executeQuery();
+            while (rs.next()) {
+                long addr = rs.getLong("address");
+                addressToId.put(addr, rs.getString("id"));
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to build address lookup for edge resolution: " + e.getMessage(), e);
+            return;
+        }
+
+        // Build UUID -> address lookup from pending nodes
+        // This allows us to find the address for a pending node's UUID
+        Map<String, Long> pendingUuidToAddress = new HashMap<>();
+        synchronized (pendingNodes) {
+            for (KnowledgeNode node : pendingNodes) {
+                if (node.getAddress() != null && node.getAddress() != 0) {
+                    pendingUuidToAddress.put(node.getId(), node.getAddress());
+                    // Also update addressToId with pending nodes (they may not be in DB yet)
+                    addressToId.put(node.getAddress(), node.getId());
+                }
+            }
+        }
+
+        // Resolve each pending edge's source and target IDs
+        List<PendingEdge> resolvedEdges = new ArrayList<>();
+        int resolvedCount = 0;
+
+        synchronized (pendingEdges) {
+            for (PendingEdge edge : pendingEdges) {
+                String resolvedSource = edge.sourceId;
+                String resolvedTarget = edge.targetId;
+                boolean changed = false;
+
+                // Try to resolve source ID via address lookup
+                Long sourceAddr = pendingUuidToAddress.get(edge.sourceId);
+                if (sourceAddr != null && addressToId.containsKey(sourceAddr)) {
+                    String actualId = addressToId.get(sourceAddr);
+                    if (!actualId.equals(edge.sourceId)) {
+                        resolvedSource = actualId;
+                        changed = true;
+                    }
+                }
+
+                // Try to resolve target ID via address lookup
+                Long targetAddr = pendingUuidToAddress.get(edge.targetId);
+                if (targetAddr != null && addressToId.containsKey(targetAddr)) {
+                    String actualId = addressToId.get(targetAddr);
+                    if (!actualId.equals(edge.targetId)) {
+                        resolvedTarget = actualId;
+                        changed = true;
+                    }
+                }
+
+                if (changed) {
+                    resolvedCount++;
+                }
+                resolvedEdges.add(new PendingEdge(resolvedSource, resolvedTarget, edge.type, edge.weight, edge.metadata));
+            }
+
+            pendingEdges.clear();
+            pendingEdges.addAll(resolvedEdges);
+        }
+
+        if (resolvedCount > 0) {
+            Msg.info(this, String.format("Resolved %d edge IDs to match actual node IDs", resolvedCount));
+        }
+    }
+
+    /**
      * Flush all pending batches (nodes, edges, and community members).
      * Call this at the end of batch operations to ensure all data is written.
      */
     public void flushAllBatches() {
+        // CRITICAL: Flush nodes FIRST so they exist in DB
         flushNodeBatch();
+
+        // CRITICAL: Resolve edge IDs BEFORE flushing edges
+        // This fixes UUID mismatches from parallel extraction
+        resolvePendingEdgeIds();
+
+        // Now flush edges with correct IDs
         flushEdgeBatch();
         flushCommunityMemberBatch();
     }
@@ -1458,22 +1633,40 @@ public class BinaryKnowledgeGraph {
             Msg.error(this, "Failed to load nodes into memory: " + e.getMessage(), e);
         }
 
-        // Load all edges for nodes in this binary
-        String edgesSql = "SELECT e.source_id, e.target_id, e.type FROM graph_edges e "
+        // Load all edges for nodes in this binary (source OR target belongs to binary)
+        // Use UNION to capture edges where either endpoint belongs to this binary
+        String edgesSql = "SELECT DISTINCT e.source_id, e.target_id, e.type FROM graph_edges e "
                 + "INNER JOIN graph_nodes n ON e.source_id = n.id "
+                + "WHERE n.binary_id = ? "
+                + "UNION "
+                + "SELECT DISTINCT e.source_id, e.target_id, e.type FROM graph_edges e "
+                + "INNER JOIN graph_nodes n ON e.target_id = n.id "
                 + "WHERE n.binary_id = ?";
         try (PreparedStatement stmt = connection.prepareStatement(edgesSql)) {
             stmt.setString(1, binaryId);
+            stmt.setString(2, binaryId);
             ResultSet rs = stmt.executeQuery();
             while (rs.next()) {
                 String sourceId = rs.getString("source_id");
                 String targetId = rs.getString("target_id");
                 EdgeType type = EdgeType.fromString(rs.getString("type"));
 
-                if (memoryGraph.containsVertex(sourceId) && memoryGraph.containsVertex(targetId)) {
-                    LabeledEdge edge = new LabeledEdge(type);
+                // Dynamically add missing vertices instead of dropping edges
+                // This ensures edges to/from external functions are included
+                if (!memoryGraph.containsVertex(sourceId)) {
+                    memoryGraph.addVertex(sourceId);
+                }
+                if (!memoryGraph.containsVertex(targetId)) {
+                    memoryGraph.addVertex(targetId);
+                }
+
+                LabeledEdge edge = new LabeledEdge(type);
+                try {
                     memoryGraph.addEdge(sourceId, targetId, edge);
                     edgeCount++;
+                } catch (IllegalArgumentException e) {
+                    // Edge already exists (can happen with UNION if both source and target
+                    // belong to this binary) - silently skip
                 }
             }
         } catch (SQLException e) {

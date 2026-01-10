@@ -43,8 +43,8 @@ public class GraphViewPanel extends JPanel {
     private JSpinner nHopsSpinner;
     private JCheckBox showCallsCheckbox;
     private JCheckBox showRefsCheckbox;
-    private JCheckBox showDataDepCheckbox;
     private JCheckBox showVulnCheckbox;
+    private JCheckBox showNetworkCheckbox;
 
     // Zoom controls
     private JButton zoomInButton;
@@ -73,8 +73,8 @@ public class GraphViewPanel extends JPanel {
     private static final String STYLE_VULN = "vulnNode";
     private static final String STYLE_EDGE_CALLS = "edgeCalls";
     private static final String STYLE_EDGE_REFS = "edgeRefs";
-    private static final String STYLE_EDGE_DATA = "edgeData";
     private static final String STYLE_EDGE_VULN = "edgeVuln";
+    private static final String STYLE_EDGE_NETWORK = "edgeNetwork";
 
     public GraphViewPanel(TabController controller, SemanticGraphTab parentTab) {
         super(new BorderLayout());
@@ -181,8 +181,8 @@ public class GraphViewPanel extends JPanel {
         // Edge colors
         Color callsEdgeColor = selectionBg;
         Color refsEdgeColor = borderColor;
-        Color dataEdgeColor = isDarkMode ? new Color(80, 180, 80) : new Color(0, 153, 0);
         Color vulnEdgeColor = vulnNodeBorder;
+        Color networkEdgeColor = new Color(6, 182, 212);  // cyan-500
 
         // Center node style (highlighted with selection color)
         Map<String, Object> centerStyle = new HashMap<>();
@@ -240,15 +240,6 @@ public class GraphViewPanel extends JPanel {
         refsEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
         stylesheet.putCellStyle(STYLE_EDGE_REFS, refsEdgeStyle);
 
-        Map<String, Object> dataEdgeStyle = new HashMap<>();
-        dataEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(dataEdgeColor));
-        dataEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 1);
-        dataEdgeStyle.put(mxConstants.STYLE_DASHED, true);
-        dataEdgeStyle.put(mxConstants.STYLE_ENDARROW, mxConstants.ARROW_OVAL);
-        dataEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
-        dataEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
-        stylesheet.putCellStyle(STYLE_EDGE_DATA, dataEdgeStyle);
-
         Map<String, Object> vulnEdgeStyle = new HashMap<>();
         vulnEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(vulnEdgeColor));
         vulnEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 2);
@@ -256,6 +247,14 @@ public class GraphViewPanel extends JPanel {
         vulnEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
         vulnEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
         stylesheet.putCellStyle(STYLE_EDGE_VULN, vulnEdgeStyle);
+
+        Map<String, Object> networkEdgeStyle = new HashMap<>();
+        networkEdgeStyle.put(mxConstants.STYLE_STROKECOLOR, colorToHex(networkEdgeColor));
+        networkEdgeStyle.put(mxConstants.STYLE_STROKEWIDTH, 2);
+        networkEdgeStyle.put(mxConstants.STYLE_ENDARROW, mxConstants.ARROW_CLASSIC);
+        networkEdgeStyle.put(mxConstants.STYLE_FONTSIZE, 9);
+        networkEdgeStyle.put(mxConstants.STYLE_FONTCOLOR, colorToHex(textColor));
+        stylesheet.putCellStyle(STYLE_EDGE_NETWORK, networkEdgeStyle);
     }
 
     /**
@@ -284,8 +283,8 @@ public class GraphViewPanel extends JPanel {
         // Edge type checkboxes
         showCallsCheckbox = new JCheckBox("CALLS", true);
         showRefsCheckbox = new JCheckBox("REFS", true);
-        showDataDepCheckbox = new JCheckBox("DATA_DEP", false);
         showVulnCheckbox = new JCheckBox("VULN", true);
+        showNetworkCheckbox = new JCheckBox("NETWORK", true);
 
         // Zoom controls
         zoomInButton = new JButton("+");
@@ -366,8 +365,8 @@ public class GraphViewPanel extends JPanel {
         leftControls.add(new JLabel("Edge Types:"));
         leftControls.add(showCallsCheckbox);
         leftControls.add(showRefsCheckbox);
-        leftControls.add(showDataDepCheckbox);
         leftControls.add(showVulnCheckbox);
+        leftControls.add(showNetworkCheckbox);
 
         // Right side: Zoom controls
         JPanel zoomControls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 5));
@@ -418,8 +417,8 @@ public class GraphViewPanel extends JPanel {
         // Edge type filters
         showCallsCheckbox.addActionListener(e -> refresh());
         showRefsCheckbox.addActionListener(e -> refresh());
-        showDataDepCheckbox.addActionListener(e -> refresh());
         showVulnCheckbox.addActionListener(e -> refresh());
+        showNetworkCheckbox.addActionListener(e -> refresh());
 
         // Zoom button handlers
         zoomInButton.addActionListener(e -> {
@@ -565,11 +564,12 @@ public class GraphViewPanel extends JPanel {
         if (showRefsCheckbox.isSelected()) {
             types.add(EdgeType.REFERENCES);
         }
-        if (showDataDepCheckbox.isSelected()) {
-            types.add(EdgeType.DATA_DEPENDS);
-        }
         if (showVulnCheckbox.isSelected()) {
             types.add(EdgeType.CALLS_VULNERABLE);
+        }
+        if (showNetworkCheckbox.isSelected()) {
+            types.add(EdgeType.NETWORK_SEND);
+            types.add(EdgeType.NETWORK_RECV);
         }
         return types;
     }
@@ -620,10 +620,11 @@ public class GraphViewPanel extends JPanel {
                 return STYLE_EDGE_CALLS;
             case REFERENCES:
                 return STYLE_EDGE_REFS;
-            case DATA_DEPENDS:
-                return STYLE_EDGE_DATA;
             case CALLS_VULNERABLE:
                 return STYLE_EDGE_VULN;
+            case NETWORK_SEND:
+            case NETWORK_RECV:
+                return STYLE_EDGE_NETWORK;
             default:
                 return STYLE_EDGE_CALLS;
         }

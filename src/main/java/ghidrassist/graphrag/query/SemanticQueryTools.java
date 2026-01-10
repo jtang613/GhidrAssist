@@ -783,9 +783,8 @@ public class SemanticQueryTools {
                 return; // Node doesn't exist, will be created by indexFunctionOnDemand
             }
 
-            // Check if any of the new edge types are missing
-            boolean needsUpdate = !graph.hasEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.REFERENCES) ||
-                                  !graph.hasEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.DATA_DEPENDS);
+            // Check if any of the edge types are missing
+            boolean needsUpdate = !graph.hasEdgesOfType(node.getId(), ghidrassist.graphrag.nodes.EdgeType.REFERENCES);
 
             // Also check for CALLS_VULNERABLE (either direction)
             if (!needsUpdate) {
@@ -1255,7 +1254,6 @@ public class SemanticQueryTools {
         sb.append("  \"functions_extracted\": ").append(result.functionsExtracted).append(",\n");
         sb.append("  \"call_edges\": ").append(result.callEdgesCreated).append(",\n");
         sb.append("  \"reference_edges\": ").append(result.refEdgesCreated).append(",\n");
-        sb.append("  \"data_dependency_edges\": ").append(result.dataDepEdgesCreated).append(",\n");
         sb.append("  \"vulnerable_call_edges\": ").append(result.vulnEdgesCreated).append(",\n");
         sb.append("  \"elapsed_ms\": ").append(result.elapsedMs).append("\n");
         sb.append("}");
