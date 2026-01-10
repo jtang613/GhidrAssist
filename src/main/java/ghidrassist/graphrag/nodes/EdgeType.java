@@ -46,12 +46,6 @@ public enum EdgeType {
      */
     INHERITS("structural", "Inherits from", true),
 
-    /**
-     * Data dependency - one node uses data produced by another.
-     * Directed from consumer to producer.
-     */
-    DATA_DEPENDS("structural", "Data depends on", true),
-
     // ========================================
     // SEMANTIC edges (LLM-generated)
     // ========================================
@@ -107,14 +101,14 @@ public enum EdgeType {
      * Shows how data reaches network output (send, WSASend, etc.).
      * Directed from entry point/caller to the function that sends data.
      */
-    NETWORK_SEND_PATH("security", "Network send path", true),
+    NETWORK_SEND("security", "Network send", true),
 
     /**
      * Network data flow - path from recv function to its consumers.
      * Shows where received network data flows (recv, WSARecv, etc.).
      * Directed from the function that receives data to its callers.
      */
-    NETWORK_RECV_PATH("security", "Network recv path", true),
+    NETWORK_RECV("security", "Network recv", true),
 
     // ========================================
     // COMMUNITY edges (computed)

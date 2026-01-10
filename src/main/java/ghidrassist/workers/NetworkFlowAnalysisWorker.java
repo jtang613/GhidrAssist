@@ -7,7 +7,7 @@ import ghidrassist.graphrag.analysis.TaintAnalyzer;
 
 /**
  * Background worker for network flow analysis.
- * Creates NETWORK_SEND_PATH and NETWORK_RECV_PATH edges to trace
+ * Creates NETWORK_SEND and NETWORK_RECV edges to trace
  * network data flow through the call graph.
  */
 public class NetworkFlowAnalysisWorker extends AnalysisWorker<NetworkFlowAnalysisWorker.Result> {
@@ -80,7 +80,10 @@ public class NetworkFlowAnalysisWorker extends AnalysisWorker<NetworkFlowAnalysi
 
         publishProgress(98, 100, "Finalizing...");
 
-        // Invalidate cache to ensure new edges are visible
+        // Reload memory graph to include newly created NETWORK_SEND/NETWORK_RECV edges
+        graph.reloadFromDatabase();
+
+        // Invalidate cache to ensure fresh instance on next access
         analysisDB.invalidateKnowledgeGraphCache(programHash);
 
         publishProgress(100, 100, "Complete");

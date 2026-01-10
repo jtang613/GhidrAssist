@@ -385,8 +385,8 @@ public class SemanticGraphTab extends JPanel {
                 "Run Network Flow Analysis?\n" +
                 "This will:\n" +
                 "• Find functions that call send/recv APIs (WSASend, recv, etc.)\n" +
-                "• Create NETWORK_SEND_PATH edges from entry points to send functions\n" +
-                "• Create NETWORK_RECV_PATH edges from recv functions to their callers\n\n" +
+                "• Create NETWORK_SEND edges from entry points to send functions\n" +
+                "• Create NETWORK_RECV edges from recv functions to their callers\n\n" +
                 "This requires an indexed binary.",
                 "Network Flow Analysis",
                 JOptionPane.YES_NO_OPTION,
