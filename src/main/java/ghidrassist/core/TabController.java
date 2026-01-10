@@ -2392,7 +2392,7 @@ public class TabController {
 
                 graphView.showContent();
 
-                // Get N-hop neighborhood
+                // Get N-hop neighborhood (callees/outgoing)
                 java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> neighbors =
                         graph.getNeighbors(centerNode.getId(), nHops);
 
@@ -2400,6 +2400,14 @@ public class TabController {
                 java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> allNodes = new java.util.ArrayList<>();
                 allNodes.add(centerNode);
                 allNodes.addAll(neighbors);
+
+                // Also include one level of callers (who calls the center node)
+                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> callers = graph.getCallers(centerNode.getId());
+                for (ghidrassist.graphrag.nodes.KnowledgeNode caller : callers) {
+                    if (!allNodes.stream().anyMatch(n -> n.getId().equals(caller.getId()))) {
+                        allNodes.add(caller);
+                    }
+                }
 
                 // Collect all edges between these nodes
                 java.util.Set<String> nodeIds = new java.util.HashSet<>();

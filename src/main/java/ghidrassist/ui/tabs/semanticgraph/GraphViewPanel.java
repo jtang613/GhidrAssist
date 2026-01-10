@@ -13,11 +13,14 @@ import java.util.Set;
 import java.util.HashSet;
 
 import com.mxgraph.layout.hierarchical.mxHierarchicalLayout;
+import com.mxgraph.layout.mxOrganicLayout;
 import com.mxgraph.model.mxCell;
 import com.mxgraph.swing.mxGraphComponent;
 import com.mxgraph.util.mxConstants;
 import com.mxgraph.view.mxGraph;
 import com.mxgraph.view.mxStylesheet;
+
+import ghidra.util.Msg;
 
 import ghidrassist.core.TabController;
 import ghidrassist.ui.tabs.SemanticGraphTab;
@@ -282,7 +285,7 @@ public class GraphViewPanel extends JPanel {
 
         // Edge type checkboxes
         showCallsCheckbox = new JCheckBox("CALLS", true);
-        showRefsCheckbox = new JCheckBox("REFS", true);
+        showRefsCheckbox = new JCheckBox("REFS", false);  // Disabled by default - causes cycles
         showVulnCheckbox = new JCheckBox("VULN", true);
         showNetworkCheckbox = new JCheckBox("NETWORK", true);
 
@@ -451,8 +454,8 @@ public class GraphViewPanel extends JPanel {
                     clearSelection();
                 }
 
-                // Double-click to navigate
-                if (e.getClickCount() == 2 && selectedNode != null) {
+                // Double-click to navigate (skip external functions with null address)
+                if (e.getClickCount() == 2 && selectedNode != null && selectedNode.getAddress() != null) {
                     parentTab.navigateToFunction(selectedNode.getAddress());
                 }
             }
@@ -460,14 +463,14 @@ public class GraphViewPanel extends JPanel {
 
         // Go To button
         goToButton.addActionListener(e -> {
-            if (selectedNode != null) {
+            if (selectedNode != null && selectedNode.getAddress() != null) {
                 parentTab.navigateToFunction(selectedNode.getAddress());
             }
         });
 
         // Details button - switch to list view
         detailsButton.addActionListener(e -> {
-            if (selectedNode != null) {
+            if (selectedNode != null && selectedNode.getAddress() != null) {
                 // Navigate and switch to list view
                 parentTab.navigateToFunction(selectedNode.getAddress());
             }
@@ -507,6 +510,8 @@ public class GraphViewPanel extends JPanel {
      * @param edges All edges to display
      */
     public void buildGraph(KnowledgeNode centerNode, List<KnowledgeNode> nodes, List<GraphEdge> edges) {
+        Object centerCell = null;
+
         graph.getModel().beginUpdate();
         try {
             // Clear existing graph
@@ -526,6 +531,11 @@ public class GraphViewPanel extends JPanel {
 
                 nodeIdToCellMap.put(node.getId(), cell);
                 cellToNodeMap.put(cell, node);
+
+                // Track the center node's cell for centering later
+                if (node.getId().equals(centerNode.getId())) {
+                    centerCell = cell;
+                }
             }
 
             // Create edge cells
@@ -540,18 +550,33 @@ public class GraphViewPanel extends JPanel {
                 }
             }
 
-            // Apply layout
-            mxHierarchicalLayout layout = new mxHierarchicalLayout(graph);
-            layout.setInterRankCellSpacing(80);
-            layout.setIntraCellSpacing(40);
-            layout.execute(parent);
+            // Apply layout - use hierarchical if possible, fall back to organic for cyclic graphs
+            try {
+                mxHierarchicalLayout layout = new mxHierarchicalLayout(graph);
+                layout.setInterRankCellSpacing(80);
+                layout.setIntraCellSpacing(40);
+                layout.execute(parent);
+            } catch (Exception e) {
+                // Hierarchical layout fails on cyclic graphs - fall back to organic layout
+                Msg.debug(this, "Hierarchical layout failed, using organic layout: " + e.getMessage());
+                mxOrganicLayout organicLayout = new mxOrganicLayout(graph);
+                // Increase node separation to reduce overlaps
+                organicLayout.setMinMoveRadius(50.0);
+                organicLayout.setMaxIterations(500);
+                organicLayout.execute(parent);
+            }
 
         } finally {
             graph.getModel().endUpdate();
         }
 
-        // Fit to view
-        graphComponent.zoomAndCenter();
+        // Center on the root node
+        if (centerCell != null) {
+            graph.getView().setScale(1.0);  // Reset zoom first
+            graphComponent.scrollCellToVisible(centerCell, true);
+        } else {
+            graphComponent.zoomAndCenter();
+        }
     }
 
     // ===== Private Helper Methods =====
@@ -585,14 +610,20 @@ public class GraphViewPanel extends JPanel {
 
     private String formatNodeLabel(KnowledgeNode node) {
         String name = node.getName();
+        boolean isExternal = node.getAddress() == null;
+
         if (name == null || name.isEmpty()) {
-            name = "0x" + Long.toHexString(node.getAddress());
+            if (isExternal) {
+                name = "[Unknown External]";
+            } else {
+                name = "0x" + Long.toHexString(node.getAddress());
+            }
         }
         if (name.length() > 20) {
             name = name.substring(0, 17) + "...";
         }
 
-        String addr = "0x" + Long.toHexString(node.getAddress());
+        String addr = isExternal ? "[EXTERNAL]" : "0x" + Long.toHexString(node.getAddress());
 
         StringBuilder label = new StringBuilder();
         label.append(name).append("\n").append(addr);
@@ -634,7 +665,10 @@ public class GraphViewPanel extends JPanel {
         KnowledgeNode node = cellToNodeMap.get(cell);
         if (node != null) {
             selectedNode = node;
-            selectedNodeLabel.setText("Selected: " + node.getName() + " @ 0x" + Long.toHexString(node.getAddress()));
+            String addrStr = node.getAddress() != null
+                ? "@ 0x" + Long.toHexString(node.getAddress())
+                : "[EXTERNAL]";
+            selectedNodeLabel.setText("Selected: " + node.getName() + " " + addrStr);
 
             String summary = node.getLlmSummary();
             if (summary != null && !summary.isEmpty()) {
