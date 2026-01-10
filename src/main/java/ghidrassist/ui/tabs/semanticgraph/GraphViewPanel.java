@@ -538,6 +538,19 @@ public class GraphViewPanel extends JPanel {
                 }
             }
 
+            // Find callers of the center node (nodes that have CALLS edges TO centerNode)
+            // These should be at the top of the hierarchy (row 0)
+            List<Object> callerCells = new java.util.ArrayList<>();
+            for (GraphEdge edge : edges) {
+                if (edge.getType() == EdgeType.CALLS &&
+                    edge.getTargetId().equals(centerNode.getId())) {
+                    Object callerCell = nodeIdToCellMap.get(edge.getSourceId());
+                    if (callerCell != null && !callerCells.contains(callerCell)) {
+                        callerCells.add(callerCell);
+                    }
+                }
+            }
+
             // Create edge cells
             for (GraphEdge edge : edges) {
                 Object sourceCell = nodeIdToCellMap.get(edge.getSourceId());
@@ -555,7 +568,14 @@ public class GraphViewPanel extends JPanel {
                 mxHierarchicalLayout layout = new mxHierarchicalLayout(graph);
                 layout.setInterRankCellSpacing(80);
                 layout.setIntraCellSpacing(40);
-                layout.execute(parent);
+
+                // If we have callers, use them as roots so they appear at the top
+                // Otherwise let the layout determine roots automatically
+                if (!callerCells.isEmpty()) {
+                    layout.execute(parent, callerCells);
+                } else {
+                    layout.execute(parent);
+                }
             } catch (Exception e) {
                 // Hierarchical layout fails on cyclic graphs - fall back to organic layout
                 Msg.debug(this, "Hierarchical layout failed, using organic layout: " + e.getMessage());
