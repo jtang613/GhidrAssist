@@ -126,6 +126,17 @@ public class KnowledgeNode {
     }
 
     /**
+     * Create an external function node (no address, identified by name only).
+     * External functions use null address to avoid unique index conflicts.
+     */
+    public static KnowledgeNode createExternalFunction(String binaryId, String name) {
+        KnowledgeNode node = new KnowledgeNode(NodeType.FUNCTION, binaryId);
+        node.setAddress(null);  // External functions have no address
+        node.setName(name);
+        return node;
+    }
+
+    /**
      * Create a binary-level summary node.
      */
     public static KnowledgeNode createBinary(String binaryId, String name) {

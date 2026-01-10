@@ -255,9 +255,10 @@ public class ListViewPanel extends JPanel {
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
                     FunctionEntry selected = callersList.getSelectedValue();
-                    if (selected != null) {
+                    if (selected != null && !selected.isExternal()) {
                         parentTab.navigateToFunction(selected.address);
                     }
+                    // External functions have no address to navigate to
                 }
             }
         });
@@ -268,9 +269,10 @@ public class ListViewPanel extends JPanel {
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
                     FunctionEntry selected = calleesList.getSelectedValue();
-                    if (selected != null) {
+                    if (selected != null && !selected.isExternal()) {
                         parentTab.navigateToFunction(selected.address);
                     }
+                    // External functions have no address to navigate to
                 }
             }
         });
@@ -503,18 +505,23 @@ public class ListViewPanel extends JPanel {
 
     /**
      * Entry for function lists (callers/callees).
+     * Address can be null for external functions.
      */
     static class FunctionEntry {
         final String name;
-        final long address;
+        final Long address;  // Nullable - null means external function
         final String summary;
         final boolean hasVulnerability;
 
-        FunctionEntry(String name, long address, String summary, boolean hasVulnerability) {
+        FunctionEntry(String name, Long address, String summary, boolean hasVulnerability) {
             this.name = name;
             this.address = address;
             this.summary = summary;
             this.hasVulnerability = hasVulnerability;
+        }
+
+        boolean isExternal() {
+            return address == null;
         }
 
         @Override
@@ -553,9 +560,17 @@ public class ListViewPanel extends JPanel {
                 nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD));
                 topRow.add(nameLabel);
 
-                JLabel addrLabel = new JLabel("@ 0x" + Long.toHexString(entry.address));
-                addrLabel.setForeground(Color.GRAY);
-                topRow.add(addrLabel);
+                // Show address or [EXTERNAL] for external functions
+                if (entry.isExternal()) {
+                    JLabel extLabel = new JLabel("[EXTERNAL]");
+                    extLabel.setForeground(new Color(0, 100, 180)); // Blue for external
+                    extLabel.setFont(extLabel.getFont().deriveFont(Font.ITALIC));
+                    topRow.add(extLabel);
+                } else {
+                    JLabel addrLabel = new JLabel("@ 0x" + Long.toHexString(entry.address));
+                    addrLabel.setForeground(Color.GRAY);
+                    topRow.add(addrLabel);
+                }
 
                 if (entry.hasVulnerability) {
                     JLabel vulnLabel = new JLabel("[VULN]");

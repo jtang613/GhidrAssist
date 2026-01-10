@@ -3,6 +3,7 @@ package ghidrassist.graphrag.extraction;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
 import ghidra.program.model.block.CodeBlockIterator;
@@ -17,6 +18,8 @@ import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
+import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolTable;
 import ghidra.program.model.address.AddressSetView;
 import ghidra.program.model.mem.MemoryBlock;
 import ghidra.util.Msg;
@@ -601,48 +604,201 @@ public class StructureExtractor {
 
     /**
      * Extract outgoing calls from a function (what this function calls).
+     * Uses ReferenceManager to get instruction-level CALL references, which matches
+     * what Ghidra's Function Call Trees shows (unlike getCalledFunctions() which misses some).
      */
     private void extractFunctionCalls(Function caller, String callerNodeId) {
-        Set<Function> calledFunctions = caller.getCalledFunctions(monitor);
+        ReferenceManager refMgr = program.getReferenceManager();
+        FunctionManager funcMgr = program.getFunctionManager();
+        SymbolTable symTable = program.getSymbolTable();
+        Set<String> processedTargets = new HashSet<>(); // Avoid duplicate edges
 
-        for (Function callee : calledFunctions) {
-            if (monitor.isCancelled()) {
-                break;
-            }
+        // Debug logging for specific functions
+        boolean debugThis = caller.getName().contains("WorkerThread");
 
-            // Skip thunks - follow to real function
-            Function realCallee = callee;
-            while (realCallee.isThunk()) {
-                Function thunked = realCallee.getThunkedFunction(true);
-                if (thunked == null) break;
-                realCallee = thunked;
-            }
+        // Iterate through all addresses in the function body
+        AddressSetView body = caller.getBody();
+        AddressIterator addrIter = body.getAddresses(true);
+        while (addrIter.hasNext() && !monitor.isCancelled()) {
+            Address addr = addrIter.next();
 
-            if (realCallee.isExternal()) {
-                // Create a node for external function if not exists
-                KnowledgeNode extNode = graph.getNodeByName(realCallee.getName());
-                if (extNode == null) {
-                    extNode = KnowledgeNode.createFunction(binaryId, 0, realCallee.getName());
-                    extNode.setRawContent("// External function: " + realCallee.getName());
-                    // Use returned canonical node to ensure correct ID for edge
-                    extNode = graph.queueNodeForBatch(extNode);
+            // Get all references FROM this address
+            Reference[] refs = refMgr.getReferencesFrom(addr);
+            for (Reference ref : refs) {
+                // Only process CALL references
+                if (!ref.getReferenceType().isCall()) {
+                    continue;
                 }
-                graph.queueEdgeForBatch(callerNodeId, extNode.getId(), EdgeType.CALLS);
-            } else {
-                KnowledgeNode calleeNode = graph.getNodeByAddress(realCallee.getEntryPoint().getOffset());
-                if (calleeNode == null) {
-                    // Create placeholder node for callee that hasn't been processed yet
-                    // It will be fully populated when extractFunction() processes it later
-                    calleeNode = KnowledgeNode.createFunction(binaryId,
-                            realCallee.getEntryPoint().getOffset(), realCallee.getName());
-                    calleeNode.markStale();
-                    // Use returned canonical node to ensure correct ID for edge
-                    calleeNode = graph.queueNodeForBatch(calleeNode);
+
+                Address toAddr = ref.getToAddress();
+                String targetKey = toAddr.toString();
+                if (processedTargets.contains(targetKey)) {
+                    continue; // Already processed this target
                 }
-                graph.queueEdgeForBatch(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
-                callEdgesCreated.incrementAndGet();
+                processedTargets.add(targetKey);
+
+                // Try to resolve to a function
+                Function callee = funcMgr.getFunctionAt(toAddr);
+                if (callee == null) {
+                    callee = funcMgr.getFunctionContaining(toAddr);
+                }
+
+                if (callee != null) {
+                    // Follow thunks to real function
+                    Function realCallee = callee;
+                    while (realCallee.isThunk()) {
+                        Function thunked = realCallee.getThunkedFunction(true);
+                        if (thunked == null) break;
+                        realCallee = thunked;
+                    }
+
+                    if (realCallee.isExternal()) {
+                        if (debugThis) {
+                            Msg.info(this, String.format("  [%s] CALL -> EXTERNAL: %s", caller.getName(), realCallee.getName()));
+                        }
+                        createExternalCallEdge(callerNodeId, realCallee.getName());
+                    } else if (realCallee.isThunk()) {
+                        // Unresolved thunk - extract name
+                        String externalName = extractExternalNameFromThunk(realCallee);
+                        if (debugThis) {
+                            Msg.info(this, String.format("  [%s] CALL -> THUNK: %s (extracted: %s)",
+                                caller.getName(), realCallee.getName(), externalName));
+                        }
+                        createExternalCallEdge(callerNodeId, externalName);
+                    } else {
+                        // Internal function
+                        if (debugThis) {
+                            Msg.info(this, String.format("  [%s] CALL -> INTERNAL: %s", caller.getName(), realCallee.getName()));
+                        }
+                        createInternalCallEdge(callerNodeId, realCallee);
+                    }
+                } else {
+                    // No function at target - check if it's an external reference
+                    Symbol sym = symTable.getPrimarySymbol(toAddr);
+                    if (debugThis) {
+                        Msg.info(this, String.format("  [%s] CALL -> NO_FUNC at %s, symbol=%s",
+                            caller.getName(), toAddr, sym != null ? sym.getName() : "null"));
+                    }
+                    if (sym != null && sym.isExternalEntryPoint()) {
+                        createExternalCallEdge(callerNodeId, sym.getName());
+                    } else if (sym != null) {
+                        // Has a symbol but not a function - could be IAT entry
+                        String name = normalizeExternalName(sym.getName());
+                        createExternalCallEdge(callerNodeId, name);
+                    }
+                    // Else: no symbol, no function - skip this call reference
+                }
             }
         }
+
+        if (debugThis) {
+            Msg.info(this, String.format("[%s] Total call targets processed: %d", caller.getName(), processedTargets.size()));
+        }
+    }
+
+    /**
+     * Create an edge to an internal function, creating placeholder node if needed.
+     */
+    private void createInternalCallEdge(String callerNodeId, Function callee) {
+        KnowledgeNode calleeNode = graph.getNodeByAddress(callee.getEntryPoint().getOffset());
+        if (calleeNode == null) {
+            // Create placeholder node for callee that hasn't been processed yet
+            calleeNode = KnowledgeNode.createFunction(binaryId,
+                    callee.getEntryPoint().getOffset(), callee.getName());
+            calleeNode.markStale();
+            // Use returned canonical node to ensure correct ID for edge
+            calleeNode = graph.queueNodeForBatch(calleeNode);
+        }
+        graph.queueEdgeForBatch(callerNodeId, calleeNode.getId(), EdgeType.CALLS);
+        callEdgesCreated.incrementAndGet();
+    }
+
+    /**
+     * Normalize external function name by removing common decorations.
+     */
+    private String normalizeExternalName(String name) {
+        if (name == null) return "unknown";
+
+        // Remove __imp_ prefix (Windows import thunk)
+        if (name.startsWith("__imp_")) {
+            name = name.substring(6);
+        }
+        // Remove leading underscores (up to 2)
+        int count = 0;
+        while (name.startsWith("_") && name.length() > 1 && count < 2) {
+            name = name.substring(1);
+            count++;
+        }
+        // Remove @N suffix (stdcall decoration)
+        int atIdx = name.lastIndexOf('@');
+        if (atIdx > 0 && name.substring(atIdx + 1).matches("\\d+")) {
+            name = name.substring(0, atIdx);
+        }
+        return name;
+    }
+
+    /**
+     * Create an edge to an external function, creating the external node if needed.
+     * External functions use null address to avoid unique index conflicts in the database.
+     */
+    private void createExternalCallEdge(String callerNodeId, String externalName) {
+        KnowledgeNode extNode = graph.getNodeByName(externalName);
+        boolean created = false;
+        if (extNode == null) {
+            // Use createExternalFunction which sets address=null (not 0)
+            // This avoids unique index conflicts since all externals would have address=0
+            extNode = KnowledgeNode.createExternalFunction(binaryId, externalName);
+            extNode.setRawContent("// External function: " + externalName);
+            // Use returned canonical node to ensure correct ID for edge
+            extNode = graph.queueNodeForBatch(extNode);
+            created = true;
+        }
+        // Debug: Log first few external node creations
+        if (created && externalName.contains("WSA")) {
+            Msg.info(this, String.format("  EXTERNAL NODE CREATED: %s (id=%s, addr=%s)",
+                externalName, extNode.getId(), extNode.getAddress()));
+        }
+        graph.queueEdgeForBatch(callerNodeId, extNode.getId(), EdgeType.CALLS);
+    }
+
+    /**
+     * Extract external function name from a thunk function name.
+     * Handles common decorations:
+     * - __imp_WSARecvFrom -> WSARecvFrom
+     * - _WSARecvFrom@28 -> WSARecvFrom
+     * - thunk_FUN_00401000 -> FUN_00401000
+     * - Ordinal_123 -> Ordinal_123 (preserved)
+     */
+    private String extractExternalNameFromThunk(Function thunk) {
+        String name = thunk.getName();
+        if (name == null) {
+            return "unknown_thunk";
+        }
+
+        // Remove __imp_ prefix (Windows import thunk)
+        if (name.startsWith("__imp_")) {
+            name = name.substring(6);
+        }
+        // Remove thunk_ prefix
+        if (name.startsWith("thunk_")) {
+            name = name.substring(6);
+        }
+        // Remove leading underscores (up to 2, common in Windows APIs)
+        int underscoreCount = 0;
+        while (name.startsWith("_") && name.length() > 1 && underscoreCount < 2) {
+            name = name.substring(1);
+            underscoreCount++;
+        }
+        // Remove @N suffix (stdcall parameter size decoration)
+        int atIdx = name.lastIndexOf('@');
+        if (atIdx > 0) {
+            String suffix = name.substring(atIdx + 1);
+            if (suffix.matches("\\d+")) {
+                name = name.substring(0, atIdx);
+            }
+        }
+
+        return name;
     }
 
     /**
