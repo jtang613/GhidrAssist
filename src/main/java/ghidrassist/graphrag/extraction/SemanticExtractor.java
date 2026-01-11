@@ -11,6 +11,7 @@ import ghidrassist.graphrag.nodes.NodeType;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -33,19 +34,24 @@ public class SemanticExtractor {
     private final BinaryKnowledgeGraph graph;
     private final String binaryId;
 
-    // Rate limiting
+    // Parallel processing workers
+    private static final int PARALLEL_WORKERS = 3;
+
+    // Rate limiting (legacy - kept for compatibility)
     private static final int DEFAULT_BATCH_SIZE = 5;
     private static final long DEFAULT_DELAY_MS = 500;
     private int batchSize;
     private long delayBetweenBatches;
 
-    // Statistics
-    private int summarized = 0;
-    private int embeddingsGenerated = 0;
-    private int errors = 0;
+    // Thread-safe statistics
+    private AtomicInteger summarized = new AtomicInteger(0);
+    private AtomicInteger embeddingsGenerated = new AtomicInteger(0);
+    private AtomicInteger errors = new AtomicInteger(0);
+    private AtomicInteger processed = new AtomicInteger(0);
 
     // Cancellation
     private volatile boolean cancelled = false;
+    private ExecutorService executor;
 
     /**
      * Create a SemanticExtractor.
@@ -79,9 +85,10 @@ public class SemanticExtractor {
     public ExtractionResult summarizeStaleNodes(int limit, ProgressCallback progressCallback) {
         long startTime = System.currentTimeMillis();
         cancelled = false;
-        summarized = 0;
-        embeddingsGenerated = 0;
-        errors = 0;
+        summarized.set(0);
+        embeddingsGenerated.set(0);
+        errors.set(0);
+        processed.set(0);
 
         // Get stale nodes
         List<KnowledgeNode> staleNodes = graph.getStaleNodes(limit > 0 ? limit : Integer.MAX_VALUE);
@@ -94,35 +101,103 @@ public class SemanticExtractor {
 
         Msg.info(this, "Starting summarization of " + total + " stale nodes");
 
-        // Process in batches
-        for (int i = 0; i < staleNodes.size() && !cancelled; i += batchSize) {
-            int end = Math.min(i + batchSize, staleNodes.size());
-            List<KnowledgeNode> batch = staleNodes.subList(i, end);
+        // Log first few node addresses for debugging
+        if (total > 0) {
+            StringBuilder firstNodes = new StringBuilder("First 10 nodes to process: ");
+            for (int i = 0; i < Math.min(10, total); i++) {
+                KnowledgeNode n = staleNodes.get(i);
+                firstNodes.append(String.format("%s(0x%s) ",
+                    n.getName(),
+                    n.getAddress() != null ? Long.toHexString(n.getAddress()) : "EXT"));
+            }
+            Msg.info(this, firstNodes.toString());
+        }
 
-            processBatch(batch);
+        // Process nodes with parallel workers
+        Msg.info(this, "Using " + PARALLEL_WORKERS + " parallel workers");
+        ExecutorService executor = Executors.newFixedThreadPool(PARALLEL_WORKERS);
 
-            // Update progress
-            if (progressCallback != null) {
-                int processed = Math.min(i + batchSize, total);
-                progressCallback.onProgress(processed, total, summarized, errors);
+        // Track active futures for cancellation
+        List<Future<?>> activeFutures = new ArrayList<>();
+        int submitted = 0;
+
+        try {
+            for (KnowledgeNode node : staleNodes) {
+                // Check for cancellation before submitting new work
+                if (cancelled) {
+                    Msg.info(this, "Cancellation requested, stopping submission after " + submitted + " tasks");
+                    break;
+                }
+
+                final KnowledgeNode nodeToProcess = node;
+                Future<?> future = executor.submit(() -> {
+                    try {
+                        if (nodeToProcess.getType() == NodeType.FUNCTION) {
+                            processSingleFunctionParallel(nodeToProcess);
+                        } else {
+                            // Log non-function nodes for debugging
+                            Msg.info(this, "Processing non-FUNCTION node: " + nodeToProcess.getName() +
+                                " (type=" + nodeToProcess.getType() + ", addr=" +
+                                (nodeToProcess.getAddress() != null ? "0x" + Long.toHexString(nodeToProcess.getAddress()) : "null") + ")");
+                            processOtherNodeParallel(nodeToProcess);
+                        }
+                    } catch (Exception e) {
+                        Msg.warn(this, "Error processing node " + nodeToProcess.getName() + ": " + e.getMessage());
+                        errors.incrementAndGet();
+                    } finally {
+                        // Update progress
+                        int currentProcessed = processed.incrementAndGet();
+                        if (progressCallback != null) {
+                            progressCallback.onProgress(currentProcessed, total, summarized.get(), errors.get());
+                        }
+                    }
+                });
+                activeFutures.add(future);
+                submitted++;
+
+                // Limit outstanding tasks to avoid memory issues
+                // Wait for some tasks to complete if we have too many pending
+                while (activeFutures.size() >= PARALLEL_WORKERS * 2 && !cancelled) {
+                    // Remove completed futures
+                    activeFutures.removeIf(Future::isDone);
+                    if (activeFutures.size() >= PARALLEL_WORKERS * 2) {
+                        Thread.sleep(100);
+                    }
+                }
             }
 
-            // Rate limiting delay
-            if (end < staleNodes.size() && delayBetweenBatches > 0) {
-                try {
-                    Thread.sleep(delayBetweenBatches);
-                } catch (InterruptedException e) {
-                    cancelled = true;
-                    Thread.currentThread().interrupt();
+            // Wait for remaining tasks to complete
+            Msg.info(this, "Waiting for " + activeFutures.size() + " remaining tasks to complete...");
+            while (!activeFutures.isEmpty() && !cancelled) {
+                activeFutures.removeIf(Future::isDone);
+                if (!activeFutures.isEmpty()) {
+                    Thread.sleep(100);
                 }
+            }
+
+            if (cancelled) {
+                Msg.info(this, "Cancellation detected, cancelling remaining futures");
+                for (Future<?> f : activeFutures) {
+                    f.cancel(true);
+                }
+            }
+        } catch (InterruptedException e) {
+            Msg.warn(this, "Interrupted during processing: " + e.getMessage());
+            Thread.currentThread().interrupt();
+        } finally {
+            executor.shutdownNow();
+            try {
+                executor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
 
         long elapsed = System.currentTimeMillis() - startTime;
-        Msg.info(this, String.format("Semantic extraction completed in %dms: %d summarized, %d embeddings, %d errors",
-                elapsed, summarized, embeddingsGenerated, errors));
+        Msg.info(this, String.format("Parallel semantic extraction completed in %dms: %d summarized, %d embeddings, %d errors",
+                elapsed, summarized.get(), embeddingsGenerated.get(), errors.get()));
 
-        return new ExtractionResult(summarized, embeddingsGenerated, errors, elapsed);
+        return new ExtractionResult(summarized.get(), embeddingsGenerated.get(), errors.get(), elapsed);
     }
 
     /**
@@ -233,10 +308,118 @@ public class SemanticExtractor {
      */
     public void cancel() {
         cancelled = true;
+        if (executor != null) {
+            executor.shutdownNow();
+        }
     }
 
     // ========================================
-    // Batch Processing
+    // Parallel Processing Methods (thread-safe)
+    // ========================================
+
+    /**
+     * Process a single function in parallel (thread-safe version).
+     */
+    private void processSingleFunctionParallel(KnowledgeNode node) {
+        try {
+            // Skip external functions - they have no function body to summarize
+            if (node.getAddress() == null) {
+                Msg.info(this, "Skipping external function (no body): " + node.getName());
+                return;
+            }
+
+            // Skip functions without raw content
+            if (node.getRawContent() == null || node.getRawContent().isEmpty()) {
+                Msg.info(this, "Skipping function with no raw content: " + node.getName() +
+                    " (addr=0x" + Long.toHexString(node.getAddress()) + ")");
+                return;
+            }
+
+            Msg.info(this, "Processing function: " + node.getName() + " (id=" + node.getId() + ")");
+
+            // Get context (callers/callees)
+            List<String> callers = graph.getCallers(node.getId()).stream()
+                    .map(n -> n.getName() != null ? n.getName() : "unknown")
+                    .limit(5)
+                    .collect(Collectors.toList());
+
+            List<String> callees = graph.getCallees(node.getId()).stream()
+                    .map(n -> n.getName() != null ? n.getName() : "unknown")
+                    .limit(5)
+                    .collect(Collectors.toList());
+
+            // Generate prompt
+            String prompt = ExtractionPrompts.functionSummaryPrompt(
+                    node.getName() != null ? node.getName() : "unknown",
+                    node.getRawContent(),
+                    callers,
+                    callees
+            );
+
+            String response = callLLM(prompt);
+            if (response != null && !response.isEmpty()) {
+                Msg.info(this, "Got response for " + node.getName() + ", length=" + response.length());
+                node.setLlmSummary(response);
+                node.setConfidence(0.85f);
+
+                // Extract security flags if present
+                String security = ExtractionPrompts.extractSecurity(response);
+                if (security == null) {
+                    security = ExtractionPrompts.extractSecurityNotes(response);
+                }
+                if (security != null && !security.toLowerCase().contains("none") &&
+                    !security.toLowerCase().contains("no security") &&
+                    !security.toLowerCase().contains("not applicable")) {
+                    node.addSecurityFlag("LLM_FLAGGED");
+                }
+
+                // Extract and store category if present
+                String category = ExtractionPrompts.extractCategory(response);
+                if (category != null && !category.isEmpty()) {
+                    node.addSecurityFlag("CATEGORY_" + category.toUpperCase().replace(" ", "_"));
+                }
+
+                node.markUpdated();
+                node.setStale(false);
+                tryGenerateEmbedding(node);
+
+                Msg.info(this, "Upserting node " + node.getName() + " with summary length=" +
+                    (node.getLlmSummary() != null ? node.getLlmSummary().length() : 0));
+                graph.upsertNode(node);
+
+                int count = summarized.incrementAndGet();
+                Msg.info(this, "Successfully summarized " + node.getName() + " (total: " + count + ")");
+            } else {
+                Msg.warn(this, "Empty response for " + node.getName());
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Failed to summarize function " + node.getName() + ": " + e.getMessage(), e);
+            errors.incrementAndGet();
+        }
+    }
+
+    /**
+     * Process a non-function node in parallel (thread-safe version).
+     */
+    private void processOtherNodeParallel(KnowledgeNode node) {
+        try {
+            String summary = generateSummary(node);
+            if (summary != null) {
+                node.setLlmSummary(summary);
+                node.setConfidence(0.7f);
+                node.markUpdated();
+                tryGenerateEmbedding(node);
+                graph.upsertNode(node);
+                summarized.incrementAndGet();
+            }
+        } catch (Exception e) {
+            Msg.warn(this, "Failed to summarize node " + node.getId() + ": " + e.getMessage());
+            errors.incrementAndGet();
+        }
+    }
+
+    // ========================================
+    // Batch Processing (legacy - kept for compatibility)
     // ========================================
 
     private void processBatch(List<KnowledgeNode> batch) {
@@ -262,57 +445,27 @@ public class SemanticExtractor {
     }
 
     private void processFunctionBatch(List<KnowledgeNode> functions) {
-        // Separate complex functions from simple ones
-        // Complex functions need individual detailed processing for thorough summaries
-        List<KnowledgeNode> complexFunctions = new ArrayList<>();
-        List<KnowledgeNode> simpleFunctions = new ArrayList<>();
-
+        // Process ALL functions individually with the detailed prompt
+        // This ensures consistent, high-quality summaries with caller/callee context
+        // for both simple and complex functions (same as Explain Function)
         for (KnowledgeNode func : functions) {
-            ExtractionPrompts.ComplexityMetrics complexity =
-                    ExtractionPrompts.analyzeComplexity(func.getRawContent());
-            if (complexity.level.equals("complex") || complexity.level.equals("very_complex")) {
-                complexFunctions.add(func);
-            } else {
-                simpleFunctions.add(func);
-            }
-        }
-
-        // Process complex functions individually for detailed summaries
-        for (KnowledgeNode func : complexFunctions) {
             if (cancelled) break;
             processSingleFunction(func);
-        }
-
-        // Try batch processing for simple/moderate functions (more efficient)
-        if (!simpleFunctions.isEmpty() && simpleFunctions.size() > 1 && !cancelled) {
-            try {
-                String batchPrompt = ExtractionPrompts.batchFunctionSummaryPrompt(simpleFunctions);
-                String response = callLLM(batchPrompt);
-
-                if (response != null) {
-                    parseBatchResponse(response, simpleFunctions);
-                    return;
-                }
-            } catch (Exception e) {
-                Msg.warn(this, "Batch processing failed, falling back to individual: " + e.getMessage());
-            }
-
-            // Fall back to individual processing for simple functions
-            for (KnowledgeNode func : simpleFunctions) {
-                if (cancelled) break;
-                processSingleFunction(func);
-            }
-        } else {
-            // Process remaining simple functions individually
-            for (KnowledgeNode func : simpleFunctions) {
-                if (cancelled) break;
-                processSingleFunction(func);
-            }
         }
     }
 
     private void processSingleFunction(KnowledgeNode node) {
         try {
+            // Skip external functions - they have no function body to summarize
+            if (node.getAddress() == null) {
+                return;
+            }
+
+            // Skip functions without raw content
+            if (node.getRawContent() == null || node.getRawContent().isEmpty()) {
+                return;
+            }
+
             // Get context (callers/callees)
             List<String> callers = graph.getCallers(node.getId()).stream()
                     .map(n -> n.getName() != null ? n.getName() : "unknown")
@@ -359,11 +512,11 @@ public class SemanticExtractor {
                 node.markUpdated();
                 tryGenerateEmbedding(node);
                 graph.upsertNode(node);
-                summarized++;
+                summarized.incrementAndGet();
             }
         } catch (Exception e) {
             Msg.warn(this, "Failed to summarize function " + node.getName() + ": " + e.getMessage());
-            errors++;
+            errors.incrementAndGet();
         }
     }
 
@@ -376,11 +529,11 @@ public class SemanticExtractor {
                 node.markUpdated();
                 tryGenerateEmbedding(node);
                 graph.upsertNode(node);
-                summarized++;
+                summarized.incrementAndGet();
             }
         } catch (Exception e) {
             Msg.warn(this, "Failed to summarize node " + node.getId() + ": " + e.getMessage());
-            errors++;
+            errors.incrementAndGet();
         }
     }
 
@@ -405,7 +558,7 @@ public class SemanticExtractor {
                         node.setConfidence(0.75f);
                         node.markUpdated();
                         graph.upsertNode(node);
-                        summarized++;
+                        summarized.incrementAndGet();
                     }
                     index++;
                 }
@@ -487,7 +640,7 @@ public class SemanticExtractor {
                     floatEmbedding[i] = (float) embedding[i];
                 }
                 node.setEmbedding(floatEmbedding);
-                embeddingsGenerated++;
+                embeddingsGenerated.incrementAndGet();
             }
         } catch (Exception e) {
             // Embeddings are optional - don't log as error
