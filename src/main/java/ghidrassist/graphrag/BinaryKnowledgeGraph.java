@@ -361,8 +361,9 @@ public class BinaryKnowledgeGraph {
     /**
      * Insert or update a node.
      * If a node with the same address already exists, updates it instead of creating a duplicate.
+     * Synchronized for thread-safe parallel processing.
      */
-    public void upsertNode(KnowledgeNode node) {
+    public synchronized void upsertNode(KnowledgeNode node) {
         // Check if a node with this address already exists (for FUNCTION, BLOCK types)
         if (node.getAddress() != null && node.getAddress() != 0) {
             KnowledgeNode existing = getNodeByAddress(node.getAddress());
@@ -376,50 +377,99 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Internal upsert implementation with retry support for FTS corruption.
-     * Uses INSERT OR IGNORE to preserve existing nodes and their edge references.
+     * Uses INSERT OR IGNORE for new nodes, then UPDATE for existing nodes.
      */
     private void upsertNodeInternal(KnowledgeNode node, boolean isRetry) {
-        // Use INSERT OR IGNORE to keep existing nodes intact.
-        // This preserves node IDs that edges may reference.
-        // If we need to update an existing node, use updateNode() instead.
-        String sql = "INSERT OR IGNORE INTO graph_nodes "
+        // Step 1: Try INSERT OR IGNORE for new nodes (preserves edge references)
+        String insertSql = "INSERT OR IGNORE INTO graph_nodes "
                 + "(id, type, address, binary_id, name, raw_content, llm_summary, confidence, "
                 + "embedding, security_flags, network_apis, file_io_apis, ip_addresses, urls, "
                 + "file_paths, domains, registry_keys, risk_level, activity_profile, analysis_depth, "
                 + "created_at, updated_at, is_stale, user_edited) "
                 + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
-        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            stmt.setString(1, node.getId());
-            stmt.setString(2, node.getType().name());
-            if (node.getAddress() != null) {
-                stmt.setLong(3, node.getAddress());
-            } else {
-                stmt.setNull(3, Types.INTEGER);
-            }
-            stmt.setString(4, node.getBinaryId());
-            stmt.setString(5, node.getName());
-            stmt.setString(6, node.getRawContent());
-            stmt.setString(7, node.getLlmSummary());
-            stmt.setFloat(8, node.getConfidence());
-            stmt.setBytes(9, node.serializeEmbedding());
-            stmt.setString(10, node.serializeSecurityFlags());
-            stmt.setString(11, node.serializeNetworkAPIs());
-            stmt.setString(12, node.serializeFileIOAPIs());
-            stmt.setString(13, node.serializeIPAddresses());
-            stmt.setString(14, node.serializeURLs());
-            stmt.setString(15, node.serializeFilePaths());
-            stmt.setString(16, node.serializeDomains());
-            stmt.setString(17, node.serializeRegistryKeys());
-            stmt.setString(18, node.getRiskLevel());
-            stmt.setString(19, node.getActivityProfile());
-            stmt.setInt(20, node.getAnalysisDepth());
-            stmt.setLong(21, node.getCreatedAt().toEpochMilli());
-            stmt.setLong(22, node.getUpdatedAt().toEpochMilli());
-            stmt.setInt(23, node.isStale() ? 1 : 0);
-            stmt.setInt(24, node.isUserEdited() ? 1 : 0);
+        // Step 2: UPDATE existing nodes (for when INSERT was ignored)
+        String updateSql = "UPDATE graph_nodes SET "
+                + "raw_content = COALESCE(?, raw_content), "
+                + "llm_summary = COALESCE(?, llm_summary), "
+                + "confidence = ?, "
+                + "embedding = COALESCE(?, embedding), "
+                + "security_flags = COALESCE(?, security_flags), "
+                + "network_apis = COALESCE(?, network_apis), "
+                + "file_io_apis = COALESCE(?, file_io_apis), "
+                + "ip_addresses = COALESCE(?, ip_addresses), "
+                + "urls = COALESCE(?, urls), "
+                + "file_paths = COALESCE(?, file_paths), "
+                + "domains = COALESCE(?, domains), "
+                + "registry_keys = COALESCE(?, registry_keys), "
+                + "risk_level = COALESCE(?, risk_level), "
+                + "activity_profile = COALESCE(?, activity_profile), "
+                + "analysis_depth = ?, "
+                + "updated_at = ?, "
+                + "is_stale = ?, "
+                + "user_edited = ? "
+                + "WHERE id = ?";
 
-            stmt.executeUpdate();
+        try {
+            // Step 1: Try INSERT OR IGNORE for new nodes
+            try (PreparedStatement insertStmt = connection.prepareStatement(insertSql)) {
+                insertStmt.setString(1, node.getId());
+                insertStmt.setString(2, node.getType().name());
+                if (node.getAddress() != null) {
+                    insertStmt.setLong(3, node.getAddress());
+                } else {
+                    insertStmt.setNull(3, Types.INTEGER);
+                }
+                insertStmt.setString(4, node.getBinaryId());
+                insertStmt.setString(5, node.getName());
+                insertStmt.setString(6, node.getRawContent());
+                insertStmt.setString(7, node.getLlmSummary());
+                insertStmt.setFloat(8, node.getConfidence());
+                insertStmt.setBytes(9, node.serializeEmbedding());
+                insertStmt.setString(10, node.serializeSecurityFlags());
+                insertStmt.setString(11, node.serializeNetworkAPIs());
+                insertStmt.setString(12, node.serializeFileIOAPIs());
+                insertStmt.setString(13, node.serializeIPAddresses());
+                insertStmt.setString(14, node.serializeURLs());
+                insertStmt.setString(15, node.serializeFilePaths());
+                insertStmt.setString(16, node.serializeDomains());
+                insertStmt.setString(17, node.serializeRegistryKeys());
+                insertStmt.setString(18, node.getRiskLevel());
+                insertStmt.setString(19, node.getActivityProfile());
+                insertStmt.setInt(20, node.getAnalysisDepth());
+                insertStmt.setLong(21, node.getCreatedAt().toEpochMilli());
+                insertStmt.setLong(22, node.getUpdatedAt().toEpochMilli());
+                insertStmt.setInt(23, node.isStale() ? 1 : 0);
+                insertStmt.setInt(24, node.isUserEdited() ? 1 : 0);
+
+                insertStmt.executeUpdate();
+            }
+
+            // Step 2: UPDATE existing node data (handles case where INSERT was ignored)
+            // This ensures summaries and other updated fields get saved
+            try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
+                updateStmt.setString(1, node.getRawContent());
+                updateStmt.setString(2, node.getLlmSummary());
+                updateStmt.setFloat(3, node.getConfidence());
+                updateStmt.setBytes(4, node.serializeEmbedding());
+                updateStmt.setString(5, node.serializeSecurityFlags());
+                updateStmt.setString(6, node.serializeNetworkAPIs());
+                updateStmt.setString(7, node.serializeFileIOAPIs());
+                updateStmt.setString(8, node.serializeIPAddresses());
+                updateStmt.setString(9, node.serializeURLs());
+                updateStmt.setString(10, node.serializeFilePaths());
+                updateStmt.setString(11, node.serializeDomains());
+                updateStmt.setString(12, node.serializeRegistryKeys());
+                updateStmt.setString(13, node.getRiskLevel());
+                updateStmt.setString(14, node.getActivityProfile());
+                updateStmt.setInt(15, node.getAnalysisDepth());
+                updateStmt.setLong(16, node.getUpdatedAt().toEpochMilli());
+                updateStmt.setInt(17, node.isStale() ? 1 : 0);
+                updateStmt.setInt(18, node.isUserEdited() ? 1 : 0);
+                updateStmt.setString(19, node.getId());
+
+                updateStmt.executeUpdate();
+            }
 
             // Add to in-memory graph if not present
             if (!memoryGraph.containsVertex(node.getId())) {
@@ -1287,12 +1337,15 @@ public class BinaryKnowledgeGraph {
     /**
      * Get nodes that need summarization: either marked stale OR have empty/null summary.
      * This ensures nodes with failed previous summarization attempts are re-processed.
+     * Results are ordered by address for predictable processing order.
      */
     public List<KnowledgeNode> getStaleNodes(int limit) {
         List<KnowledgeNode> nodes = new ArrayList<>();
-        // Include nodes that are stale OR have no summary (null or empty)
+        // Include nodes that are stale OR have no summary (null, empty, or whitespace-only)
+        // Order by address for predictable sequential processing
         String sql = "SELECT * FROM graph_nodes WHERE binary_id = ? " +
-                     "AND (is_stale = 1 OR llm_summary IS NULL OR llm_summary = '') LIMIT ?";
+                     "AND (is_stale = 1 OR llm_summary IS NULL OR TRIM(llm_summary) = '') " +
+                     "ORDER BY address NULLS LAST LIMIT ?";
 
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
             stmt.setString(1, binaryId);
