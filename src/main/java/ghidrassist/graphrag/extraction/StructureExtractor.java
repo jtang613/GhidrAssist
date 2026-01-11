@@ -2,6 +2,7 @@ package ghidrassist.graphrag.extraction;
 
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileResults;
+import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.block.BasicBlockModel;
@@ -68,6 +69,10 @@ public class StructureExtractor {
 
     // Thread-local decompilers for parallel extraction
     private final ConcurrentHashMap<Long, DecompInterface> threadDecompilers = new ConcurrentHashMap<>();
+
+    // Decompilation retry settings
+    private static final int DECOMPILE_BASE_TIMEOUT = 30;  // seconds
+    private static final int DECOMPILE_MAX_RETRIES = 3;
 
     /**
      * Create a StructureExtractor for a program.
@@ -473,6 +478,59 @@ public class StructureExtractor {
     }
 
     /**
+     * Attempt to decompile a function with retry logic.
+     * @param function The function to decompile
+     * @param decompiler The decompiler instance to use
+     * @return Decompiled C code, or null if all attempts fail
+     */
+    private String decompileWithRetry(Function function, DecompInterface decompiler) {
+        for (int attempt = 1; attempt <= DECOMPILE_MAX_RETRIES; attempt++) {
+            if (monitor.isCancelled()) {
+                return null;
+            }
+
+            // Increase timeout with each retry: 30s, 60s, 90s
+            int timeout = DECOMPILE_BASE_TIMEOUT * attempt;
+
+            try {
+                DecompileResults results = decompiler.decompileFunction(function, timeout, monitor);
+
+                if (results != null && results.decompileCompleted()) {
+                    DecompiledFunction decompiledFunc = results.getDecompiledFunction();
+                    if (decompiledFunc != null) {
+                        String code = decompiledFunc.getC();
+                        if (code != null && !code.isEmpty()) {
+                            if (attempt > 1) {
+                                Msg.info(this, "Decompilation succeeded on attempt " + attempt +
+                                    " for: " + function.getName());
+                            }
+                            return code;
+                        }
+                    }
+                }
+
+                // Log failure reason if available
+                if (results != null) {
+                    String errorMsg = results.getErrorMessage();
+                    if (errorMsg != null && !errorMsg.isEmpty()) {
+                        Msg.warn(this, "Decompilation attempt " + attempt + " failed for " +
+                            function.getName() + ": " + errorMsg);
+                    } else {
+                        Msg.warn(this, "Decompilation attempt " + attempt + " incomplete for " +
+                            function.getName() + " (no error message)");
+                    }
+                }
+
+            } catch (Exception e) {
+                Msg.warn(this, "Decompilation attempt " + attempt + " threw exception for " +
+                    function.getName() + ": " + e.getMessage());
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Create a function node using a provided decompiler (for parallel execution).
      * Uses thread-local decompiler for parallel decompilation.
      */
@@ -489,18 +547,28 @@ public class StructureExtractor {
                 node.setName(name); // Update name in case of rename
             }
 
-            // Decompile using thread-local decompiler
+            // Decompile with retry logic (3 attempts with increasing timeout)
             String content = null;
             if (threadDecompiler != null) {
-                DecompileResults results = threadDecompiler.decompileFunction(function, 30, monitor);
-                if (results != null && results.decompileCompleted()) {
-                    content = results.getDecompiledFunction().getC();
-                }
+                content = decompileWithRetry(function, threadDecompiler);
             }
 
             // Fall back to disassembly if decompilation failed
             if (content == null || content.isEmpty()) {
-                content = getDisassembly(function);
+                Msg.info(this, "Falling back to disassembly for: " + function.getName());
+                try {
+                    content = getDisassembly(function);
+                } catch (Exception e) {
+                    Msg.error(this, "Disassembly also failed for " + function.getName() +
+                        ": " + e.getMessage());
+                }
+            }
+
+            // Guarantee non-null content
+            if (content == null || content.isEmpty()) {
+                content = "// Unable to decompile or disassemble: " + function.getName();
+                Msg.error(this, "All extraction methods failed for: " + function.getName() +
+                    " at " + function.getEntryPoint());
             }
 
             node.setRawContent(content);

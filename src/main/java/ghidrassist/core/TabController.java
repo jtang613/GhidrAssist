@@ -28,6 +28,7 @@ import ghidrassist.graphrag.extraction.StructureExtractor;
 import ghidrassist.graphrag.extraction.SemanticExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatures;
+import ghidrassist.graphrag.extraction.ExtractionPrompts;
 import ghidrassist.workers.*;
 
 import java.sql.Timestamp;
@@ -346,6 +347,36 @@ public class TabController {
 
                     // Step 4: Save node to graph
                     graph.upsertNode(node);
+
+                    // Step 4.5: Cache interaction for RLHF feedback
+                    if (node.getLlmSummary() != null && !node.getLlmSummary().isEmpty()) {
+                        try {
+                            // Get caller/callee names (same logic as SemanticExtractor.summarizeNode)
+                            List<String> callerNames = graph.getCallers(node.getId()).stream()
+                                    .map(n -> n.getName() != null ? n.getName() : "unknown")
+                                    .limit(5)
+                                    .collect(java.util.stream.Collectors.toList());
+
+                            List<String> calleeNames = graph.getCallees(node.getId()).stream()
+                                    .map(n -> n.getName() != null ? n.getName() : "unknown")
+                                    .limit(5)
+                                    .collect(java.util.stream.Collectors.toList());
+
+                            // Reconstruct the prompt
+                            String reconstructedPrompt = ExtractionPrompts.functionSummaryPrompt(
+                                    node.getName() != null ? node.getName() : "unknown",
+                                    node.getRawContent(),
+                                    callerNames,
+                                    calleeNames
+                            );
+
+                            // Cache for RLHF feedback
+                            feedbackService.cacheLastInteraction(reconstructedPrompt, node.getLlmSummary());
+                            Msg.info(this, "Cached explain interaction for RLHF feedback");
+                        } catch (Exception e) {
+                            Msg.warn(this, "Failed to cache explain interaction: " + e.getMessage());
+                        }
+                    }
 
                     // Step 5: Update display
                     final KnowledgeNode finalNode = node;
