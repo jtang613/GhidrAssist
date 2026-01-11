@@ -32,7 +32,7 @@ import ghidrassist.mcp2.server.MCPServerRegistry;
  */
 public class SettingsTab extends JPanel {
     private static final long serialVersionUID = 1L;
-    private static final String VERSION = "1.10.0";
+    private static final String VERSION = "1.11.0";
     private static final String[] REASONING_EFFORT_OPTIONS = {"None", "Low", "Medium", "High"};
 
     private final TabController controller;
