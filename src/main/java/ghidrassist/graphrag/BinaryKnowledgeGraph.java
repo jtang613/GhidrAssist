@@ -601,7 +601,13 @@ public class BinaryKnowledgeGraph {
                 for (KnowledgeNode existing : pendingNodes) {
                     if (existing.getAddress() != null &&
                         existing.getAddress().equals(node.getAddress())) {
-                        return existing; // Return existing node, don't add duplicate
+                        // If existing node has no rawContent but new node does, merge the content
+                        if ((existing.getRawContent() == null || existing.getRawContent().isEmpty()) &&
+                            node.getRawContent() != null && !node.getRawContent().isEmpty()) {
+                            existing.setRawContent(node.getRawContent());
+                            Msg.debug(this, "Merged rawContent into existing node: " + existing.getName());
+                        }
+                        return existing; // Return existing node
                     }
                 }
             } else if (node.getName() != null) {
@@ -609,7 +615,12 @@ public class BinaryKnowledgeGraph {
                 for (KnowledgeNode existing : pendingNodes) {
                     if (node.getName().equals(existing.getName()) &&
                         (existing.getAddress() == null || existing.getAddress() == 0)) {
-                        return existing; // Return existing node, don't add duplicate
+                        // Merge rawContent if needed
+                        if ((existing.getRawContent() == null || existing.getRawContent().isEmpty()) &&
+                            node.getRawContent() != null && !node.getRawContent().isEmpty()) {
+                            existing.setRawContent(node.getRawContent());
+                        }
+                        return existing; // Return existing node
                     }
                 }
             }
@@ -1380,26 +1391,39 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Delete all graph data for this binary.
+     * Clears: edges, nodes, communities, and FTS index entries.
      */
     public void clearGraph() {
+        // Delete edges first - they reference nodes but don't have binary_id
+        // Use subquery to find edges connected to this binary's nodes
+        String deleteEdges = "DELETE FROM graph_edges WHERE " +
+                "source_id IN (SELECT id FROM graph_nodes WHERE binary_id = ?) OR " +
+                "target_id IN (SELECT id FROM graph_nodes WHERE binary_id = ?)";
         String deleteNodes = "DELETE FROM graph_nodes WHERE binary_id = ?";
         String deleteCommunities = "DELETE FROM graph_communities WHERE binary_id = ?";
 
-        try (PreparedStatement stmt1 = connection.prepareStatement(deleteNodes);
-             PreparedStatement stmt2 = connection.prepareStatement(deleteCommunities)) {
+        try (PreparedStatement stmtEdges = connection.prepareStatement(deleteEdges);
+             PreparedStatement stmtNodes = connection.prepareStatement(deleteNodes);
+             PreparedStatement stmtCommunities = connection.prepareStatement(deleteCommunities)) {
 
-            stmt1.setString(1, binaryId);
-            stmt2.setString(1, binaryId);
+            // Order matters: edges first, then nodes (FTS trigger cleans up), then communities
+            stmtEdges.setString(1, binaryId);
+            stmtEdges.setString(2, binaryId);
+            int edgesDeleted = stmtEdges.executeUpdate();
 
-            stmt1.executeUpdate();
-            stmt2.executeUpdate();
+            stmtNodes.setString(1, binaryId);
+            int nodesDeleted = stmtNodes.executeUpdate();
+
+            stmtCommunities.setString(1, binaryId);
+            int communitiesDeleted = stmtCommunities.executeUpdate();
 
             // Clear in-memory graph
             memoryGraph = new DefaultDirectedGraph<>(LabeledEdge.class);
             nodeCount = 0;
             edgeCount = 0;
 
-            Msg.info(this, "Cleared graph for binary: " + binaryId);
+            Msg.info(this, String.format("Cleared graph for binary %s: %d edges, %d nodes, %d communities",
+                    binaryId, edgesDeleted, nodesDeleted, communitiesDeleted));
         } catch (SQLException e) {
             Msg.error(this, "Failed to clear graph: " + e.getMessage(), e);
         }

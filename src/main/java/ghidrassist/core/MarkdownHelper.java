@@ -46,9 +46,9 @@ public class MarkdownHelper {
         Document document = parser.parse(markdown);
         String html = renderer.render(document);
         
-        // Add feedback buttons
+        // Add feedback buttons (using BMP-compatible symbols for JEditorPane compatibility)
         String feedbackLinks = "<br><div style=\"text-align: center; color: grey; font-size: 18px;\">" +
-            "<a href='thumbsup'>&#128077;</a> | <a href='thumbsdown'>&#128078;</a></div>";
+            "<a href='thumbsup'>\u2714</a> | <a href='thumbsdown'>\u2716</a></div>";
             
         return "<html><body>" + html + feedbackLinks + "</body></html>";
     }
