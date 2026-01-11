@@ -102,6 +102,7 @@ public class TabController {
     private volatile SecurityAnalysisWorker securityAnalysisWorker;
     private volatile RefreshNamesWorker refreshNamesWorker;
     private volatile NetworkFlowAnalysisWorker networkFlowWorker;
+    private volatile CommunityDetectionWorker communityDetectionWorker;
 
     // Database for semantic graph operations
     private final AnalysisDB analysisDB;
@@ -2018,7 +2019,6 @@ public class TabController {
         });
 
         reindexWorker.setCompletedCallback(result -> {
-            semanticGraphTab.hideProgress();
             semanticGraphTab.setReindexRunning(false);
             semanticGraphTab.refreshCurrentView();
 
@@ -2033,9 +2033,11 @@ public class TabController {
                     0,
                     formatIndexedTimestamp(lastIndexed)
             );
-            Msg.showInfo(this, null, "Indexing Complete",
-                    String.format("Indexed %d functions, %d edges",
-                            result.functionsExtracted, result.callEdgesCreated));
+
+            // Chain: ReIndex -> Security Analysis -> Network Flow Analysis
+            Msg.info(this, String.format("ReIndex complete: %d functions, %d edges. Starting Security Analysis...",
+                    result.functionsExtracted, result.callEdgesCreated));
+            startSecurityAnalysisPhase();
         });
 
         reindexWorker.setCancelledCallback(() -> {
@@ -2054,6 +2056,75 @@ public class TabController {
         semanticGraphTab.setReindexRunning(true);
         semanticGraphTab.showProgress(0, "Starting reindex...");
         reindexWorker.execute();
+    }
+
+    /**
+     * Internal helper: Start Security Analysis as part of ReIndex chain.
+     * Called after ReIndex completes.
+     */
+    private void startSecurityAnalysisPhase() {
+        securityAnalysisWorker = new SecurityAnalysisWorker(analysisDB, plugin.getCurrentProgram());
+
+        securityAnalysisWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), "Security: " + progress.message);
+        });
+
+        securityAnalysisWorker.setCompletedCallback(result -> {
+            Msg.info(this, String.format("Security Analysis complete: %d paths, %d vulnerable edges. Starting Network Flow...",
+                    result.pathCount, result.vulnerableViaEdges));
+            startNetworkFlowPhase();
+        });
+
+        securityAnalysisWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            Msg.info(this, "ReIndex chain cancelled during Security Analysis");
+        });
+
+        securityAnalysisWorker.setFailedCallback(error -> {
+            Msg.warn(this, "Security Analysis failed: " + error + ". Continuing to Network Flow...");
+            startNetworkFlowPhase();
+        });
+
+        semanticGraphTab.showProgress(0, "Security: Starting analysis...");
+        securityAnalysisWorker.execute();
+    }
+
+    /**
+     * Internal helper: Start Network Flow Analysis as part of ReIndex chain.
+     * Called after Security Analysis completes.
+     */
+    private void startNetworkFlowPhase() {
+        networkFlowWorker = new NetworkFlowAnalysisWorker(analysisDB, plugin.getCurrentProgram());
+
+        networkFlowWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), "Network: " + progress.message);
+        });
+
+        networkFlowWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "ReIndex Complete",
+                    String.format("Full analysis complete:\n" +
+                            "• Structure extraction done\n" +
+                            "• Security analysis: found taint paths\n" +
+                            "• Network analysis: %d send, %d recv functions",
+                            result.sendFunctionsFound, result.recvFunctionsFound));
+        });
+
+        networkFlowWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.refreshCurrentView();
+            Msg.info(this, "ReIndex chain cancelled during Network Flow Analysis");
+        });
+
+        networkFlowWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.refreshCurrentView();
+            Msg.warn(this, "Network Flow Analysis failed: " + error);
+        });
+
+        semanticGraphTab.showProgress(0, "Network: Starting analysis...");
+        networkFlowWorker.execute();
     }
 
     /**
@@ -2254,6 +2325,55 @@ public class TabController {
         semanticGraphTab.setNetworkFlowRunning(true);
         semanticGraphTab.showProgress(0, "Starting network flow analysis...");
         networkFlowWorker.execute();
+    }
+
+    /**
+     * Handle community detection button - group related functions into communities.
+     * Uses SwingWorker for non-blocking operation.
+     */
+    public void handleSemanticGraphCommunityDetection() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
+
+        // If already running, cancel it
+        if (communityDetectionWorker != null && !communityDetectionWorker.isDone()) {
+            communityDetectionWorker.requestCancel();
+            return;
+        }
+
+        // Create and configure the worker
+        communityDetectionWorker = new CommunityDetectionWorker(analysisDB, plugin.getCurrentProgram());
+
+        communityDetectionWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
+        });
+
+        communityDetectionWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Community Detection Complete",
+                    String.format("Detected %d communities", result.communityCount));
+        });
+
+        communityDetectionWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
+
+        communityDetectionWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            Msg.showError(this, null, "Error", "Failed to run community detection: " + error);
+        });
+
+        // Start the worker
+        semanticGraphTab.setCommunityDetectionRunning(true);
+        semanticGraphTab.showProgress(0, "Starting community detection...");
+        communityDetectionWorker.execute();
     }
 
     /**

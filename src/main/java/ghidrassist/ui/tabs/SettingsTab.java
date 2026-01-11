@@ -26,7 +26,6 @@ import ghidrassist.mcp2.server.MCPServerRegistry;
  * Contains all settings in scrollable grouped sections:
  * - LLM Providers
  * - MCP Servers
- * - SymGraph
  * - System Prompt
  * - Database Paths
  * - Analysis Options
@@ -50,12 +49,6 @@ public class SettingsTab extends JPanel {
     // MCP Servers section components
     private JTable mcpServersTable;
     private MCPServersTableModel mcpTableModel;
-
-    // SymGraph section components
-    private JTextField symGraphUrlField;
-    private JPasswordField symGraphKeyField;
-    private JButton showKeyButton;
-    private boolean keyVisible = false;
 
     // System Prompt section components
     private JTextArea contextArea;
@@ -158,11 +151,6 @@ public class SettingsTab extends JPanel {
         mcpServersTable.getColumnModel().getColumn(2).setPreferredWidth(80);
         mcpServersTable.getColumnModel().getColumn(3).setPreferredWidth(100);
 
-        // SymGraph
-        symGraphUrlField = new JTextField(30);
-        symGraphKeyField = new JPasswordField(30);
-        showKeyButton = new JButton("Show");
-
         // System Prompt
         contextArea = new JTextArea();
         contextArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
@@ -197,8 +185,6 @@ public class SettingsTab extends JPanel {
         contentPanel.add(Box.createVerticalStrut(10));
         contentPanel.add(createMCPServersSection());
         contentPanel.add(Box.createVerticalStrut(10));
-        contentPanel.add(createSymGraphSection());
-        contentPanel.add(Box.createVerticalStrut(10));
         contentPanel.add(createSystemPromptSection());
         contentPanel.add(Box.createVerticalStrut(10));
         contentPanel.add(createDatabasePathsSection());
@@ -228,7 +214,8 @@ public class SettingsTab extends JPanel {
         // Table
         llmTable.getColumnModel().getColumn(5).setCellRenderer(llmTable.getDefaultRenderer(Boolean.class));
         JScrollPane tableScrollPane = new JScrollPane(llmTable);
-        tableScrollPane.setPreferredSize(new Dimension(600, 120));
+        tableScrollPane.setMinimumSize(new Dimension(200, 120));
+        tableScrollPane.setPreferredSize(new Dimension(Integer.MAX_VALUE, 120));
 
         // Buttons
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -273,7 +260,8 @@ public class SettingsTab extends JPanel {
         panel.setBorder(BorderFactory.createTitledBorder("MCP Servers"));
 
         JScrollPane tableScrollPane = new JScrollPane(mcpServersTable);
-        tableScrollPane.setPreferredSize(new Dimension(600, 100));
+        tableScrollPane.setMinimumSize(new Dimension(200, 100));
+        tableScrollPane.setPreferredSize(new Dimension(Integer.MAX_VALUE, 100));
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         JButton addButton = new JButton("Add Server");
@@ -300,47 +288,13 @@ public class SettingsTab extends JPanel {
 
         return panel;
     }
-
-    private JPanel createSymGraphSection() {
-        JPanel panel = new JPanel();
-        panel.setBorder(BorderFactory.createTitledBorder("SymGraph"));
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-
-        // API URL row
-        JPanel urlRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        urlRow.add(new JLabel("API URL:"));
-        symGraphUrlField.setText(Preferences.getProperty("GhidrAssist.SymGraphAPIUrl", "https://api.symgraph.com"));
-        symGraphUrlField.setToolTipText("SymGraph API URL (for self-hosted instances)");
-        urlRow.add(symGraphUrlField);
-
-        // API Key row
-        JPanel keyRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        keyRow.add(new JLabel("API Key:"));
-        symGraphKeyField.setText(Preferences.getProperty("GhidrAssist.SymGraphAPIKey", ""));
-        symGraphKeyField.setToolTipText("Your SymGraph API key (required for push/pull operations)");
-        keyRow.add(symGraphKeyField);
-        keyRow.add(showKeyButton);
-
-        // Info label
-        JLabel infoLabel = new JLabel("<html><i>SymGraph provides cloud-based symbol and graph data sharing. " +
-                                      "Query operations are free; push/pull require an API key.</i></html>");
-        infoLabel.setForeground(Color.GRAY);
-        JPanel infoRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        infoRow.add(infoLabel);
-
-        panel.add(urlRow);
-        panel.add(keyRow);
-        panel.add(infoRow);
-
-        return panel;
-    }
-
     private JPanel createSystemPromptSection() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("System Prompt"));
 
         JScrollPane scrollPane = new JScrollPane(contextArea);
-        scrollPane.setPreferredSize(new Dimension(600, 100));
+        scrollPane.setMinimumSize(new Dimension(200, 100));
+        scrollPane.setPreferredSize(new Dimension(Integer.MAX_VALUE, 100));
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         buttonPanel.add(revertButton);
@@ -353,40 +307,44 @@ public class SettingsTab extends JPanel {
     }
 
     private JPanel createDatabasePathsSection() {
-        JPanel panel = new JPanel();
+        JPanel panel = new JPanel(new GridBagLayout());
         panel.setBorder(BorderFactory.createTitledBorder("Database Paths"));
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(2, 5, 2, 5);
+        gbc.fill = GridBagConstraints.HORIZONTAL;
 
         // Analysis DB
-        JPanel analysisRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        analysisRow.add(new JLabel("Analysis DB:"));
+        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0;
+        panel.add(new JLabel("Analysis DB:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
         analysisDbPathField.setText(Preferences.getProperty("GhidrAssist.AnalysisDBPath", "ghidrassist_analysis.db"));
-        analysisRow.add(analysisDbPathField);
+        panel.add(analysisDbPathField, gbc);
+        gbc.gridx = 2; gbc.weightx = 0;
         JButton analysisDbBrowse = new JButton("Browse...");
         analysisDbBrowse.addActionListener(e -> browseFile(analysisDbPathField, "Select Analysis Database", false));
-        analysisRow.add(analysisDbBrowse);
+        panel.add(analysisDbBrowse, gbc);
 
         // RLHF DB
-        JPanel rlhfRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        rlhfRow.add(new JLabel("RLHF DB:"));
+        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0;
+        panel.add(new JLabel("RLHF DB:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
         rlhfDbPathField.setText(Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db"));
-        rlhfRow.add(rlhfDbPathField);
+        panel.add(rlhfDbPathField, gbc);
+        gbc.gridx = 2; gbc.weightx = 0;
         JButton rlhfDbBrowse = new JButton("Browse...");
         rlhfDbBrowse.addActionListener(e -> browseFile(rlhfDbPathField, "Select RLHF Database", false));
-        rlhfRow.add(rlhfDbBrowse);
+        panel.add(rlhfDbBrowse, gbc);
 
         // Lucene Index
-        JPanel luceneRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        luceneRow.add(new JLabel("RAG Index:"));
+        gbc.gridx = 0; gbc.gridy = 2; gbc.weightx = 0;
+        panel.add(new JLabel("RAG Index:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1.0;
         luceneIndexPathField.setText(Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene"));
-        luceneRow.add(luceneIndexPathField);
+        panel.add(luceneIndexPathField, gbc);
+        gbc.gridx = 2; gbc.weightx = 0;
         JButton luceneBrowse = new JButton("Browse...");
         luceneBrowse.addActionListener(e -> browseFile(luceneIndexPathField, "Select RAG Index Directory", true));
-        luceneRow.add(luceneBrowse);
-
-        panel.add(analysisRow);
-        panel.add(rlhfRow);
-        panel.add(luceneRow);
+        panel.add(luceneBrowse, gbc);
 
         return panel;
     }
@@ -431,38 +389,6 @@ public class SettingsTab extends JPanel {
         maxToolCallsSpinner.addChangeListener(e -> {
             int maxToolCalls = (Integer) maxToolCallsSpinner.getValue();
             controller.setMaxToolCalls(maxToolCalls);
-        });
-
-        // SymGraph key visibility toggle
-        showKeyButton.addActionListener(e -> {
-            keyVisible = !keyVisible;
-            if (keyVisible) {
-                symGraphKeyField.setEchoChar((char) 0);
-                showKeyButton.setText("Hide");
-            } else {
-                symGraphKeyField.setEchoChar('*');
-                showKeyButton.setText("Show");
-            }
-        });
-
-        // SymGraph URL/Key save on focus lost
-        symGraphUrlField.addFocusListener(new FocusListener() {
-            @Override
-            public void focusGained(FocusEvent e) {}
-            @Override
-            public void focusLost(FocusEvent e) {
-                Preferences.setProperty("GhidrAssist.SymGraphAPIUrl", symGraphUrlField.getText().trim());
-                Preferences.store();
-            }
-        });
-        symGraphKeyField.addFocusListener(new FocusListener() {
-            @Override
-            public void focusGained(FocusEvent e) {}
-            @Override
-            public void focusLost(FocusEvent e) {
-                Preferences.setProperty("GhidrAssist.SymGraphAPIKey", new String(symGraphKeyField.getPassword()));
-                Preferences.store();
-            }
         });
 
         // Database paths save on focus lost

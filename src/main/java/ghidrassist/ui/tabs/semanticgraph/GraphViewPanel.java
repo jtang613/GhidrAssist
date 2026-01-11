@@ -22,6 +22,7 @@ import com.mxgraph.view.mxStylesheet;
 
 import ghidra.util.Msg;
 
+import ghidrassist.core.MarkdownHelper;
 import ghidrassist.core.TabController;
 import ghidrassist.ui.tabs.SemanticGraphTab;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
@@ -57,9 +58,9 @@ public class GraphViewPanel extends JPanel {
 
     // Selected node info panel
     private JLabel selectedNodeLabel;
-    private JLabel selectedSummaryLabel;
-    private JButton goToButton;
-    private JButton detailsButton;
+    private JEditorPane summaryPane;
+    private JScrollPane summaryScrollPane;
+    private MarkdownHelper markdownHelper;
 
     // Not-indexed placeholder
     private JPanel notIndexedPanel;
@@ -305,16 +306,25 @@ public class GraphViewPanel extends JPanel {
         zoomLabel = new JLabel("100%");
         zoomLabel.setToolTipText("Current zoom level (CTRL+Wheel to zoom)");
 
+        // Markdown helper for rendering summaries
+        markdownHelper = new MarkdownHelper();
+
         // Selected node info
-        selectedNodeLabel = new JLabel("Selected: None");
-        selectedSummaryLabel = new JLabel("");
-        selectedSummaryLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+        selectedNodeLabel = new JLabel("Double-click a node to navigate");
+        selectedNodeLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
 
-        goToButton = new JButton("Go To");
-        goToButton.setEnabled(false);
+        // Summary pane for rendering markdown
+        summaryPane = new JEditorPane();
+        summaryPane.setContentType("text/html");
+        summaryPane.setEditable(false);
+        summaryPane.setOpaque(false);
+        summaryPane.putClientProperty(JEditorPane.HONOR_DISPLAY_PROPERTIES, Boolean.TRUE);
+        summaryPane.setFont(UIManager.getFont("Label.font"));
 
-        detailsButton = new JButton("Details");
-        detailsButton.setEnabled(false);
+        summaryScrollPane = new JScrollPane(summaryPane);
+        summaryScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        summaryScrollPane.setPreferredSize(new Dimension(400, 80));
+        summaryScrollPane.getVerticalScrollBar().setUnitIncrement(16);
 
         // Not indexed placeholder
         notIndexedPanel = createNotIndexedPanel();
@@ -387,19 +397,12 @@ public class GraphViewPanel extends JPanel {
         // ===== Graph component (center) =====
         mainContent.add(graphComponent, BorderLayout.CENTER);
 
-        // ===== Selected node info (bottom) =====
+        // ===== Selected node info and summary (bottom) =====
         JPanel infoPanel = new JPanel(new BorderLayout(5, 5));
         infoPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
-        JPanel labelPanel = new JPanel(new GridLayout(2, 1));
-        labelPanel.add(selectedNodeLabel);
-        labelPanel.add(selectedSummaryLabel);
-        infoPanel.add(labelPanel, BorderLayout.CENTER);
-
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
-        buttonPanel.add(goToButton);
-        buttonPanel.add(detailsButton);
-        infoPanel.add(buttonPanel, BorderLayout.EAST);
+        infoPanel.add(selectedNodeLabel, BorderLayout.NORTH);
+        infoPanel.add(summaryScrollPane, BorderLayout.CENTER);
 
         mainContent.add(infoPanel, BorderLayout.SOUTH);
 
@@ -449,30 +452,15 @@ public class GraphViewPanel extends JPanel {
                     mxCell mxc = (mxCell) cell;
                     if (mxc.isVertex()) {
                         handleNodeClick(mxc);
+
+                        // Double-click to navigate (skip external functions with null address)
+                        if (e.getClickCount() == 2 && selectedNode != null && selectedNode.getAddress() != null) {
+                            parentTab.navigateToFunction(selectedNode.getAddress());
+                        }
                     }
                 } else {
                     clearSelection();
                 }
-
-                // Double-click to navigate (skip external functions with null address)
-                if (e.getClickCount() == 2 && selectedNode != null && selectedNode.getAddress() != null) {
-                    parentTab.navigateToFunction(selectedNode.getAddress());
-                }
-            }
-        });
-
-        // Go To button
-        goToButton.addActionListener(e -> {
-            if (selectedNode != null && selectedNode.getAddress() != null) {
-                parentTab.navigateToFunction(selectedNode.getAddress());
-            }
-        });
-
-        // Details button - switch to list view
-        detailsButton.addActionListener(e -> {
-            if (selectedNode != null && selectedNode.getAddress() != null) {
-                // Navigate and switch to list view
-                parentTab.navigateToFunction(selectedNode.getAddress());
             }
         });
     }
@@ -688,20 +676,18 @@ public class GraphViewPanel extends JPanel {
             String addrStr = node.getAddress() != null
                 ? "@ 0x" + Long.toHexString(node.getAddress())
                 : "[EXTERNAL]";
-            selectedNodeLabel.setText("Selected: " + node.getName() + " " + addrStr);
+            selectedNodeLabel.setText(node.getName() + " " + addrStr + "  (double-click to navigate)");
+            selectedNodeLabel.setForeground(UIManager.getColor("Label.foreground"));
 
             String summary = node.getLlmSummary();
             if (summary != null && !summary.isEmpty()) {
-                if (summary.length() > 100) {
-                    summary = summary.substring(0, 97) + "...";
-                }
-                selectedSummaryLabel.setText("Summary: " + summary);
+                // Render markdown to HTML
+                String html = markdownHelper.markdownToHtmlSimple(summary);
+                summaryPane.setText(html);
+                summaryPane.setCaretPosition(0);  // Scroll to top
             } else {
-                selectedSummaryLabel.setText("");
+                summaryPane.setText("<html><body><i style='color:gray'>No summary available</i></body></html>");
             }
-
-            goToButton.setEnabled(true);
-            detailsButton.setEnabled(true);
 
             // Highlight the selected cell
             graph.setSelectionCell(cell);
@@ -710,10 +696,9 @@ public class GraphViewPanel extends JPanel {
 
     private void clearSelection() {
         selectedNode = null;
-        selectedNodeLabel.setText("Selected: None");
-        selectedSummaryLabel.setText("");
-        goToButton.setEnabled(false);
-        detailsButton.setEnabled(false);
+        selectedNodeLabel.setText("Double-click a node to navigate");
+        selectedNodeLabel.setForeground(UIManager.getColor("Label.disabledForeground"));
+        summaryPane.setText("");
         graph.clearSelection();
     }
 }
