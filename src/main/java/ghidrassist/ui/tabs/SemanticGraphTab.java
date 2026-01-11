@@ -7,6 +7,7 @@ import ghidrassist.core.TabController;
 import ghidrassist.ui.tabs.semanticgraph.ListViewPanel;
 import ghidrassist.ui.tabs.semanticgraph.GraphViewPanel;
 import ghidrassist.ui.tabs.semanticgraph.SearchViewPanel;
+import ghidrassist.ui.tabs.semanticgraph.ManualAnalysisPanel;
 
 /**
  * Semantic Graph tab for viewing and editing knowledge graph data.
@@ -30,14 +31,12 @@ public class SemanticGraphTab extends JPanel {
     private ListViewPanel listViewPanel;
     private GraphViewPanel graphViewPanel;
     private SearchViewPanel searchViewPanel;
+    private ManualAnalysisPanel manualAnalysisPanel;
 
     // Bottom panel components
     private JButton resetGraphButton;
     private JButton reindexButton;
     private JButton semanticAnalysisButton;
-    private JButton securityAnalysisButton;
-    private JButton networkFlowButton;
-    private JButton refreshNamesButton;
     private JLabel statsLabel;
     private JProgressBar progressBar;
 
@@ -71,25 +70,17 @@ public class SemanticGraphTab extends JPanel {
         listViewPanel = new ListViewPanel(controller, this);
         graphViewPanel = new GraphViewPanel(controller, this);
         searchViewPanel = new SearchViewPanel(controller, this);
+        manualAnalysisPanel = new ManualAnalysisPanel(this);
 
         // Bottom action buttons
         resetGraphButton = new JButton("Reset Graph");
         resetGraphButton.setToolTipText("Clear all graph data for this binary (requires confirmation)");
 
         reindexButton = new JButton("ReIndex Binary");
-        reindexButton.setToolTipText("Rebuild the knowledge graph from Ghidra analysis");
+        reindexButton.setToolTipText("Rebuild the knowledge graph: Structure + Semantic + Security + Network analysis");
 
         semanticAnalysisButton = new JButton("Semantic Analysis");
         semanticAnalysisButton.setToolTipText("Use LLM to generate summaries for all stale/unsummarized nodes");
-
-        securityAnalysisButton = new JButton("Security Analysis");
-        securityAnalysisButton.setToolTipText("Run taint analysis and create vulnerability edges (source→sink paths)");
-
-        networkFlowButton = new JButton("Network Flow Analysis");
-        networkFlowButton.setToolTipText("Trace network data flow paths (send/recv API calls)");
-
-        refreshNamesButton = new JButton("Refresh Names");
-        refreshNamesButton.setToolTipText("Update function names in graph to match current Ghidra names");
 
         statsLabel = new JLabel("Graph Stats: Not loaded");
 
@@ -115,10 +106,11 @@ public class SemanticGraphTab extends JPanel {
 
         add(headerPanel, BorderLayout.NORTH);
 
-        // ===== Sub-tabbed pane (List View / Visual Graph / Search) =====
+        // ===== Sub-tabbed pane (List View / Visual Graph / Search / Manual Analysis) =====
         subTabbedPane.addTab("List View", listViewPanel);
         subTabbedPane.addTab("Visual Graph", graphViewPanel);
         subTabbedPane.addTab("Search", searchViewPanel);
+        subTabbedPane.addTab("Manual Analysis", manualAnalysisPanel);
 
         add(subTabbedPane, BorderLayout.CENTER);
 
@@ -126,14 +118,11 @@ public class SemanticGraphTab extends JPanel {
         JPanel bottomPanel = new JPanel(new BorderLayout(5, 5));
         bottomPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
-        // Button row
+        // Button row - main operations only
         JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         buttonRow.add(resetGraphButton);
         buttonRow.add(reindexButton);
         buttonRow.add(semanticAnalysisButton);
-        buttonRow.add(securityAnalysisButton);
-        buttonRow.add(networkFlowButton);
-        buttonRow.add(refreshNamesButton);
 
         // Stats and progress row
         JPanel statusRow = new JPanel(new BorderLayout(5, 0));
@@ -162,15 +151,6 @@ public class SemanticGraphTab extends JPanel {
         // Semantic Analysis button
         semanticAnalysisButton.addActionListener(e -> handleSemanticAnalysis());
 
-        // Security Analysis button
-        securityAnalysisButton.addActionListener(e -> handleSecurityAnalysis());
-
-        // Network Flow Analysis button
-        networkFlowButton.addActionListener(e -> handleNetworkFlowAnalysis());
-
-        // Refresh names button
-        refreshNamesButton.addActionListener(e -> handleRefreshNames());
-
         // Sub-tab change listener
         subTabbedPane.addChangeListener(e -> {
             // Refresh the selected view when switching tabs
@@ -179,6 +159,8 @@ public class SemanticGraphTab extends JPanel {
                 graphViewPanel.refresh();
             } else if (selected == searchViewPanel) {
                 searchViewPanel.refresh();
+            } else if (selected == manualAnalysisPanel) {
+                manualAnalysisPanel.refresh();
             }
         });
     }
@@ -324,10 +306,6 @@ public class SemanticGraphTab extends JPanel {
         }
     }
 
-    private void handleRefreshNames() {
-        controller.handleSemanticGraphRefreshNames();
-    }
-
     private void handleSemanticAnalysis() {
         // If running, just stop (no confirmation needed)
         if (isSemanticAnalysisRunning()) {
@@ -349,9 +327,65 @@ public class SemanticGraphTab extends JPanel {
         }
     }
 
-    private void handleSecurityAnalysis() {
+    // ===== Manual Analysis Panel Handlers =====
+
+    /**
+     * Handle ReIndex from Manual Analysis panel.
+     */
+    public void handleReindexFromManual() {
         // If running, just stop (no confirmation needed)
-        if (isSecurityAnalysisRunning()) {
+        if (manualAnalysisPanel.isReindexRunning()) {
+            controller.handleSemanticGraphReindex();
+            return;
+        }
+
+        // Otherwise confirm before starting
+        int result = JOptionPane.showConfirmDialog(this,
+                "ReIndex the entire binary?\n" +
+                "This will:\n" +
+                "• Extract structure from Ghidra analysis\n" +
+                "• Run Security Analysis (taint paths)\n" +
+                "• Run Network Flow Analysis (send/recv tracing)\n\n" +
+                "This may take a while for large binaries.",
+                "ReIndex Binary",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (result == JOptionPane.YES_OPTION) {
+            controller.handleSemanticGraphReindex();
+        }
+    }
+
+    /**
+     * Handle Semantic Analysis from Manual Analysis panel.
+     */
+    public void handleSemanticAnalysisFromManual() {
+        // If running, just stop (no confirmation needed)
+        if (manualAnalysisPanel.isSemanticAnalysisRunning()) {
+            controller.handleSemanticGraphSemanticAnalysis();
+            return;
+        }
+
+        // Otherwise confirm before starting
+        int result = JOptionPane.showConfirmDialog(this,
+                "Run Semantic Analysis on all stale nodes?\n" +
+                "This will use the LLM to generate summaries for unsummarized functions.\n" +
+                "This may take a while and consume API credits.",
+                "Semantic Analysis",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (result == JOptionPane.YES_OPTION) {
+            controller.handleSemanticGraphSemanticAnalysis();
+        }
+    }
+
+    /**
+     * Handle Security Analysis from Manual Analysis panel.
+     */
+    public void handleSecurityAnalysisFromManual() {
+        // If running, just stop (no confirmation needed)
+        if (manualAnalysisPanel.isSecurityAnalysisRunning()) {
             controller.handleSemanticGraphSecurityAnalysis();
             return;
         }
@@ -373,9 +407,12 @@ public class SemanticGraphTab extends JPanel {
         }
     }
 
-    private void handleNetworkFlowAnalysis() {
+    /**
+     * Handle Network Flow Analysis from Manual Analysis panel.
+     */
+    public void handleNetworkFlowFromManual() {
         // If running, just stop (no confirmation needed)
-        if (isNetworkFlowRunning()) {
+        if (manualAnalysisPanel.isNetworkFlowRunning()) {
             controller.handleSemanticGraphNetworkFlowAnalysis();
             return;
         }
@@ -395,6 +432,40 @@ public class SemanticGraphTab extends JPanel {
         if (result == JOptionPane.YES_OPTION) {
             controller.handleSemanticGraphNetworkFlowAnalysis();
         }
+    }
+
+    /**
+     * Handle Community Detection from Manual Analysis panel.
+     */
+    public void handleCommunityDetectionFromManual() {
+        // If running, just stop (no confirmation needed)
+        if (manualAnalysisPanel.isCommunityDetectionRunning()) {
+            controller.handleSemanticGraphCommunityDetection();
+            return;
+        }
+
+        // Otherwise confirm before starting
+        int result = JOptionPane.showConfirmDialog(this,
+                "Run Community Detection?\n" +
+                "This will:\n" +
+                "• Group related functions into communities using Label Propagation\n" +
+                "• Create BELONGS_TO_COMMUNITY edges\n" +
+                "• Generate summaries for each detected community\n\n" +
+                "This requires an indexed binary.",
+                "Community Detection",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+
+        if (result == JOptionPane.YES_OPTION) {
+            controller.handleSemanticGraphCommunityDetection();
+        }
+    }
+
+    /**
+     * Handle Refresh Names from Manual Analysis panel.
+     */
+    public void handleRefreshNamesFromManual() {
+        controller.handleSemanticGraphRefreshNames();
     }
 
     /**
@@ -446,30 +517,36 @@ public class SemanticGraphTab extends JPanel {
 
     /**
      * Set reindex button to running state (shows "Stop" text).
+     * Updates both bottom panel button and ManualAnalysisPanel button.
      */
     public void setReindexRunning(boolean running) {
         reindexButton.setText(running ? "Stop" : "ReIndex Binary");
+        manualAnalysisPanel.setReindexRunning(running);
     }
 
     /**
      * Set semantic analysis button to running state (shows "Stop" text).
+     * Updates both bottom panel button and ManualAnalysisPanel button.
      */
     public void setSemanticAnalysisRunning(boolean running) {
         semanticAnalysisButton.setText(running ? "Stop" : "Semantic Analysis");
+        manualAnalysisPanel.setSemanticAnalysisRunning(running);
     }
 
     /**
      * Set security analysis button to running state (shows "Stop" text).
+     * Delegates to ManualAnalysisPanel.
      */
     public void setSecurityAnalysisRunning(boolean running) {
-        securityAnalysisButton.setText(running ? "Stop" : "Security Analysis");
+        manualAnalysisPanel.setSecurityAnalysisRunning(running);
     }
 
     /**
      * Set refresh names button to running state (shows "Stop" text).
+     * Delegates to ManualAnalysisPanel.
      */
     public void setRefreshNamesRunning(boolean running) {
-        refreshNamesButton.setText(running ? "Stop" : "Refresh Names");
+        manualAnalysisPanel.setRefreshNamesRunning(running);
     }
 
     /**
@@ -488,29 +565,49 @@ public class SemanticGraphTab extends JPanel {
 
     /**
      * Check if security analysis is currently running.
+     * Delegates to ManualAnalysisPanel.
      */
     public boolean isSecurityAnalysisRunning() {
-        return "Stop".equals(securityAnalysisButton.getText());
+        return manualAnalysisPanel.isSecurityAnalysisRunning();
     }
 
     /**
      * Check if refresh names is currently running.
+     * Delegates to ManualAnalysisPanel.
      */
     public boolean isRefreshNamesRunning() {
-        return "Stop".equals(refreshNamesButton.getText());
+        return manualAnalysisPanel.isRefreshNamesRunning();
     }
 
     /**
      * Set network flow analysis button to running state (shows "Stop" text).
+     * Delegates to ManualAnalysisPanel.
      */
     public void setNetworkFlowRunning(boolean running) {
-        networkFlowButton.setText(running ? "Stop" : "Network Flow Analysis");
+        manualAnalysisPanel.setNetworkFlowRunning(running);
     }
 
     /**
      * Check if network flow analysis is currently running.
+     * Delegates to ManualAnalysisPanel.
      */
     public boolean isNetworkFlowRunning() {
-        return "Stop".equals(networkFlowButton.getText());
+        return manualAnalysisPanel.isNetworkFlowRunning();
+    }
+
+    /**
+     * Set community detection button to running state (shows "Stop" text).
+     * Delegates to ManualAnalysisPanel.
+     */
+    public void setCommunityDetectionRunning(boolean running) {
+        manualAnalysisPanel.setCommunityDetectionRunning(running);
+    }
+
+    /**
+     * Check if community detection is currently running.
+     * Delegates to ManualAnalysisPanel.
+     */
+    public boolean isCommunityDetectionRunning() {
+        return manualAnalysisPanel.isCommunityDetectionRunning();
     }
 }
