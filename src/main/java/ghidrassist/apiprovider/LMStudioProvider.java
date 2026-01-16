@@ -72,7 +72,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
         
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletion")) {
@@ -89,7 +89,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -153,7 +153,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
@@ -309,7 +309,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
@@ -378,7 +378,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_EMBEDDINGS_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -523,7 +523,7 @@ public class LMStudioProvider extends APIProvider implements FunctionCallingProv
 
         Request request = new Request.Builder()
             .url(super.getUrl() + LMSTUDIO_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {

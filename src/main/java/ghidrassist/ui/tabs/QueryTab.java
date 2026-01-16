@@ -16,7 +16,6 @@ import java.util.Date;
 import ghidra.util.Msg;
 import ghidrassist.core.MarkdownHelper;
 import ghidrassist.core.TabController;
-import ghidrassist.mcp2.tools.MCPToolManager;
 import ghidrassist.mcp2.server.MCPServerRegistry;
 import ghidrassist.AnalysisDB;
 
@@ -112,6 +111,7 @@ public class QueryTab extends JPanel {
 
         // Initialize chat history table
         chatHistoryModel = new DefaultTableModel(new Object[]{"Description", "Date"}, 0) {
+            private static final long serialVersionUID = 1L;
             @Override
             public boolean isCellEditable(int row, int column) {
                 return column == 0; // Only description column is editable

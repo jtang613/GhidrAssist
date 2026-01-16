@@ -1,8 +1,8 @@
 package ghidrassist.core;
 
 import ghidrassist.LlmApi;
-import ghidrassist.apiprovider.AnthropicProvider;
-import ghidrassist.apiprovider.OpenAIProvider;
+import ghidrassist.apiprovider.AnthropicPlatformApiProvider;
+import ghidrassist.apiprovider.OpenAIPlatformApiProvider;
 import ghidrassist.apiprovider.LMStudioProvider;
 import ghidrassist.apiprovider.ChatMessage;
 import ghidrassist.apiprovider.exceptions.RateLimitException;
@@ -30,6 +30,7 @@ public class ConversationalToolHandler {
     private final List<Map<String, Object>> availableFunctions;
     private final ResponseProcessor responseProcessor;
     private final LlmApi.LlmResponseHandler userHandler;
+    @SuppressWarnings("unused")  // Reserved for future error handling enhancement
     private final LlmErrorHandler errorHandler;
     private final Runnable onCompletionCallback;
     private final ToolRegistry toolRegistry;
@@ -207,8 +208,8 @@ public class ConversationalToolHandler {
 
             // Call LLM with current conversation history
             // Use streaming if provider supports it (Anthropic, OpenAI, LMStudio), otherwise blocking
-            if (apiClient.getProvider() instanceof AnthropicProvider ||
-                apiClient.getProvider() instanceof OpenAIProvider ||
+            if (apiClient.getProvider() instanceof AnthropicPlatformApiProvider ||
+                apiClient.getProvider() instanceof OpenAIPlatformApiProvider ||
                 apiClient.getProvider() instanceof LMStudioProvider) {
                 streamingConversationWithFunctions();
             } else {
@@ -320,10 +321,10 @@ public class ConversationalToolHandler {
      */
     private void streamingConversationWithFunctions() {
         try {
-            if (apiClient.getProvider() instanceof AnthropicProvider) {
-                streamWithAnthropicProvider();
-            } else if (apiClient.getProvider() instanceof OpenAIProvider) {
-                streamWithOpenAIProvider();
+            if (apiClient.getProvider() instanceof AnthropicPlatformApiProvider) {
+                streamWithAnthropicPlatformApiProvider();
+            } else if (apiClient.getProvider() instanceof OpenAIPlatformApiProvider) {
+                streamWithOpenAIPlatformApiProvider();
             } else if (apiClient.getProvider() instanceof LMStudioProvider) {
                 streamWithLMStudioProvider();
             }
@@ -340,14 +341,14 @@ public class ConversationalToolHandler {
     /**
      * Stream conversation using Anthropic provider.
      */
-    private void streamWithAnthropicProvider() {
+    private void streamWithAnthropicPlatformApiProvider() {
         try {
-            AnthropicProvider provider = (AnthropicProvider) apiClient.getProvider();
+            AnthropicPlatformApiProvider provider = (AnthropicPlatformApiProvider) apiClient.getProvider();
 
             provider.streamChatCompletionWithFunctions(
                 conversationHistory,
                 availableFunctions,
-                new AnthropicProvider.StreamingFunctionHandler() {
+                new AnthropicPlatformApiProvider.StreamingFunctionHandler() {
                     @Override
                     public void onTextUpdate(String textDelta) {
                         // Stream text to UI immediately
@@ -359,7 +360,7 @@ public class ConversationalToolHandler {
                     }
 
                     @Override
-                    public void onStreamComplete(String stopReason, String fullText, String thinkingContent, String thinkingSignature, List<AnthropicProvider.ToolCall> toolCalls) {
+                    public void onStreamComplete(String stopReason, String fullText, String thinkingContent, String thinkingSignature, List<AnthropicPlatformApiProvider.ToolCall> toolCalls) {
                         // Create assistant message with text content
                         ChatMessage assistantMsg = new ChatMessage(ChatMessage.ChatMessageRole.ASSISTANT, fullText);
 
@@ -374,7 +375,7 @@ public class ConversationalToolHandler {
                         // If we have tool calls, convert them to JsonArray and attach to assistant message
                         if (!toolCalls.isEmpty()) {
                             JsonArray toolCallsArray = new JsonArray();
-                            for (AnthropicProvider.ToolCall toolCall : toolCalls) {
+                            for (AnthropicPlatformApiProvider.ToolCall toolCall : toolCalls) {
                                 JsonObject toolCallObj = new JsonObject();
                                 toolCallObj.addProperty("id", toolCall.id);
                                 toolCallObj.addProperty("type", "function");
@@ -473,14 +474,14 @@ public class ConversationalToolHandler {
     /**
      * Stream conversation using OpenAI provider.
      */
-    private void streamWithOpenAIProvider() {
+    private void streamWithOpenAIPlatformApiProvider() {
         try {
-            OpenAIProvider provider = (OpenAIProvider) apiClient.getProvider();
+            OpenAIPlatformApiProvider provider = (OpenAIPlatformApiProvider) apiClient.getProvider();
 
             provider.streamChatCompletionWithFunctions(
                 conversationHistory,
                 availableFunctions,
-                new OpenAIProvider.StreamingFunctionHandler() {
+                new OpenAIPlatformApiProvider.StreamingFunctionHandler() {
                     @Override
                     public void onTextUpdate(String textDelta) {
                         javax.swing.SwingUtilities.invokeLater(() -> {
@@ -491,12 +492,12 @@ public class ConversationalToolHandler {
                     }
 
                     @Override
-                    public void onStreamComplete(String stopReason, String fullText, List<OpenAIProvider.ToolCall> toolCalls) {
+                    public void onStreamComplete(String stopReason, String fullText, List<OpenAIPlatformApiProvider.ToolCall> toolCalls) {
                         ChatMessage assistantMsg = new ChatMessage(ChatMessage.ChatMessageRole.ASSISTANT, fullText);
 
                         if (!toolCalls.isEmpty()) {
                             JsonArray toolCallsArray = new JsonArray();
-                            for (OpenAIProvider.ToolCall toolCall : toolCalls) {
+                            for (OpenAIPlatformApiProvider.ToolCall toolCall : toolCalls) {
                                 JsonObject toolCallObj = new JsonObject();
                                 toolCallObj.addProperty("id", toolCall.id);
                                 toolCallObj.addProperty("type", "function");
@@ -675,7 +676,7 @@ public class ConversationalToolHandler {
      * Handle tool calls from streaming response.
      * Simplified version of handleToolCalls for use with streaming.
      */
-    private void handleToolCallsFromStream(List<AnthropicProvider.ToolCall> toolCalls) {
+    private void handleToolCallsFromStream(List<AnthropicPlatformApiProvider.ToolCall> toolCalls) {
         try {
             // Update UI with tool calling status
             String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
@@ -683,9 +684,9 @@ public class ConversationalToolHandler {
                 userHandler.onUpdate(toolExecutionHeader);
             });
 
-            // Convert AnthropicProvider.ToolCall to JsonArray format expected by existing methods
+            // Convert AnthropicPlatformApiProvider.ToolCall to JsonArray format expected by existing methods
             JsonArray toolCallsArray = new JsonArray();
-            for (AnthropicProvider.ToolCall toolCall : toolCalls) {
+            for (AnthropicPlatformApiProvider.ToolCall toolCall : toolCalls) {
                 JsonObject toolCallObj = new JsonObject();
                 toolCallObj.addProperty("id", toolCall.id);
                 toolCallObj.addProperty("type", "function");
@@ -715,7 +716,7 @@ public class ConversationalToolHandler {
     /**
      * Handle tool calls from OpenAI streaming response.
      */
-    private void handleToolCallsFromOpenAIStream(List<OpenAIProvider.ToolCall> toolCalls) {
+    private void handleToolCallsFromOpenAIStream(List<OpenAIPlatformApiProvider.ToolCall> toolCalls) {
         try {
             String toolExecutionHeader = "\n\n🔧 **Executing tools...**\n";
             javax.swing.SwingUtilities.invokeLater(() -> {
@@ -723,7 +724,7 @@ public class ConversationalToolHandler {
             });
 
             JsonArray toolCallsArray = new JsonArray();
-            for (OpenAIProvider.ToolCall toolCall : toolCalls) {
+            for (OpenAIPlatformApiProvider.ToolCall toolCall : toolCalls) {
                 JsonObject toolCallObj = new JsonObject();
                 toolCallObj.addProperty("id", toolCall.id);
                 toolCallObj.addProperty("type", "function");

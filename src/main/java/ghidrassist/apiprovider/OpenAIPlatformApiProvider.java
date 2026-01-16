@@ -18,12 +18,11 @@ import okio.BufferedSource;
 import javax.net.ssl.*;
 import java.io.IOException;
 import java.io.StringReader;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class OpenAIProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider, EmbeddingProvider {
+public class OpenAIPlatformApiProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider, EmbeddingProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String OPENAI_CHAT_ENDPOINT = "chat/completions";
@@ -38,12 +37,12 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
 
     private volatile boolean isCancelled = false;
 
-    public OpenAIProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
-        super(name, ProviderType.OPENAI, model, maxTokens, url, key, disableTlsVerification, timeout);
+    public OpenAIPlatformApiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
+        super(name, ProviderType.OPENAI_PLATFORM_API, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
-    public static OpenAIProvider fromConfig(APIProviderConfig config) {
-        return new OpenAIProvider(
+    public static OpenAIPlatformApiProvider fromConfig(APIProviderConfig config) {
+        return new OpenAIPlatformApiProvider(
             config.getName(),
             config.getModel(),
             config.getMaxTokens(),
@@ -107,7 +106,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletion")) {
@@ -143,7 +142,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -276,7 +275,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                 handler.onError(new StreamCancelledException(name, operation,
                     StreamCancelledException.CancellationReason.USER_REQUESTED));
             }
-        }, "OpenAIProvider-StreamRetry").start();
+        }, "OpenAIPlatformApiProvider-StreamRetry").start();
     }
 
     /**
@@ -301,7 +300,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
         
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
@@ -327,7 +326,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
@@ -482,7 +481,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENAI_EMBEDDINGS_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -591,7 +590,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                 callback.onError(new StreamCancelledException(name, operation,
                     StreamCancelledException.CancellationReason.USER_REQUESTED));
             }
-        }, "OpenAIProvider-EmbeddingsRetry").start();
+        }, "OpenAIPlatformApiProvider-EmbeddingsRetry").start();
     }
 
     private JsonObject buildChatCompletionPayload(List<ChatMessage> messages, boolean stream) {
@@ -736,7 +735,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(url + OPENAI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -904,7 +903,7 @@ public class OpenAIProvider extends APIProvider implements FunctionCallingProvid
                 handler.onError(new StreamCancelledException(name, operation,
                     StreamCancelledException.CancellationReason.USER_REQUESTED));
             }
-        }, "OpenAIProvider-StreamFunctionsRetry").start();
+        }, "OpenAIPlatformApiProvider-StreamFunctionsRetry").start();
     }
 
     /**

@@ -3,45 +3,38 @@ package ghidrassist.graphrag.nodes;
 /**
  * Types of nodes in the Binary Knowledge Graph.
  *
- * The graph uses a 5-level semantic hierarchy:
+ * The graph uses a 4-level semantic hierarchy:
  * <pre>
- * Level 4: BINARY         - Overall binary summary
- * Level 3: MODULE         - Communities of related functions (Leiden-detected)
- * Level 2: FUNCTION       - Complete functions with decompiled code + summaries
- * Level 1: BLOCK          - Basic blocks, loop bodies, conditionals
- * Level 0: STATEMENT      - Individual lines / instructions
+ * Level 2: BINARY         - Overall binary summary
+ * Level 1: MODULE         - Communities of related functions (Leiden-detected)
+ * Level 1: COMMUNITY      - Detected community grouping
+ * Level 0: FUNCTION       - Complete functions with decompiled code + summaries
  * </pre>
  */
 public enum NodeType {
     /**
-     * Individual statement or instruction level.
-     * Finest granularity for specific operation semantics.
-     */
-    STATEMENT(0, "Statement"),
-
-    /**
-     * Basic block level - loop bodies, conditionals, etc.
-     * Captures logical purpose of code sections.
-     */
-    BLOCK(1, "Block"),
-
-    /**
      * Complete function with decompiled code and summary.
      * Primary unit of analysis for most queries.
      */
-    FUNCTION(2, "Function"),
+    FUNCTION(0, "Function"),
 
     /**
      * Community/module of related functions detected via Leiden algorithm.
      * Represents subsystems and logical groupings.
      */
-    MODULE(3, "Module"),
+    MODULE(1, "Module"),
+
+    /**
+     * Detected community grouping of related functions.
+     * Same level as MODULE - represents functional groupings.
+     */
+    COMMUNITY(1, "Community"),
 
     /**
      * Top-level binary summary.
      * Overall program semantics and attack surface.
      */
-    BINARY(4, "Binary");
+    BINARY(2, "Binary");
 
     private final int level;
     private final String displayName;

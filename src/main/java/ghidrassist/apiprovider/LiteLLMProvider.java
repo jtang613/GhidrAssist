@@ -29,7 +29,7 @@ import java.util.Map;
  * 3. LiteLLM model aliases (e.g., "claude-sonnet-4-5") that route to Bedrock
  * 4. Message format translation for thinking blocks
  */
-public class LiteLLMProvider extends OpenAIProvider {
+public class LiteLLMProvider extends OpenAIPlatformApiProvider {
 
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
@@ -350,7 +350,7 @@ public class LiteLLMProvider extends OpenAIProvider {
 
         Request request = new Request.Builder()
                 .url(url + "chat/completions")
-                .post(RequestBody.create(JSON, gson.toJson(payload)))
+                .post(RequestBody.create(gson.toJson(payload), JSON))
                 .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -541,7 +541,7 @@ public class LiteLLMProvider extends OpenAIProvider {
 
         Request request = new Request.Builder()
                 .url(url + "chat/completions")
-                .post(RequestBody.create(JSON, gson.toJson(payload)))
+                .post(RequestBody.create(gson.toJson(payload), JSON))
                 .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -741,7 +741,7 @@ public class LiteLLMProvider extends OpenAIProvider {
 
         Request request = new Request.Builder()
                 .url(url + "chat/completions")
-                .post(RequestBody.create(JSON, gson.toJson(payload)))
+                .post(RequestBody.create(gson.toJson(payload), JSON))
                 .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
@@ -763,7 +763,7 @@ public class LiteLLMProvider extends OpenAIProvider {
 
         Request request = new Request.Builder()
                 .url(url + "chat/completions")
-                .post(RequestBody.create(JSON, gson.toJson(payload)))
+                .post(RequestBody.create(gson.toJson(payload), JSON))
                 .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {

@@ -456,7 +456,9 @@ public class GraphRAGService {
         try {
             ghidrassist.graphrag.extraction.SecurityFeatureExtractor extractor =
                     new ghidrassist.graphrag.extraction.SecurityFeatureExtractor(program, monitor);
-            ghidrassist.graphrag.extraction.SecurityFeatures features = extractor.extractFeatures(function);
+            // Pass decompiled code for additional API detection via regex parsing
+            String decompiledCode = node.getRawContent();
+            ghidrassist.graphrag.extraction.SecurityFeatures features = extractor.extractFeatures(function, decompiledCode);
 
             if (!features.isEmpty()) {
                 node.applySecurityFeatures(features);
@@ -529,7 +531,9 @@ public class GraphRAGService {
             }
 
             try {
-                ghidrassist.graphrag.extraction.SecurityFeatures features = extractor.extractFeatures(function);
+                // Pass decompiled code for additional API detection via regex parsing
+                String decompiledCode = node.getRawContent();
+                ghidrassist.graphrag.extraction.SecurityFeatures features = extractor.extractFeatures(function, decompiledCode);
                 if (!features.isEmpty()) {
                     node.applySecurityFeatures(features);
                     java.util.List<String> securityFlags = features.generateSecurityFlags();
@@ -635,7 +639,7 @@ public class GraphRAGService {
 
         String programHash = function.getProgram().getExecutableSHA256();
         BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
-        return graph.getNeighbors(node.getId(), depth);
+        return graph.getNeighborsBatch(node.getId(), depth);
     }
 
     // ========================================

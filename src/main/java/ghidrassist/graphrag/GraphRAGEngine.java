@@ -3,7 +3,6 @@ package ghidrassist.graphrag;
 import ghidra.util.Msg;
 
 import ghidrassist.graphrag.community.Community;
-import ghidrassist.graphrag.nodes.EdgeType;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
 import ghidrassist.graphrag.nodes.NodeType;
 import ghidrassist.graphrag.query.*;

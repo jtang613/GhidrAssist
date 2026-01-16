@@ -10,7 +10,6 @@ import ghidra.util.task.Task;
 import ghidra.util.task.TaskLauncher;
 import ghidra.util.task.TaskMonitor;
 import ghidrassist.AnalysisDB;
-import ghidrassist.AnalysisDB.Analysis;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProviderConfig;
@@ -23,13 +22,15 @@ import ghidrassist.services.*;
 import ghidrassist.services.RAGManagementService.RAGIndexStats;
 import ghidrassist.ui.tabs.*;
 import ghidrassist.graphrag.BinaryKnowledgeGraph;
+import ghidrassist.graphrag.nodes.EdgeType;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
+import ghidrassist.graphrag.nodes.NodeType;
 import ghidrassist.graphrag.extraction.StructureExtractor;
 import ghidrassist.graphrag.extraction.SemanticExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatures;
-import ghidrassist.graphrag.extraction.ExtractionPrompts;
 import ghidrassist.workers.*;
+
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -41,6 +42,7 @@ import javax.swing.event.HyperlinkEvent;
 import javax.swing.table.DefaultTableModel;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -96,6 +98,7 @@ public class TabController {
     private RAGManagementTab ragManagementTab;
     private SettingsTab settingsTab;
     private SemanticGraphTab semanticGraphTab;
+
 
     // Background workers for non-blocking analysis
     private volatile ReindexWorker reindexWorker;
@@ -300,7 +303,9 @@ public class TabController {
                 if (needsSecurityAnalysis) {
                     SecurityFeatureExtractor secExtractor = new SecurityFeatureExtractor(
                             plugin.getCurrentProgram(), TaskMonitor.DUMMY);
-                    SecurityFeatures features = secExtractor.extractFeatures(currentFunction);
+                    // Pass decompiled code for additional API detection via regex parsing
+                    String decompiledCode = node.getRawContent();
+                    SecurityFeatures features = secExtractor.extractFeatures(currentFunction, decompiledCode);
                     if (features != null) {
                         node.applySecurityFeatures(features);
                     }
@@ -347,36 +352,6 @@ public class TabController {
 
                     // Step 4: Save node to graph
                     graph.upsertNode(node);
-
-                    // Step 4.5: Cache interaction for RLHF feedback
-                    if (node.getLlmSummary() != null && !node.getLlmSummary().isEmpty()) {
-                        try {
-                            // Get caller/callee names (same logic as SemanticExtractor.summarizeNode)
-                            List<String> callerNames = graph.getCallers(node.getId()).stream()
-                                    .map(n -> n.getName() != null ? n.getName() : "unknown")
-                                    .limit(5)
-                                    .collect(java.util.stream.Collectors.toList());
-
-                            List<String> calleeNames = graph.getCallees(node.getId()).stream()
-                                    .map(n -> n.getName() != null ? n.getName() : "unknown")
-                                    .limit(5)
-                                    .collect(java.util.stream.Collectors.toList());
-
-                            // Reconstruct the prompt
-                            String reconstructedPrompt = ExtractionPrompts.functionSummaryPrompt(
-                                    node.getName() != null ? node.getName() : "unknown",
-                                    node.getRawContent(),
-                                    callerNames,
-                                    calleeNames
-                            );
-
-                            // Cache for RLHF feedback
-                            feedbackService.cacheLastInteraction(reconstructedPrompt, node.getLlmSummary());
-                            Msg.info(this, "Cached explain interaction for RLHF feedback");
-                        } catch (Exception e) {
-                            Msg.warn(this, "Failed to cache explain interaction: " + e.getMessage());
-                        }
-                    }
 
                     // Step 5: Update display
                     final KnowledgeNode finalNode = node;
@@ -472,7 +447,7 @@ public class TabController {
     }
 
     private void handleRegularQuery(String query, boolean useRAG, boolean useMCP) {
-        Task task = new Task("Custom Query", true, true, true) {
+        Task task = new Task("Query", true, true, true) {
             @Override
             public void run(TaskMonitor monitor) {
                 try {
@@ -2050,6 +2025,7 @@ public class TabController {
         });
 
         reindexWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
             semanticGraphTab.setReindexRunning(false);
             semanticGraphTab.refreshCurrentView();
 
@@ -2065,10 +2041,11 @@ public class TabController {
                     formatIndexedTimestamp(lastIndexed)
             );
 
-            // Chain: ReIndex -> Security Analysis -> Network Flow Analysis
-            Msg.info(this, String.format("ReIndex complete: %d functions, %d edges. Starting Security Analysis...",
+            Msg.info(this, String.format("Structure indexing complete: %d functions, %d edges. Starting Security Analysis...",
                     result.functionsExtracted, result.callEdgesCreated));
-            startSecurityAnalysisPhase();
+
+            // Chain to Security Analysis (which will chain to Network Flow, then Community Detection)
+            startSecurityAnalysisChain();
         });
 
         reindexWorker.setCancelledCallback(() -> {
@@ -2087,75 +2064,6 @@ public class TabController {
         semanticGraphTab.setReindexRunning(true);
         semanticGraphTab.showProgress(0, "Starting reindex...");
         reindexWorker.execute();
-    }
-
-    /**
-     * Internal helper: Start Security Analysis as part of ReIndex chain.
-     * Called after ReIndex completes.
-     */
-    private void startSecurityAnalysisPhase() {
-        securityAnalysisWorker = new SecurityAnalysisWorker(analysisDB, plugin.getCurrentProgram());
-
-        securityAnalysisWorker.setProgressCallback(progress -> {
-            semanticGraphTab.showProgress(progress.getPercentage(), "Security: " + progress.message);
-        });
-
-        securityAnalysisWorker.setCompletedCallback(result -> {
-            Msg.info(this, String.format("Security Analysis complete: %d paths, %d vulnerable edges. Starting Network Flow...",
-                    result.pathCount, result.vulnerableViaEdges));
-            startNetworkFlowPhase();
-        });
-
-        securityAnalysisWorker.setCancelledCallback(() -> {
-            semanticGraphTab.hideProgress();
-            Msg.info(this, "ReIndex chain cancelled during Security Analysis");
-        });
-
-        securityAnalysisWorker.setFailedCallback(error -> {
-            Msg.warn(this, "Security Analysis failed: " + error + ". Continuing to Network Flow...");
-            startNetworkFlowPhase();
-        });
-
-        semanticGraphTab.showProgress(0, "Security: Starting analysis...");
-        securityAnalysisWorker.execute();
-    }
-
-    /**
-     * Internal helper: Start Network Flow Analysis as part of ReIndex chain.
-     * Called after Security Analysis completes.
-     */
-    private void startNetworkFlowPhase() {
-        networkFlowWorker = new NetworkFlowAnalysisWorker(analysisDB, plugin.getCurrentProgram());
-
-        networkFlowWorker.setProgressCallback(progress -> {
-            semanticGraphTab.showProgress(progress.getPercentage(), "Network: " + progress.message);
-        });
-
-        networkFlowWorker.setCompletedCallback(result -> {
-            semanticGraphTab.hideProgress();
-            semanticGraphTab.refreshCurrentView();
-            Msg.showInfo(this, null, "ReIndex Complete",
-                    String.format("Full analysis complete:\n" +
-                            "• Structure extraction done\n" +
-                            "• Security analysis: found taint paths\n" +
-                            "• Network analysis: %d send, %d recv functions",
-                            result.sendFunctionsFound, result.recvFunctionsFound));
-        });
-
-        networkFlowWorker.setCancelledCallback(() -> {
-            semanticGraphTab.hideProgress();
-            semanticGraphTab.refreshCurrentView();
-            Msg.info(this, "ReIndex chain cancelled during Network Flow Analysis");
-        });
-
-        networkFlowWorker.setFailedCallback(error -> {
-            semanticGraphTab.hideProgress();
-            semanticGraphTab.refreshCurrentView();
-            Msg.warn(this, "Network Flow Analysis failed: " + error);
-        });
-
-        semanticGraphTab.showProgress(0, "Network: Starting analysis...");
-        networkFlowWorker.execute();
     }
 
     /**
@@ -2202,6 +2110,184 @@ public class TabController {
         semanticGraphTab.setRefreshNamesRunning(true);
         semanticGraphTab.showIndeterminateProgress("Refreshing function names...");
         refreshNamesWorker.execute();
+    }
+
+    /**
+     * Handle community detection - group related functions.
+     */
+    public void handleSemanticGraphCommunityDetection() {
+        if (plugin.getCurrentProgram() == null) {
+            Msg.showWarn(this, null, "No Program", "No program loaded");
+            return;
+        }
+
+        // If already running, cancel it
+        if (communityDetectionWorker != null && !communityDetectionWorker.isDone()) {
+            communityDetectionWorker.requestCancel();
+            return;
+        }
+
+        // Create and configure the worker
+        communityDetectionWorker = new CommunityDetectionWorker(analysisDB, plugin.getCurrentProgram());
+
+        communityDetectionWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
+        });
+
+        communityDetectionWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Community Detection Complete",
+                    String.format("Detected %d communities", result.communityCount));
+        });
+
+        communityDetectionWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
+
+        communityDetectionWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            Msg.showError(this, null, "Error", "Failed to run community detection: " + error);
+        });
+
+        // Start the worker
+        semanticGraphTab.setCommunityDetectionRunning(true);
+        semanticGraphTab.showProgress(0, "Starting community detection...");
+        communityDetectionWorker.execute();
+    }
+
+    // ========================================
+    // Analysis Chain Helpers (for ReIndex pipeline)
+    // ========================================
+
+    /**
+     * Start the Security Analysis as part of the ReIndex chain.
+     * On completion, chains to Network Flow Analysis.
+     */
+    private void startSecurityAnalysisChain() {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        securityAnalysisWorker = new SecurityAnalysisWorker(analysisDB, plugin.getCurrentProgram());
+
+        securityAnalysisWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), "Security: " + progress.message);
+        });
+
+        securityAnalysisWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSecurityAnalysisRunning(false);
+            Msg.info(this, String.format("Security Analysis complete: %d taint paths, %d VULNERABLE_VIA edges. Starting Network Flow Analysis...",
+                    result.pathCount, result.vulnerableViaEdges));
+            startNetworkFlowAnalysisChain();
+        });
+
+        securityAnalysisWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSecurityAnalysisRunning(false);
+            Msg.warn(this, "Security Analysis failed: " + error + ". Continuing with Network Flow Analysis...");
+            startNetworkFlowAnalysisChain();
+        });
+
+        securityAnalysisWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setSecurityAnalysisRunning(false);
+            // Don't continue chain if cancelled
+        });
+
+        semanticGraphTab.setSecurityAnalysisRunning(true);
+        securityAnalysisWorker.execute();
+    }
+
+    /**
+     * Start Network Flow Analysis as part of the ReIndex chain.
+     * On completion, chains to Community Detection.
+     */
+    private void startNetworkFlowAnalysisChain() {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        networkFlowWorker = new NetworkFlowAnalysisWorker(analysisDB, plugin.getCurrentProgram());
+
+        networkFlowWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), "Network: " + progress.message);
+        });
+
+        networkFlowWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setNetworkFlowRunning(false);
+            Msg.info(this, String.format("Network Flow Analysis complete: %d send edges, %d recv edges. Starting Community Detection...",
+                    result.sendPathEdges, result.recvPathEdges));
+            startCommunityDetectionChain();
+        });
+
+        networkFlowWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setNetworkFlowRunning(false);
+            Msg.warn(this, "Network Flow Analysis failed: " + error + ". Continuing with Community Detection...");
+            startCommunityDetectionChain();
+        });
+
+        networkFlowWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setNetworkFlowRunning(false);
+            // Don't continue chain if cancelled
+        });
+
+        semanticGraphTab.setNetworkFlowRunning(true);
+        networkFlowWorker.execute();
+    }
+
+    /**
+     * Start Community Detection as the final step of the ReIndex chain.
+     * Shows completion dialog when done.
+     */
+    private void startCommunityDetectionChain() {
+        if (plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        communityDetectionWorker = new CommunityDetectionWorker(analysisDB, plugin.getCurrentProgram());
+
+        communityDetectionWorker.setProgressCallback(progress -> {
+            semanticGraphTab.showProgress(progress.getPercentage(), "Community: " + progress.message);
+        });
+
+        communityDetectionWorker.setCompletedCallback(result -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.showInfo(this, null, "Full Pipeline Complete",
+                    String.format("ReIndex pipeline completed:\n" +
+                            "• Structure extraction\n" +
+                            "• Security analysis\n" +
+                            "• Network flow analysis\n" +
+                            "• Community detection (%d communities)", result.communityCount));
+        });
+
+        communityDetectionWorker.setFailedCallback(error -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+            Msg.warn(this, "Community Detection failed: " + error);
+            Msg.showInfo(this, null, "Pipeline Complete (with errors)",
+                    "ReIndex pipeline completed with some errors.\nCheck console for details.");
+        });
+
+        communityDetectionWorker.setCancelledCallback(() -> {
+            semanticGraphTab.hideProgress();
+            semanticGraphTab.setCommunityDetectionRunning(false);
+            semanticGraphTab.refreshCurrentView();
+        });
+
+        semanticGraphTab.setCommunityDetectionRunning(true);
+        communityDetectionWorker.execute();
     }
 
     /**
@@ -2334,8 +2420,8 @@ public class TabController {
             Msg.showInfo(this, null, "Network Flow Analysis Complete",
                     String.format("Found %d functions calling send APIs\n" +
                             "Found %d functions calling recv APIs\n" +
-                            "Created %d NETWORK_SEND edges\n" +
-                            "Created %d NETWORK_RECV edges",
+                            "Created %d NETWORK_SEND_PATH edges\n" +
+                            "Created %d NETWORK_RECV_PATH edges",
                             result.sendFunctionsFound, result.recvFunctionsFound,
                             result.sendPathEdges, result.recvPathEdges));
         });
@@ -2356,55 +2442,6 @@ public class TabController {
         semanticGraphTab.setNetworkFlowRunning(true);
         semanticGraphTab.showProgress(0, "Starting network flow analysis...");
         networkFlowWorker.execute();
-    }
-
-    /**
-     * Handle community detection button - group related functions into communities.
-     * Uses SwingWorker for non-blocking operation.
-     */
-    public void handleSemanticGraphCommunityDetection() {
-        if (plugin.getCurrentProgram() == null) {
-            Msg.showWarn(this, null, "No Program", "No program loaded");
-            return;
-        }
-
-        // If already running, cancel it
-        if (communityDetectionWorker != null && !communityDetectionWorker.isDone()) {
-            communityDetectionWorker.requestCancel();
-            return;
-        }
-
-        // Create and configure the worker
-        communityDetectionWorker = new CommunityDetectionWorker(analysisDB, plugin.getCurrentProgram());
-
-        communityDetectionWorker.setProgressCallback(progress -> {
-            semanticGraphTab.showProgress(progress.getPercentage(), progress.message);
-        });
-
-        communityDetectionWorker.setCompletedCallback(result -> {
-            semanticGraphTab.hideProgress();
-            semanticGraphTab.setCommunityDetectionRunning(false);
-            semanticGraphTab.refreshCurrentView();
-            Msg.showInfo(this, null, "Community Detection Complete",
-                    String.format("Detected %d communities", result.communityCount));
-        });
-
-        communityDetectionWorker.setCancelledCallback(() -> {
-            semanticGraphTab.hideProgress();
-            semanticGraphTab.setCommunityDetectionRunning(false);
-            semanticGraphTab.refreshCurrentView();
-        });
-
-        communityDetectionWorker.setFailedCallback(error -> {
-            semanticGraphTab.hideProgress();
-            semanticGraphTab.setCommunityDetectionRunning(false);
-            Msg.showError(this, null, "Error", "Failed to run community detection: " + error);
-        });
-
-        // Start the worker
-        semanticGraphTab.setCommunityDetectionRunning(true);
-        semanticGraphTab.showProgress(0, "Starting community detection...");
-        communityDetectionWorker.execute();
     }
 
     /**
@@ -2543,22 +2580,14 @@ public class TabController {
 
                 graphView.showContent();
 
-                // Get N-hop neighborhood (callees/outgoing)
+                // Get N-hop neighborhood
                 java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> neighbors =
-                        graph.getNeighbors(centerNode.getId(), nHops);
+                        graph.getNeighborsBatch(centerNode.getId(), nHops);
 
                 // Include center node in the list
                 java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> allNodes = new java.util.ArrayList<>();
                 allNodes.add(centerNode);
                 allNodes.addAll(neighbors);
-
-                // Also include one level of callers (who calls the center node)
-                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> callers = graph.getCallers(centerNode.getId());
-                for (ghidrassist.graphrag.nodes.KnowledgeNode caller : callers) {
-                    if (!allNodes.stream().anyMatch(n -> n.getId().equals(caller.getId()))) {
-                        allNodes.add(caller);
-                    }
-                }
 
                 // Collect all edges between these nodes
                 java.util.Set<String> nodeIds = new java.util.HashSet<>();
@@ -2567,61 +2596,13 @@ public class TabController {
                 }
 
                 java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> allEdges = new java.util.ArrayList<>();
-                java.util.Set<String> addedEdgeKeys = new java.util.HashSet<>();
-
-                // Collect nodes to add after iteration (to avoid ConcurrentModificationException)
-                java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> nodesToAdd = new java.util.ArrayList<>();
-
                 for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
-                    // Collect outgoing edges
                     for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getOutgoingEdges(node.getId())) {
-                        ghidrassist.graphrag.nodes.EdgeType type = edge.getType();
-                        boolean isNetworkEdge = (type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_SEND ||
-                                                  type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_RECV);
-                        boolean targetInNeighborhood = nodeIds.contains(edge.getTargetId());
-
-                        // Include edge if: (target in neighborhood) OR (NETWORK edge with checkbox enabled)
-                        if (edgeTypes.contains(type) && (targetInNeighborhood || isNetworkEdge)) {
-                            String edgeKey = edge.getSourceId() + "->" + edge.getTargetId() + ":" + type;
-                            if (addedEdgeKeys.add(edgeKey)) {
-                                allEdges.add(edge);
-                                // Queue target node to add if outside neighborhood (for NETWORK edges)
-                                if (isNetworkEdge && !targetInNeighborhood) {
-                                    ghidrassist.graphrag.nodes.KnowledgeNode targetNode = graph.getNode(edge.getTargetId());
-                                    if (targetNode != null && nodeIds.add(targetNode.getId())) {
-                                        nodesToAdd.add(targetNode);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Also collect incoming NETWORK edges
-                    // NETWORK edges may originate from external API nodes outside the N-hop neighborhood
-                    if (edgeTypes.contains(ghidrassist.graphrag.nodes.EdgeType.NETWORK_SEND) ||
-                        edgeTypes.contains(ghidrassist.graphrag.nodes.EdgeType.NETWORK_RECV)) {
-                        for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getIncomingEdges(node.getId())) {
-                            ghidrassist.graphrag.nodes.EdgeType type = edge.getType();
-                            if (type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_SEND ||
-                                type == ghidrassist.graphrag.nodes.EdgeType.NETWORK_RECV) {
-                                String edgeKey = edge.getSourceId() + "->" + edge.getTargetId() + ":" + type;
-                                if (addedEdgeKeys.add(edgeKey)) {
-                                    allEdges.add(edge);
-                                    // Queue source node to add if outside neighborhood
-                                    if (!nodeIds.contains(edge.getSourceId())) {
-                                        ghidrassist.graphrag.nodes.KnowledgeNode sourceNode = graph.getNode(edge.getSourceId());
-                                        if (sourceNode != null && nodeIds.add(sourceNode.getId())) {
-                                            nodesToAdd.add(sourceNode);
-                                        }
-                                    }
-                                }
-                            }
+                        if (nodeIds.contains(edge.getTargetId()) && edgeTypes.contains(edge.getType())) {
+                            allEdges.add(edge);
                         }
                     }
                 }
-
-                // Add collected network source nodes after iteration completes
-                allNodes.addAll(nodesToAdd);
 
                 graphView.buildGraph(centerNode, allNodes, allEdges);
 
@@ -2787,7 +2768,11 @@ public class TabController {
     }
 
 
+
+
+
     // ==== Cleanup ====
+
 
     public void dispose() {
         codeAnalysisService.close();

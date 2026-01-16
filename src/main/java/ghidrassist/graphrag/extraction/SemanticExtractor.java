@@ -28,10 +28,12 @@ import java.util.stream.Collectors;
  * 2. Generate LLM summaries in batches
  * 3. Track progress and allow cancellation
  */
+@SuppressWarnings("deprecation")  // Uses legacy extractSecurityNotes() for backward compatibility
 public class SemanticExtractor {
 
     private final APIProvider provider;
     private final BinaryKnowledgeGraph graph;
+    @SuppressWarnings("unused")  // Reserved for future multi-binary support
     private final String binaryId;
 
     // Parallel processing workers
@@ -40,7 +42,9 @@ public class SemanticExtractor {
     // Rate limiting (legacy - kept for compatibility)
     private static final int DEFAULT_BATCH_SIZE = 5;
     private static final long DEFAULT_DELAY_MS = 500;
+    @SuppressWarnings("unused")  // Legacy field kept for API compatibility
     private int batchSize;
+    @SuppressWarnings("unused")  // Legacy field kept for API compatibility
     private long delayBetweenBatches;
 
     // Thread-safe statistics

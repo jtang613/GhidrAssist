@@ -15,6 +15,8 @@ import java.util.List;
  * Enhanced error dialog that provides better error reporting and action options
  */
 public class EnhancedErrorDialog extends JDialog {
+    private static final long serialVersionUID = 1L;
+
     private final APIProviderException exception;
     private final List<ErrorAction> actions;
     private boolean detailsVisible = false;

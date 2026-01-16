@@ -2,6 +2,7 @@ package ghidrassist.core;
 
 import java.util.*;
 
+@SuppressWarnings("unchecked")  // Intentional use of generic varargs for function template creation
 public class ActionConstants {
 
     public static final List<Map<String, Object>> FN_TEMPLATES = Arrays.asList(

@@ -10,8 +10,10 @@ import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
 
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -361,6 +363,17 @@ public class SecurityFeatureExtractor {
         "^(HKEY_|HK[A-Z]{2})[\\\\A-Za-z0-9_-]+$"
     );
 
+    // Pattern to extract function calls from decompiled code
+    private static final Pattern CALL_PATTERN = Pattern.compile(
+        "\\b([A-Za-z_@][A-Za-z0-9_@!:.]*)\\s*\\("
+    );
+
+    // Keywords to exclude from call extraction (control flow, not function calls)
+    private static final Set<String> CALL_KEYWORDS = Set.of(
+        "if", "for", "while", "switch", "case", "return", "sizeof",
+        "do", "catch", "try", "else", "new", "delete"
+    );
+
     // ========================================
     // Instance fields
     // ========================================
@@ -390,6 +403,19 @@ public class SecurityFeatureExtractor {
      * @return SecurityFeatures containing all detected features
      */
     public SecurityFeatures extractFeatures(Function function) {
+        return extractFeatures(function, null);
+    }
+
+    /**
+     * Extract security features from a function with optional decompiled code.
+     * When decompiled code is provided, additional API calls are extracted via
+     * regex parsing, catching calls that may not appear in the call graph.
+     *
+     * @param function The function to analyze
+     * @param decompiledCode Optional decompiled C code for additional API extraction
+     * @return SecurityFeatures containing all detected features
+     */
+    public SecurityFeatures extractFeatures(Function function, String decompiledCode) {
         SecurityFeatures features = new SecurityFeatures();
 
         if (function == null || program == null) {
@@ -397,13 +423,18 @@ public class SecurityFeatureExtractor {
         }
 
         try {
-            // 1. Detect API calls via called functions
+            // 1. Detect API calls via called functions (from call graph)
             extractAPICalls(function, features);
 
-            // 2. Extract string references
+            // 2. Extract API calls from decompiled code (catches more calls)
+            if (decompiledCode != null && !decompiledCode.isEmpty()) {
+                extractAPICallsFromCode(decompiledCode, features);
+            }
+
+            // 3. Extract string references
             extractStringReferences(function, features);
 
-            // 3. Calculate activity profile and risk level
+            // 4. Calculate activity profile and risk level
             features.calculateActivityProfile();
             features.calculateRiskLevel();
 
@@ -465,6 +496,67 @@ public class SecurityFeatureExtractor {
             }
         } catch (Exception e) {
             Msg.debug(this, "Error extracting API calls: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Extract API calls from decompiled code using regex pattern matching.
+     * This catches API calls that may not appear in the call graph, such as:
+     * - Calls through function pointers
+     * - Dynamically resolved imports
+     * - Calls in inline code or macros
+     *
+     * @param decompiledCode The decompiled C code to analyze
+     * @param features SecurityFeatures to update with detected APIs
+     */
+    private void extractAPICallsFromCode(String decompiledCode, SecurityFeatures features) {
+        if (decompiledCode == null || decompiledCode.isEmpty()) {
+            return;
+        }
+
+        Set<String> foundNames = new HashSet<>();
+        Matcher matcher = CALL_PATTERN.matcher(decompiledCode);
+
+        while (matcher.find()) {
+            String candidate = matcher.group(1);
+            if (candidate == null || candidate.isEmpty()) {
+                continue;
+            }
+
+            // Skip control flow keywords
+            if (CALL_KEYWORDS.contains(candidate.toLowerCase())) {
+                continue;
+            }
+
+            foundNames.add(candidate);
+        }
+
+        // Check each found name against API sets
+        for (String name : foundNames) {
+            String normalizedName = normalizeFunctionName(name);
+
+            // Check each API category
+            if (NETWORK_APIS.contains(name) || NETWORK_APIS.contains(normalizedName)) {
+                features.addNetworkAPI(normalizedName);
+            }
+            if (FILE_IO_APIS.contains(name) || FILE_IO_APIS.contains(normalizedName)) {
+                features.addFileIOAPI(normalizedName);
+            }
+            if (CRYPTO_APIS.contains(name) || CRYPTO_APIS.contains(normalizedName)) {
+                features.addCryptoAPI(normalizedName);
+            }
+            if (PROCESS_APIS.contains(name) || PROCESS_APIS.contains(normalizedName)) {
+                features.addProcessAPI(normalizedName);
+            }
+
+            // Check for dangerous functions
+            String vulnType = DANGEROUS_FUNCTIONS.get(name);
+            if (vulnType == null) {
+                vulnType = DANGEROUS_FUNCTIONS.get(normalizedName);
+            }
+            if (vulnType != null) {
+                features.addDangerousFunction(normalizedName, vulnType);
+            }
         }
     }
 

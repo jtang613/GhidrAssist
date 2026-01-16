@@ -1,7 +1,6 @@
 package ghidrassist.ui.tabs;
 
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
 import java.awt.*;
 import ghidrassist.core.TabController;
 import ghidrassist.ui.tabs.semanticgraph.ListViewPanel;

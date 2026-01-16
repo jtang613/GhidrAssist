@@ -1,10 +1,8 @@
 package ghidrassist.graphrag.extraction;
 
 import ghidrassist.graphrag.nodes.KnowledgeNode;
-import ghidrassist.graphrag.nodes.NodeType;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 /**
  * Prompt templates for LLM-based semantic extraction.

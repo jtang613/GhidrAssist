@@ -1894,6 +1894,7 @@ public class BinaryKnowledgeGraph {
      * Custom edge class that carries the edge type label.
      */
     public static class LabeledEdge extends DefaultEdge {
+        private static final long serialVersionUID = 1L;
         private final EdgeType type;
 
         public LabeledEdge(EdgeType type) {

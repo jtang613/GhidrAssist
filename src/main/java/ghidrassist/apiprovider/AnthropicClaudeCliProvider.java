@@ -19,10 +19,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
- * Claude Code Provider - proxies API requests through the claude CLI.
+ * Anthropic Claude CLI Provider - proxies API requests through the claude CLI.
  *
  * Benefits:
  * - No API key required (uses CLI's OAuth authentication)
@@ -33,7 +32,7 @@ import java.util.stream.Collectors;
  * - No true streaming (simulated by chunking complete response)
  * - Requires claude CLI installed and authenticated
  */
-public class ClaudeCodeProvider extends APIProvider implements FunctionCallingProvider {
+public class AnthropicClaudeCliProvider extends APIProvider implements FunctionCallingProvider {
     private static final Gson gson = new Gson();
 
     // CLI streaming simulation settings
@@ -43,10 +42,10 @@ public class ClaudeCodeProvider extends APIProvider implements FunctionCallingPr
     // Cached CLI path
     private String cachedCliPath = null;
 
-    public ClaudeCodeProvider(String name, String model, Integer maxTokens,
+    public AnthropicClaudeCliProvider(String name, String model, Integer maxTokens,
                               String url, String key, boolean disableTlsVerification,
                               Integer timeout) {
-        super(name, ProviderType.CLAUDE_CODE, model, maxTokens,
+        super(name, ProviderType.ANTHROPIC_CLAUDE_CLI, model, maxTokens,
               url != null ? url : "", key != null ? key : "",
               disableTlsVerification, timeout != null ? timeout : 300);
 

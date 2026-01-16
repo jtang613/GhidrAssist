@@ -5,11 +5,7 @@ import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompiledFunction;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
-import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
-import ghidra.program.model.block.CodeBlockIterator;
-import ghidra.program.model.block.CodeBlockReference;
-import ghidra.program.model.block.CodeBlockReferenceIterator;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
@@ -17,7 +13,6 @@ import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Reference;
-import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolTable;
@@ -117,20 +112,7 @@ public class StructureExtractor {
                         System.currentTimeMillis() - startTime);
             }
 
-            // Phase 2: Optionally extract basic blocks
-            if (includeBlocks) {
-                monitor.setMessage("Extracting basic blocks...");
-                extractBasicBlocks();
-
-                if (monitor.isCancelled()) {
-                    Msg.info(this, "Extraction cancelled after basic block extraction");
-                    return new ExtractionResult(functionsExtracted.get(), callEdgesCreated.get(),
-                            refEdgesCreated.get(), vulnEdgesCreated.get(),
-                            System.currentTimeMillis() - startTime);
-                }
-            }
-
-            // Phase 3: Create binary-level node
+            // Phase 2: Create binary-level node
             monitor.setMessage("Creating binary summary node...");
             createBinaryNode();
 
@@ -306,7 +288,6 @@ public class StructureExtractor {
 
     private void extractFunctions() {
         FunctionManager funcManager = program.getFunctionManager();
-        int total = funcManager.getFunctionCount();
 
         // Collect all functions to process (excluding thunks and externals)
         List<Function> functionsToProcess = new ArrayList<>();
@@ -427,7 +408,7 @@ public class StructureExtractor {
      * Get or create a decompiler for the current thread.
      */
     private DecompInterface getThreadDecompiler() {
-        long threadId = Thread.currentThread().getId();
+        long threadId = Thread.currentThread().threadId();
         return threadDecompilers.computeIfAbsent(threadId, id -> {
             DecompInterface decomp = new DecompInterface();
             decomp.openProgram(program);
@@ -625,11 +606,14 @@ public class StructureExtractor {
     /**
      * Extract security-relevant features from a function and apply to node.
      * Also generates and sets security flags for vulnerability tracking.
+     * Uses both call graph analysis and decompiled code parsing for better coverage.
      */
     private void extractSecurityFeatures(Function function, KnowledgeNode node) {
         try {
             SecurityFeatureExtractor secExtractor = new SecurityFeatureExtractor(program, monitor);
-            SecurityFeatures features = secExtractor.extractFeatures(function);
+            // Pass decompiled code for additional API call detection via regex
+            String decompiledCode = node.getRawContent();
+            SecurityFeatures features = secExtractor.extractFeatures(function, decompiledCode);
 
             if (!features.isEmpty()) {
                 // Apply the raw security features to the node
@@ -910,63 +894,6 @@ public class StructureExtractor {
                 graph.queueEdgeForBatch(callerNode.getId(), calleeNodeId, EdgeType.CALLS);
                 callEdgesCreated.incrementAndGet();
             }
-        }
-    }
-
-    private void extractBasicBlocks() {
-        try {
-            BasicBlockModel blockModel = new BasicBlockModel(program);
-            FunctionManager funcManager = program.getFunctionManager();
-            FunctionIterator functions = funcManager.getFunctions(true);
-
-            while (functions.hasNext() && !monitor.isCancelled()) {
-                Function func = functions.next();
-                if (func.isThunk() || func.isExternal()) {
-                    continue;
-                }
-
-                KnowledgeNode funcNode = graph.getNodeByAddress(func.getEntryPoint().getOffset());
-                if (funcNode == null) {
-                    continue;
-                }
-
-                // Get blocks within function
-                CodeBlockIterator blocks = blockModel.getCodeBlocksContaining(func.getBody(), monitor);
-                Map<Address, KnowledgeNode> blockNodes = new HashMap<>();
-
-                while (blocks.hasNext()) {
-                    CodeBlock block = blocks.next();
-                    Address blockAddr = block.getFirstStartAddress();
-
-                    // Create block node
-                    KnowledgeNode blockNode = KnowledgeNode.createBlock(binaryId, blockAddr.getOffset());
-                    blockNode.setRawContent(getBlockDisassembly(block));
-                    blockNode.markStale();
-                    graph.queueNodeForBatch(blockNode);
-                    blockNodes.put(blockAddr, blockNode);
-
-                    // Function CONTAINS block
-                    graph.queueEdgeForBatch(funcNode.getId(), blockNode.getId(), EdgeType.CONTAINS);
-                }
-
-                // Extract control flow edges between blocks
-                for (Map.Entry<Address, KnowledgeNode> entry : blockNodes.entrySet()) {
-                    CodeBlock block = blockModel.getCodeBlockAt(entry.getKey(), monitor);
-                    if (block == null) continue;
-
-                    CodeBlockReferenceIterator dests = block.getDestinations(monitor);
-                    while (dests.hasNext()) {
-                        CodeBlockReference ref = dests.next();
-                        Address destAddr = ref.getDestinationAddress();
-                        KnowledgeNode destNode = blockNodes.get(destAddr);
-                        if (destNode != null) {
-                            graph.queueEdgeForBatch(entry.getValue().getId(), destNode.getId(), EdgeType.FLOWS_TO);
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Msg.error(this, "Failed to extract basic blocks: " + e.getMessage(), e);
         }
     }
 

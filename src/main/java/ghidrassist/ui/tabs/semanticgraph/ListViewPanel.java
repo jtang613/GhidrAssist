@@ -1,7 +1,6 @@
 package ghidrassist.ui.tabs.semanticgraph;
 
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
@@ -13,7 +12,6 @@ import ghidrassist.core.TabController;
 import ghidrassist.ui.tabs.SemanticGraphTab;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
 import ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge;
-import ghidrassist.graphrag.nodes.EdgeType;
 
 /**
  * List/table view sub-panel for the Semantic Graph tab.
@@ -88,6 +86,7 @@ public class ListViewPanel extends JPanel {
         // Edges table
         String[] edgeColumns = {"Type", "Target", "Weight", "Actions"};
         edgesTableModel = new DefaultTableModel(edgeColumns, 0) {
+            private static final long serialVersionUID = 1L;
             @Override
             public boolean isCellEditable(int row, int column) {
                 return column == 3; // Only Actions column is "editable" (for button clicks)
@@ -534,6 +533,7 @@ public class ListViewPanel extends JPanel {
      * Cell renderer for function entries showing name, address, and vulnerability badge.
      */
     static class FunctionEntryCellRenderer extends DefaultListCellRenderer {
+        private static final long serialVersionUID = 1L;
         @Override
         public Component getListCellRendererComponent(JList<?> list, Object value,
                 int index, boolean isSelected, boolean cellHasFocus) {

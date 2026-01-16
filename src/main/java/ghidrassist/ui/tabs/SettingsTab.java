@@ -20,6 +20,9 @@ import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.core.TabController;
 import ghidrassist.mcp2.server.MCPServerConfig;
 import ghidrassist.mcp2.server.MCPServerRegistry;
+import ghidrassist.apiprovider.oauth.OAuthCallbackServer;
+import ghidrassist.apiprovider.oauth.OAuthTokenManager;
+import ghidrassist.apiprovider.oauth.OpenAIOAuthTokenManager;
 
 /**
  * Unified Settings tab matching BinAssist's layout.
@@ -32,7 +35,7 @@ import ghidrassist.mcp2.server.MCPServerRegistry;
  */
 public class SettingsTab extends JPanel {
     private static final long serialVersionUID = 1L;
-    private static final String VERSION = "1.11.0";
+    private static final String VERSION = "1.13.0";
     private static final String[] REASONING_EFFORT_OPTIONS = {"None", "Low", "Medium", "High"};
 
     private final TabController controller;
@@ -106,6 +109,7 @@ public class SettingsTab extends JPanel {
         // LLM Providers
         String[] llmColumnNames = {"Name", "Model", "Max Tokens", "URL", "Key", "Disable TLS"};
         llmTableModel = new DefaultTableModel(llmColumnNames, 0) {
+            private static final long serialVersionUID = 1L;
             @Override
             public Class<?> getColumnClass(int column) {
                 return column == 5 ? Boolean.class : String.class;
@@ -214,8 +218,7 @@ public class SettingsTab extends JPanel {
         // Table
         llmTable.getColumnModel().getColumn(5).setCellRenderer(llmTable.getDefaultRenderer(Boolean.class));
         JScrollPane tableScrollPane = new JScrollPane(llmTable);
-        tableScrollPane.setMinimumSize(new Dimension(200, 120));
-        tableScrollPane.setPreferredSize(new Dimension(Integer.MAX_VALUE, 120));
+        tableScrollPane.setPreferredSize(new Dimension(600, 120));
 
         // Buttons
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
@@ -260,8 +263,7 @@ public class SettingsTab extends JPanel {
         panel.setBorder(BorderFactory.createTitledBorder("MCP Servers"));
 
         JScrollPane tableScrollPane = new JScrollPane(mcpServersTable);
-        tableScrollPane.setMinimumSize(new Dimension(200, 100));
-        tableScrollPane.setPreferredSize(new Dimension(Integer.MAX_VALUE, 100));
+        tableScrollPane.setPreferredSize(new Dimension(600, 100));
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         JButton addButton = new JButton("Add Server");
@@ -288,13 +290,14 @@ public class SettingsTab extends JPanel {
 
         return panel;
     }
+
+
     private JPanel createSystemPromptSection() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("System Prompt"));
 
         JScrollPane scrollPane = new JScrollPane(contextArea);
-        scrollPane.setMinimumSize(new Dimension(200, 100));
-        scrollPane.setPreferredSize(new Dimension(Integer.MAX_VALUE, 100));
+        scrollPane.setPreferredSize(new Dimension(600, 100));
 
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         buttonPanel.add(revertButton);
@@ -307,44 +310,40 @@ public class SettingsTab extends JPanel {
     }
 
     private JPanel createDatabasePathsSection() {
-        JPanel panel = new JPanel(new GridBagLayout());
+        JPanel panel = new JPanel();
         panel.setBorder(BorderFactory.createTitledBorder("Database Paths"));
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.insets = new Insets(2, 5, 2, 5);
-        gbc.fill = GridBagConstraints.HORIZONTAL;
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
 
         // Analysis DB
-        gbc.gridx = 0; gbc.gridy = 0; gbc.weightx = 0;
-        panel.add(new JLabel("Analysis DB:"), gbc);
-        gbc.gridx = 1; gbc.weightx = 1.0;
+        JPanel analysisRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        analysisRow.add(new JLabel("Analysis DB:"));
         analysisDbPathField.setText(Preferences.getProperty("GhidrAssist.AnalysisDBPath", "ghidrassist_analysis.db"));
-        panel.add(analysisDbPathField, gbc);
-        gbc.gridx = 2; gbc.weightx = 0;
+        analysisRow.add(analysisDbPathField);
         JButton analysisDbBrowse = new JButton("Browse...");
         analysisDbBrowse.addActionListener(e -> browseFile(analysisDbPathField, "Select Analysis Database", false));
-        panel.add(analysisDbBrowse, gbc);
+        analysisRow.add(analysisDbBrowse);
 
         // RLHF DB
-        gbc.gridx = 0; gbc.gridy = 1; gbc.weightx = 0;
-        panel.add(new JLabel("RLHF DB:"), gbc);
-        gbc.gridx = 1; gbc.weightx = 1.0;
+        JPanel rlhfRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        rlhfRow.add(new JLabel("RLHF DB:"));
         rlhfDbPathField.setText(Preferences.getProperty("GhidrAssist.RLHFDatabasePath", "ghidrassist_rlhf.db"));
-        panel.add(rlhfDbPathField, gbc);
-        gbc.gridx = 2; gbc.weightx = 0;
+        rlhfRow.add(rlhfDbPathField);
         JButton rlhfDbBrowse = new JButton("Browse...");
         rlhfDbBrowse.addActionListener(e -> browseFile(rlhfDbPathField, "Select RLHF Database", false));
-        panel.add(rlhfDbBrowse, gbc);
+        rlhfRow.add(rlhfDbBrowse);
 
         // Lucene Index
-        gbc.gridx = 0; gbc.gridy = 2; gbc.weightx = 0;
-        panel.add(new JLabel("RAG Index:"), gbc);
-        gbc.gridx = 1; gbc.weightx = 1.0;
+        JPanel luceneRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        luceneRow.add(new JLabel("RAG Index:"));
         luceneIndexPathField.setText(Preferences.getProperty("GhidrAssist.LuceneIndexPath", "ghidrassist_lucene"));
-        panel.add(luceneIndexPathField, gbc);
-        gbc.gridx = 2; gbc.weightx = 0;
+        luceneRow.add(luceneIndexPathField);
         JButton luceneBrowse = new JButton("Browse...");
         luceneBrowse.addActionListener(e -> browseFile(luceneIndexPathField, "Select RAG Index Directory", true));
-        panel.add(luceneBrowse, gbc);
+        luceneRow.add(luceneBrowse);
+
+        panel.add(analysisRow);
+        panel.add(rlhfRow);
+        panel.add(luceneRow);
 
         return panel;
     }
@@ -457,7 +456,7 @@ public class SettingsTab extends JPanel {
 
     private void onAddProvider() {
         APIProviderConfig newProvider = new APIProviderConfig(
-            "", APIProvider.ProviderType.OPENAI, "", 16384, "", "", false
+            "", APIProvider.ProviderType.OPENAI_PLATFORM_API, "", 16384, "", "", false
         );
         if (openProviderDialog(newProvider)) {
             apiProviders.add(newProvider);
@@ -529,28 +528,15 @@ public class SettingsTab extends JPanel {
     }
 
     private void onTestProvider() {
-        String providerName = (String) activeProviderComboBox.getSelectedItem();
-        if (providerName == null || providerName.isEmpty()) {
+        int selectedRow = llmTable.getSelectedRow();
+        if (selectedRow < 0) {
             llmTestStatusLabel.setIcon(failureIcon);
-            llmTestStatusLabel.setToolTipText("No provider selected");
+            llmTestStatusLabel.setToolTipText("No provider selected in table");
+            JOptionPane.showMessageDialog(this, "Please select a provider in the table to test.", "No Selection", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
-        APIProviderConfig provider = null;
-        for (APIProviderConfig p : apiProviders) {
-            if (p.getName().equals(providerName)) {
-                provider = p;
-                break;
-            }
-        }
-
-        if (provider == null) {
-            llmTestStatusLabel.setIcon(failureIcon);
-            llmTestStatusLabel.setToolTipText("Provider not found");
-            return;
-        }
-
-        final APIProviderConfig testProvider = provider;
+        final APIProviderConfig testProvider = apiProviders.get(selectedRow);
 
         // Show testing state
         llmTestButton.setEnabled(false);
@@ -622,22 +608,152 @@ public class SettingsTab extends JPanel {
         JComboBox<APIProvider.ProviderType> typeComboBox = new JComboBox<>(APIProvider.ProviderType.values());
         typeComboBox.setSelectedItem(provider.getType());
         JCheckBox disableTlsCheckbox = new JCheckBox("Disable TLS Verification", provider.isDisableTlsVerification());
+        
+        // OAuth-specific components
+        JLabel urlLabel = new JLabel("URL:");
+        JLabel keyLabel = new JLabel("Key:");
+        JButton authenticateButton = new JButton("Authenticate");
+        JLabel oauthNoteLabel = new JLabel("<html><i>Click 'Authenticate' to sign in with Claude Pro/Max subscription.</i></html>");
+        oauthNoteLabel.setForeground(Color.GRAY);
+        
+        // Claude Code note
+        JLabel claudeCodeNoteLabel = new JLabel("<html><i>Requires 'claude' CLI installed and authenticated.<br>Install: npm install -g @anthropic-ai/claude-code</i></html>");
+        claudeCodeNoteLabel.setForeground(Color.GRAY);
 
-        JPanel panel = new JPanel(new GridLayout(0, 2));
-        panel.add(new JLabel("Name:"));
-        panel.add(nameField);
-        panel.add(new JLabel("Type:"));
-        panel.add(typeComboBox);
-        panel.add(new JLabel("Model:"));
-        panel.add(modelField);
-        panel.add(new JLabel("Max Tokens:"));
-        panel.add(maxTokensField);
-        panel.add(new JLabel("URL:"));
-        panel.add(urlField);
-        panel.add(new JLabel("Key:"));
-        panel.add(keyField);
-        panel.add(new JLabel(""));
-        panel.add(disableTlsCheckbox);
+        // Panel with GridBagLayout for more control
+        JPanel panel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(4, 4, 4, 4);
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        
+        int row = 0;
+        
+        // Name
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0;
+        panel.add(new JLabel("Name:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1; gbc.gridwidth = 2;
+        panel.add(nameField, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // Type
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0;
+        panel.add(new JLabel("Type:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1; gbc.gridwidth = 2;
+        panel.add(typeComboBox, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // Model
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0;
+        panel.add(new JLabel("Model:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1; gbc.gridwidth = 2;
+        panel.add(modelField, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // Max Tokens
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0;
+        panel.add(new JLabel("Max Tokens:"), gbc);
+        gbc.gridx = 1; gbc.weightx = 1; gbc.gridwidth = 2;
+        panel.add(maxTokensField, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // URL (hidden for OAuth)
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0;
+        panel.add(urlLabel, gbc);
+        gbc.gridx = 1; gbc.weightx = 1; gbc.gridwidth = 2;
+        panel.add(urlField, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // Key with optional Authenticate button
+        gbc.gridx = 0; gbc.gridy = row; gbc.weightx = 0;
+        panel.add(keyLabel, gbc);
+        gbc.gridx = 1; gbc.weightx = 1;
+        panel.add(keyField, gbc);
+        gbc.gridx = 2; gbc.weightx = 0;
+        panel.add(authenticateButton, gbc);
+        row++;
+        
+        // OAuth note (below key field)
+        gbc.gridx = 1; gbc.gridy = row; gbc.gridwidth = 2;
+        panel.add(oauthNoteLabel, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // Claude Code note (below OAuth note, same row)
+        gbc.gridx = 1; gbc.gridy = row; gbc.gridwidth = 2;
+        panel.add(claudeCodeNoteLabel, gbc);
+        gbc.gridwidth = 1;
+        row++;
+        
+        // Disable TLS
+        gbc.gridx = 1; gbc.gridy = row; gbc.gridwidth = 2;
+        panel.add(disableTlsCheckbox, gbc);
+        
+        // Function to update UI based on provider type
+        Runnable updateUIForProviderType = () -> {
+            APIProvider.ProviderType selectedType = (APIProvider.ProviderType) typeComboBox.getSelectedItem();
+            boolean isAnthropicOAuth = selectedType == APIProvider.ProviderType.ANTHROPIC_OAUTH;
+            boolean isOpenAIOAuth = selectedType == APIProvider.ProviderType.OPENAI_OAUTH;
+            boolean isOAuth = isAnthropicOAuth || isOpenAIOAuth;
+            boolean isAnthropicClaudeCli = selectedType == APIProvider.ProviderType.ANTHROPIC_CLAUDE_CLI;
+            
+            // Hide URL for OAuth (uses fixed endpoints)
+            urlLabel.setVisible(!isOAuth);
+            urlField.setVisible(!isOAuth);
+            
+            // Show Authenticate button only for OAuth
+            authenticateButton.setVisible(isOAuth);
+            oauthNoteLabel.setVisible(isOAuth);
+            
+            // Update OAuth note text based on provider type
+            if (isAnthropicOAuth) {
+                oauthNoteLabel.setText("<html><i>Click 'Authenticate' to sign in with Claude Pro/Max subscription.</i></html>");
+            } else if (isOpenAIOAuth) {
+                oauthNoteLabel.setText("<html><i>Click 'Authenticate' to sign in with ChatGPT Pro/Plus subscription.</i></html>");
+            }
+            
+            // Show Claude Code note only for Claude Code
+            claudeCodeNoteLabel.setVisible(isAnthropicClaudeCli);
+            
+            // Update key label for OAuth
+            if (isOAuth) {
+                keyLabel.setText("Token:");
+                keyField.setToolTipText("OAuth token JSON (populated by Authenticate button)");
+            } else {
+                keyLabel.setText("Key:");
+                keyField.setToolTipText(null);
+            }
+            
+            // Set default model for OAuth if empty
+            if (isAnthropicOAuth && modelField.getText().trim().isEmpty()) {
+                modelField.setText("claude-sonnet-4-20250514");
+            } else if (isOpenAIOAuth && modelField.getText().trim().isEmpty()) {
+                modelField.setText("gpt-5.1-codex");
+            }
+        };
+        
+        // Add listener to update UI when type changes
+        typeComboBox.addActionListener(e -> updateUIForProviderType.run());
+        
+        // Initial UI update
+        updateUIForProviderType.run();
+        
+        // Authenticate button action - uses automatic callback capture with manual fallback
+        authenticateButton.addActionListener(e -> {
+            APIProvider.ProviderType selectedType = (APIProvider.ProviderType) typeComboBox.getSelectedItem();
+            boolean isOpenAIOAuth = selectedType == APIProvider.ProviderType.OPENAI_OAUTH;
+            
+            if (isOpenAIOAuth) {
+                authenticateOpenAIOAuth(panel, keyField);
+            } else {
+                authenticateAnthropicOAuth(panel, keyField);
+            }
+        });
 
         int result = JOptionPane.showConfirmDialog(this, panel, "API Provider", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
         if (result == JOptionPane.OK_OPTION) {
@@ -651,17 +767,37 @@ public class SettingsTab extends JPanel {
             } catch (NumberFormatException e) {
                 maxTokens = 16384;
             }
+            
+            APIProvider.ProviderType selectedType = (APIProvider.ProviderType) typeComboBox.getSelectedItem();
 
             if (name.isEmpty() || model.isEmpty()) {
                 JOptionPane.showMessageDialog(this, "Name and Model are required.", "Validation Error", JOptionPane.ERROR_MESSAGE);
                 return false;
             }
+            
+            // For OAuth, key must contain valid JSON token
+            if (selectedType == APIProvider.ProviderType.ANTHROPIC_OAUTH || 
+                selectedType == APIProvider.ProviderType.OPENAI_OAUTH) {
+                if (key.isEmpty() || !key.trim().startsWith("{")) {
+                    JOptionPane.showMessageDialog(this, 
+                        "OAuth token is required. Please click 'Authenticate' to sign in.",
+                        "Validation Error", JOptionPane.ERROR_MESSAGE);
+                    return false;
+                }
+            }
 
             provider.setName(name);
-            provider.setType((APIProvider.ProviderType) typeComboBox.getSelectedItem());
+            provider.setType(selectedType);
             provider.setModel(model);
             provider.setMaxTokens(maxTokens);
-            provider.setUrl(url.endsWith("/") ? url : url + "/");
+            // For OAuth, URL is not used - set to fixed endpoint
+            if (selectedType == APIProvider.ProviderType.ANTHROPIC_OAUTH) {
+                provider.setUrl("https://api.anthropic.com/");
+            } else if (selectedType == APIProvider.ProviderType.OPENAI_OAUTH) {
+                provider.setUrl("https://chatgpt.com/");
+            } else {
+                provider.setUrl(url.endsWith("/") ? url : url + "/");
+            }
             provider.setKey(key);
             provider.setDisableTlsVerification(disableTlsCheckbox.isSelected());
             return true;
@@ -816,9 +952,392 @@ public class SettingsTab extends JPanel {
         return new ImageIcon(image);
     }
 
+    // ==== OAuth Authentication Methods ====
+    
+    /**
+     * Authenticates with OpenAI OAuth using automatic callback capture.
+     * Falls back to manual code entry if automatic capture fails.
+     */
+    private void authenticateOpenAIOAuth(JPanel parentPanel, JTextField keyField) {
+        OpenAIOAuthTokenManager tokenManager = new OpenAIOAuthTokenManager();
+        
+        // Create progress dialog with cancel option
+        JDialog progressDialog = new JDialog(SwingUtilities.getWindowAncestor(parentPanel), 
+            "OpenAI OAuth Authentication", Dialog.ModalityType.APPLICATION_MODAL);
+        JPanel progressPanel = new JPanel(new BorderLayout(10, 10));
+        progressPanel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+        
+        JLabel statusLabel = new JLabel("Opening browser for authentication...");
+        JProgressBar progressBar = new JProgressBar();
+        progressBar.setIndeterminate(true);
+        
+        JButton cancelButton = new JButton("Cancel");
+        JButton manualButton = new JButton("Use Manual Entry");
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+        buttonPanel.add(manualButton);
+        buttonPanel.add(cancelButton);
+        
+        progressPanel.add(statusLabel, BorderLayout.NORTH);
+        progressPanel.add(progressBar, BorderLayout.CENTER);
+        progressPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        progressDialog.setContentPane(progressPanel);
+        progressDialog.setSize(400, 150);
+        progressDialog.setLocationRelativeTo(parentPanel);
+        
+        // Track authentication state
+        final boolean[] authCompleted = {false};
+        final boolean[] cancelled = {false};
+        
+        // Worker for automatic callback authentication
+        SwingWorker<String, Void> authWorker = new SwingWorker<String, Void>() {
+            private String errorMessage = null;
+            private OAuthCallbackServer callbackServer = null;
+            
+            @Override
+            protected String doInBackground() {
+                try {
+                    callbackServer = tokenManager.startAuthorizationFlowWithCallback();
+                    publish(); // Update status
+                    
+                    // Wait for callback with 5 minute timeout
+                    tokenManager.completeAuthorizationWithCallback(callbackServer, 5);
+                    return tokenManager.toJson();
+                } catch (Exception ex) {
+                    if (!cancelled[0]) {
+                        errorMessage = ex.getMessage();
+                    }
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void process(java.util.List<Void> chunks) {
+                statusLabel.setText("Waiting for authentication in browser...");
+            }
+            
+            @Override
+            protected void done() {
+                if (cancelled[0]) return;
+                
+                try {
+                    String credentialsJson = get();
+                    if (credentialsJson != null && !credentialsJson.isEmpty()) {
+                        authCompleted[0] = true;
+                        progressDialog.dispose();
+                        keyField.setText(credentialsJson);
+                        JOptionPane.showMessageDialog(parentPanel, 
+                            "Successfully authenticated with ChatGPT Pro/Plus!\n\nThe OAuth token has been stored.",
+                            "Authentication Successful", 
+                            JOptionPane.INFORMATION_MESSAGE);
+                    } else if (errorMessage != null && !cancelled[0]) {
+                        progressDialog.dispose();
+                        // Fall back to manual entry on error
+                        authenticateOpenAIOAuthManual(parentPanel, keyField);
+                    }
+                } catch (Exception ex) {
+                    if (!cancelled[0]) {
+                        progressDialog.dispose();
+                        authenticateOpenAIOAuthManual(parentPanel, keyField);
+                    }
+                }
+            }
+            
+            public void cancel() {
+                cancelled[0] = true;
+                tokenManager.cancelAuthentication();
+            }
+        };
+        
+        // Cancel button action
+        cancelButton.addActionListener(e -> {
+            cancelled[0] = true;
+            tokenManager.cancelAuthentication();
+            authWorker.cancel(true);
+            progressDialog.dispose();
+        });
+        
+        // Manual entry button action
+        manualButton.addActionListener(e -> {
+            cancelled[0] = true;
+            tokenManager.cancelAuthentication();
+            authWorker.cancel(true);
+            progressDialog.dispose();
+            authenticateOpenAIOAuthManual(parentPanel, keyField);
+        });
+        
+        // Start the worker
+        authWorker.execute();
+        
+        // Show progress dialog (blocks until closed)
+        progressDialog.setVisible(true);
+    }
+    
+    /**
+     * Manual OAuth code entry for OpenAI (fallback).
+     */
+    private void authenticateOpenAIOAuthManual(JPanel parentPanel, JTextField keyField) {
+        OpenAIOAuthTokenManager tokenManager = new OpenAIOAuthTokenManager();
+        tokenManager.startAuthorizationFlow();
+        
+        String code = (String) JOptionPane.showInputDialog(
+            parentPanel,
+            "<html>A browser window has been opened for ChatGPT Pro/Plus authentication.<br><br>" +
+            "<b>Instructions:</b><br>" +
+            "1. Sign in to your OpenAI/ChatGPT account in the browser<br>" +
+            "2. Authorize GhidrAssist to access your account<br>" +
+            "3. After authorization, you'll be redirected to localhost<br>" +
+            "4. Copy the URL from the browser (or just the code value)<br>" +
+            "5. Paste it below:<br><br>" +
+            "<b>Paste URL or Code:</b></html>",
+            "OpenAI OAuth Authentication",
+            JOptionPane.PLAIN_MESSAGE,
+            null,
+            null,
+            ""
+        );
+        
+        if (code == null || code.trim().isEmpty()) {
+            return;
+        }
+        
+        SwingWorker<String, Void> exchangeWorker = new SwingWorker<String, Void>() {
+            private String errorMessage = null;
+            
+            @Override
+            protected String doInBackground() {
+                try {
+                    tokenManager.authenticateWithCode(code.trim());
+                    return tokenManager.toJson();
+                } catch (Exception ex) {
+                    errorMessage = ex.getMessage();
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void done() {
+                try {
+                    String credentialsJson = get();
+                    if (credentialsJson != null && !credentialsJson.isEmpty()) {
+                        keyField.setText(credentialsJson);
+                        JOptionPane.showMessageDialog(parentPanel, 
+                            "Successfully authenticated with ChatGPT Pro/Plus!\n\nThe OAuth token has been stored.",
+                            "Authentication Successful", 
+                            JOptionPane.INFORMATION_MESSAGE);
+                    } else if (errorMessage != null) {
+                        JOptionPane.showMessageDialog(parentPanel,
+                            "Authentication failed: " + errorMessage,
+                            "Authentication Error",
+                            JOptionPane.ERROR_MESSAGE);
+                    }
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(parentPanel,
+                        "Authentication error: " + ex.getMessage(),
+                        "Authentication Error",
+                        JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        };
+        
+        exchangeWorker.execute();
+    }
+    
+    /**
+     * Authenticates with Anthropic OAuth using automatic callback capture.
+     * Falls back to manual code entry if automatic capture fails.
+     */
+    private void authenticateAnthropicOAuth(JPanel parentPanel, JTextField keyField) {
+        OAuthTokenManager tokenManager = new OAuthTokenManager();
+        
+        // Create progress dialog with cancel option
+        JDialog progressDialog = new JDialog(SwingUtilities.getWindowAncestor(parentPanel), 
+            "Claude OAuth Authentication", Dialog.ModalityType.APPLICATION_MODAL);
+        JPanel progressPanel = new JPanel(new BorderLayout(10, 10));
+        progressPanel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+        
+        JLabel statusLabel = new JLabel("Opening browser for authentication...");
+        JProgressBar progressBar = new JProgressBar();
+        progressBar.setIndeterminate(true);
+        
+        JButton cancelButton = new JButton("Cancel");
+        JButton manualButton = new JButton("Use Manual Entry");
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+        buttonPanel.add(manualButton);
+        buttonPanel.add(cancelButton);
+        
+        progressPanel.add(statusLabel, BorderLayout.NORTH);
+        progressPanel.add(progressBar, BorderLayout.CENTER);
+        progressPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        progressDialog.setContentPane(progressPanel);
+        progressDialog.setSize(400, 150);
+        progressDialog.setLocationRelativeTo(parentPanel);
+        
+        // Track authentication state
+        final boolean[] authCompleted = {false};
+        final boolean[] cancelled = {false};
+        
+        // Worker for automatic callback authentication
+        SwingWorker<String, Void> authWorker = new SwingWorker<String, Void>() {
+            private String errorMessage = null;
+            private OAuthCallbackServer callbackServer = null;
+            
+            @Override
+            protected String doInBackground() {
+                try {
+                    callbackServer = tokenManager.startAuthorizationFlowWithCallback();
+                    publish(); // Update status
+                    
+                    // Wait for callback with 5 minute timeout
+                    tokenManager.completeAuthorizationWithCallback(callbackServer, 5);
+                    return tokenManager.toJson();
+                } catch (Exception ex) {
+                    if (!cancelled[0]) {
+                        errorMessage = ex.getMessage();
+                    }
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void process(java.util.List<Void> chunks) {
+                statusLabel.setText("Waiting for authentication in browser...");
+            }
+            
+            @Override
+            protected void done() {
+                if (cancelled[0]) return;
+                
+                try {
+                    String credentialsJson = get();
+                    if (credentialsJson != null && !credentialsJson.isEmpty()) {
+                        authCompleted[0] = true;
+                        progressDialog.dispose();
+                        keyField.setText(credentialsJson);
+                        JOptionPane.showMessageDialog(parentPanel, 
+                            "Successfully authenticated with Claude Pro/Max!\n\nThe OAuth token has been stored.",
+                            "Authentication Successful", 
+                            JOptionPane.INFORMATION_MESSAGE);
+                    } else if (errorMessage != null && !cancelled[0]) {
+                        progressDialog.dispose();
+                        // Fall back to manual entry on error
+                        authenticateAnthropicOAuthManual(parentPanel, keyField);
+                    }
+                } catch (Exception ex) {
+                    if (!cancelled[0]) {
+                        progressDialog.dispose();
+                        authenticateAnthropicOAuthManual(parentPanel, keyField);
+                    }
+                }
+            }
+            
+            public void cancel() {
+                cancelled[0] = true;
+                tokenManager.cancelAuthentication();
+            }
+        };
+        
+        // Cancel button action
+        cancelButton.addActionListener(e -> {
+            cancelled[0] = true;
+            tokenManager.cancelAuthentication();
+            authWorker.cancel(true);
+            progressDialog.dispose();
+        });
+        
+        // Manual entry button action
+        manualButton.addActionListener(e -> {
+            cancelled[0] = true;
+            tokenManager.cancelAuthentication();
+            authWorker.cancel(true);
+            progressDialog.dispose();
+            authenticateAnthropicOAuthManual(parentPanel, keyField);
+        });
+        
+        // Start the worker
+        authWorker.execute();
+        
+        // Show progress dialog (blocks until closed)
+        progressDialog.setVisible(true);
+    }
+    
+    /**
+     * Manual OAuth code entry for Anthropic (fallback).
+     * Uses Anthropic's hosted callback page where user copies the code.
+     */
+    private void authenticateAnthropicOAuthManual(JPanel parentPanel, JTextField keyField) {
+        OAuthTokenManager tokenManager = new OAuthTokenManager();
+        tokenManager.startAuthorizationFlow();
+        
+        String code = (String) JOptionPane.showInputDialog(
+            parentPanel,
+            "<html>A browser window has been opened for Claude Pro/Max authentication.<br><br>" +
+            "<b>Instructions:</b><br>" +
+            "1. Sign in to your Anthropic account in the browser<br>" +
+            "2. Authorize GhidrAssist to access your account<br>" +
+            "3. Copy the authorization code shown on the page<br>" +
+            "4. Paste it below:<br><br>" +
+            "<b>Authorization Code:</b></html>",
+            "Claude OAuth Authentication",
+            JOptionPane.PLAIN_MESSAGE,
+            null,
+            null,
+            ""
+        );
+        
+        if (code == null || code.trim().isEmpty()) {
+            return;
+        }
+        
+        SwingWorker<String, Void> exchangeWorker = new SwingWorker<String, Void>() {
+            private String errorMessage = null;
+            
+            @Override
+            protected String doInBackground() {
+                try {
+                    tokenManager.authenticateWithCode(code.trim());
+                    return tokenManager.toJson();
+                } catch (Exception ex) {
+                    errorMessage = ex.getMessage();
+                    return null;
+                }
+            }
+            
+            @Override
+            protected void done() {
+                try {
+                    String credentialsJson = get();
+                    if (credentialsJson != null && !credentialsJson.isEmpty()) {
+                        keyField.setText(credentialsJson);
+                        JOptionPane.showMessageDialog(parentPanel, 
+                            "Successfully authenticated with Claude Pro/Max!\n\nThe OAuth token has been stored.",
+                            "Authentication Successful", 
+                            JOptionPane.INFORMATION_MESSAGE);
+                    } else if (errorMessage != null) {
+                        JOptionPane.showMessageDialog(parentPanel,
+                            "Authentication failed: " + errorMessage,
+                            "Authentication Error",
+                            JOptionPane.ERROR_MESSAGE);
+                    }
+                } catch (Exception ex) {
+                    JOptionPane.showMessageDialog(parentPanel,
+                        "Authentication error: " + ex.getMessage(),
+                        "Authentication Error",
+                        JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        };
+        
+        exchangeWorker.execute();
+    }
+
     // ==== Inner Classes ====
 
     private static class MCPServersTableModel extends javax.swing.table.AbstractTableModel {
+        private static final long serialVersionUID = 1L;
         private static final String[] COLUMN_NAMES = {"Name", "URL", "Enabled", "Transport"};
         private List<MCPServerConfig> servers;
 

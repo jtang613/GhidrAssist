@@ -89,7 +89,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
         
         Request request = new Request.Builder()
             .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletion")) {
@@ -106,7 +106,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -170,7 +170,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
@@ -257,7 +257,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OLLAMA_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
@@ -378,7 +378,7 @@ public class OllamaProvider extends APIProvider implements FunctionCallingProvid
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OLLAMA_EMBEDDINGS_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {

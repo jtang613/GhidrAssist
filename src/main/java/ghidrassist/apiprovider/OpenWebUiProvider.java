@@ -19,7 +19,6 @@ import okio.BufferedSource;
 import javax.net.ssl.*;
 import java.io.IOException;
 import java.io.StringReader;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -33,7 +32,7 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
     private volatile boolean isCancelled = false;
 
     public OpenWebUiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
-        super(name, ProviderType.OLLAMA, model, maxTokens, url, key, disableTlsVerification, timeout);
+        super(name, ProviderType.OPENWEBUI, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
     @Override
@@ -89,7 +88,7 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
         
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletion")) {
@@ -106,7 +105,7 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -171,7 +170,7 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
@@ -255,7 +254,7 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENWEBUI_CHAT_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
@@ -378,7 +377,7 @@ public class OpenWebUiProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(super.getUrl() + OPENWEBUI_EMBEDDINGS_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {

@@ -124,14 +124,16 @@ public class ProviderRegistry {
      * Register the default built-in factories
      */
     private void registerDefaultFactories() {
-        registerFactory(new AnthropicProviderFactory());
-        registerFactory(new OpenAIProviderFactory());
+        registerFactory(new AnthropicClaudeCliProviderFactory());
+        registerFactory(new AnthropicOAuthProviderFactory());
+        registerFactory(new AnthropicPlatformApiProviderFactory());
         registerFactory(new AzureOpenAIProviderFactory());
-        registerFactory(new OllamaProviderFactory());
-        registerFactory(new LMStudioProviderFactory());
-        registerFactory(new OpenWebUiProviderFactory());
         registerFactory(new LiteLLMProviderFactory());
-        registerFactory(new ClaudeCodeProviderFactory());
+        registerFactory(new LMStudioProviderFactory());
+        registerFactory(new OllamaProviderFactory());
+        registerFactory(new OpenAIOAuthProviderFactory());
+        registerFactory(new OpenAIPlatformApiProviderFactory());
+        registerFactory(new OpenWebUiProviderFactory());
     }
     
     /**

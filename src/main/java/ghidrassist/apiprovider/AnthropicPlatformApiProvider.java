@@ -14,12 +14,11 @@ import okio.BufferedSource;
 
 import javax.net.ssl.*;
 import java.io.IOException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class AnthropicProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider {
+public class AnthropicPlatformApiProvider extends APIProvider implements FunctionCallingProvider, ModelListProvider {
     private static final Gson gson = new Gson();
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private static final String ANTHROPIC_MESSAGES_ENDPOINT = "v1/messages";
@@ -32,8 +31,8 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
     private volatile boolean isCancelled = false;
 
-    public AnthropicProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
-        super(name, ProviderType.ANTHROPIC, model, maxTokens, url, key, disableTlsVerification, timeout);
+    public AnthropicPlatformApiProvider(String name, String model, Integer maxTokens, String url, String key, boolean disableTlsVerification, Integer timeout) {
+        super(name, ProviderType.ANTHROPIC_PLATFORM_API, model, maxTokens, url, key, disableTlsVerification, timeout);
     }
 
     @Override
@@ -86,7 +85,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletion")) {
@@ -130,7 +129,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -184,8 +183,17 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
                             // Check for error events
                             if (event.has("type") && event.get("type").getAsString().equals("error")) {
+                                String errorMessage;
+                                JsonElement errorElement = event.get("error");
+                                if (errorElement == null || errorElement.isJsonNull()) {
+                                    errorMessage = "Unknown error";
+                                } else if (errorElement.isJsonPrimitive()) {
+                                    errorMessage = errorElement.getAsString();
+                                } else {
+                                    errorMessage = gson.toJson(errorElement);
+                                }
                                 handler.onError(new APIProviderException(APIProviderException.ErrorCategory.SERVICE_ERROR,
-                                    name, operation, event.get("error").getAsString()));
+                                    name, operation, errorMessage));
                                 return;
                             }
 
@@ -263,7 +271,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
                     name, operation, "Retry interrupted"));
             }
-        }, "AnthropicProvider-StreamRetry").start();
+        }, "AnthropicPlatformApiProvider-StreamRetry").start();
     }
 
     /**
@@ -305,10 +313,11 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                 handler.onError(new APIProviderException(APIProviderException.ErrorCategory.CANCELLED,
                     name, operation, "Retry interrupted"));
             }
-        }, "AnthropicProvider-StreamFunctionsRetry").start();
+        }, "AnthropicPlatformApiProvider-StreamFunctionsRetry").start();
     }
 
     @Override
+    @SuppressWarnings("unchecked")  // Intentional cast from known OpenAI function format
     public String createChatCompletionWithFunctionsFullResponse(List<ChatMessage> messages, List<Map<String, Object>> functions) throws APIProviderException {
         // Build payload with native Anthropic tools support
         JsonObject payload = buildMessagesPayload(messages, false);
@@ -335,7 +344,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctionsFullResponse")) {
@@ -462,7 +471,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         try (Response response = executeWithRetry(request, "createChatCompletionWithFunctions")) {
@@ -561,7 +570,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
 
         Request request = new Request.Builder()
             .url(url + ANTHROPIC_MESSAGES_ENDPOINT)
-            .post(RequestBody.create(JSON, gson.toJson(payload)))
+            .post(RequestBody.create(gson.toJson(payload), JSON))
             .build();
 
         client.newCall(request).enqueue(new Callback() {
@@ -941,7 +950,7 @@ public class AnthropicProvider extends APIProvider implements FunctionCallingPro
                             }
                         } catch (Exception e) {
                             // If parsing fails, use empty object
-                            System.err.println("AnthropicProvider: Failed to parse tool arguments: " + e.getMessage());
+                            System.err.println("AnthropicPlatformApiProvider: Failed to parse tool arguments: " + e.getMessage());
                             toolUseBlock.add("input", new JsonObject());
                         }
                         

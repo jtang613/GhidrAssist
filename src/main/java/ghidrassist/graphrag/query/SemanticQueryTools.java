@@ -26,7 +26,6 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -44,6 +43,7 @@ public class SemanticQueryTools {
 
     private static final String SERVER_NAME = "GraphRAG-BuiltIn";
     private static final String TOOL_PREFIX = "ga_";
+    @SuppressWarnings("unused")  // Reserved for future JSON serialization
     private static final Gson gson = new Gson();
 
     private final AnalysisDB analysisDB;
@@ -987,7 +987,9 @@ public class SemanticQueryTools {
             // Extract fresh features
             Msg.info(this, "get_activity_analysis: Extracting fresh features for " + function.getName());
             SecurityFeatureExtractor extractor = new SecurityFeatureExtractor(currentProgram, TaskMonitor.DUMMY);
-            features = extractor.extractFeatures(function);
+            // Pass decompiled code for additional API detection via regex parsing
+            String decompiledCode = node != null ? node.getRawContent() : null;
+            features = extractor.extractFeatures(function, decompiledCode);
 
             // Cache the features if we have a node
             if (node != null && !features.isEmpty()) {
@@ -1204,8 +1206,6 @@ public class SemanticQueryTools {
         if (currentProgram == null) {
             return MCPToolResult.error("No program loaded");
         }
-
-        String programHash = currentProgram.getExecutableSHA256();
 
         // Check if already indexed (unless force)
         if (!force && graph != null) {
@@ -1806,6 +1806,7 @@ public class SemanticQueryTools {
      * Execute the ga_find_taint_paths tool.
      * Finds data flow paths from taint sources to sinks.
      */
+    @SuppressWarnings("unchecked")  // Intentional cast from TaintAnalyzer stats map
     private MCPToolResult executeFindTaintPaths(JsonObject arguments) {
         // Parse arguments
         long sourceAddress = 0;

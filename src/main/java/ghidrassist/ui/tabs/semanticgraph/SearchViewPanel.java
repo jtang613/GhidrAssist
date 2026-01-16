@@ -1,7 +1,6 @@
 package ghidrassist.ui.tabs.semanticgraph;
 
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableRowSorter;
 import java.awt.*;
@@ -53,6 +52,7 @@ public class SearchViewPanel extends JPanel {
 
     // Common parameter fields
     private JTextField queryField;
+    @SuppressWarnings("unused")  // UI component initialized but value accessed via useCurrentAddressCheckbox
     private JTextField addressField;
     private JSpinner limitSpinner;
     private JSpinner depthSpinner;
@@ -147,6 +147,7 @@ public class SearchViewPanel extends JPanel {
         // Results table
         String[] columns = {"#", "Function", "Address", "Score", "Summary"};
         resultsTableModel = new DefaultTableModel(columns, 0) {
+            private static final long serialVersionUID = 1L;
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;

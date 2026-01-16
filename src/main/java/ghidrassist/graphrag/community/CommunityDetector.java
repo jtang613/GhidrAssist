@@ -4,7 +4,6 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 import org.jgrapht.Graph;
-import org.jgrapht.Graphs;
 
 import ghidra.util.Msg;
 import ghidra.util.task.TaskMonitor;
@@ -276,10 +275,11 @@ public class CommunityDetector {
     /**
      * Helper class to hold prepared community data for batch processing.
      */
+    @SuppressWarnings("unused")
     private static class CommunityData {
         final Community community;
         final List<String> memberIds;
-        final int index;
+        final int index;  // Reserved for batch processing index
 
         CommunityData(Community community, List<String> memberIds, int index) {
             this.community = community;

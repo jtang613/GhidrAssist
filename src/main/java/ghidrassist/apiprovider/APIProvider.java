@@ -22,14 +22,16 @@ import okhttp3.Response;
 
 public abstract class APIProvider implements ChatProvider {
     public enum ProviderType {
-        OPENAI,
-        ANTHROPIC,
-        OLLAMA,
-        OPENWEBUI,
-        LMSTUDIO,
+        ANTHROPIC_CLAUDE_CLI,
+        ANTHROPIC_OAUTH,
+        ANTHROPIC_PLATFORM_API,
         AZURE_OPENAI,
         LITELLM,
-        CLAUDE_CODE
+        LMSTUDIO,
+        OLLAMA,
+        OPENAI_OAUTH,
+        OPENAI_PLATFORM_API,
+        OPENWEBUI
     }
 
     protected String name;
@@ -159,7 +161,6 @@ public abstract class APIProvider implements ChatProvider {
      * Handle HTTP response errors and convert to appropriate APIProviderException
      */
     protected APIProviderException handleHttpError(Response response, String operation) {
-        int statusCode = response.code();
         String responseBody = null;
         
         try {

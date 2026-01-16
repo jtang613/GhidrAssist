@@ -323,7 +323,7 @@ public class GraphViewPanel extends JPanel {
 
         summaryScrollPane = new JScrollPane(summaryPane);
         summaryScrollPane.setBorder(BorderFactory.createEmptyBorder());
-        summaryScrollPane.setPreferredSize(new Dimension(400, 80));
+        summaryScrollPane.setPreferredSize(new Dimension(400, 120));
         summaryScrollPane.getVerticalScrollBar().setUnitIncrement(16);
 
         // Not indexed placeholder
@@ -394,9 +394,6 @@ public class GraphViewPanel extends JPanel {
 
         mainContent.add(controlsPanel, BorderLayout.NORTH);
 
-        // ===== Graph component (center) =====
-        mainContent.add(graphComponent, BorderLayout.CENTER);
-
         // ===== Selected node info and summary (bottom) =====
         JPanel infoPanel = new JPanel(new BorderLayout(5, 5));
         infoPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
@@ -404,7 +401,13 @@ public class GraphViewPanel extends JPanel {
         infoPanel.add(selectedNodeLabel, BorderLayout.NORTH);
         infoPanel.add(summaryScrollPane, BorderLayout.CENTER);
 
-        mainContent.add(infoPanel, BorderLayout.SOUTH);
+        // ===== Resizable split between graph and summary =====
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, graphComponent, infoPanel);
+        splitPane.setResizeWeight(0.8);
+        splitPane.setContinuousLayout(true);
+        splitPane.setBorder(BorderFactory.createEmptyBorder());
+
+        mainContent.add(splitPane, BorderLayout.CENTER);
 
         // ===== Card layout setup =====
         contentPanel.add(mainContent, "content");
@@ -582,6 +585,9 @@ public class GraphViewPanel extends JPanel {
         if (centerCell != null) {
             graph.getView().setScale(1.0);  // Reset zoom first
             graphComponent.scrollCellToVisible(centerCell, true);
+            if (centerCell instanceof mxCell) {
+                handleNodeClick((mxCell) centerCell);
+            }
         } else {
             graphComponent.zoomAndCenter();
         }

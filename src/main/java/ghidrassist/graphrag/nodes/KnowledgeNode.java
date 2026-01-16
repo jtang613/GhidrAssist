@@ -154,15 +154,6 @@ public class KnowledgeNode {
         return node;
     }
 
-    /**
-     * Create a basic block node.
-     */
-    public static KnowledgeNode createBlock(String binaryId, long address) {
-        KnowledgeNode node = new KnowledgeNode(NodeType.BLOCK, binaryId);
-        node.setAddress(address);
-        return node;
-    }
-
     // ========================================
     // Embedding serialization
     // ========================================
