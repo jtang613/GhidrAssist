@@ -998,8 +998,10 @@ public class TabController {
             
             if (success) {
                 SwingUtilities.invokeLater(() -> {
-                    String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                    String conversationHistory = queryService.getConversationHistory();
+                    String html = markdownHelper.markdownToHtml(conversationHistory);
                     queryTab.setResponseText(html);
+                    queryTab.setMarkdownSource(conversationHistory);
                 });
             }
         }

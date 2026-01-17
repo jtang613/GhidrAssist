@@ -1295,12 +1295,21 @@ public class ConversationalToolHandler {
         }
         
         List<ChatMessage> trimmedHistory = new ArrayList<>();
-        
-        // Always keep the first message (initial user prompt)
+
+        // Always keep the system message (index 0) and the first user message (original query)
         if (!conversationHistory.isEmpty()) {
-            trimmedHistory.add(conversationHistory.get(0));
+            trimmedHistory.add(conversationHistory.get(0));  // System message
+
+            // Find and keep the first USER message (the original query)
+            for (int i = 1; i < conversationHistory.size(); i++) {
+                ChatMessage msg = conversationHistory.get(i);
+                if (ChatMessage.ChatMessageRole.USER.equals(msg.getRole())) {
+                    trimmedHistory.add(msg);
+                    break;  // Only keep the first user message
+                }
+            }
         }
-        
+
         // Find a safe cutoff point that doesn't break tool call/result pairs
         int safeStartIndex = findSafeTrimPoint();
         
@@ -1321,7 +1330,7 @@ public class ConversationalToolHandler {
      * Find a safe point to start trimming that doesn't break tool call/result pairs
      */
     private int findSafeTrimPoint() {
-        int targetSize = MAX_CONVERSATION_HISTORY - 1; // -1 for first message we always keep
+        int targetSize = MAX_CONVERSATION_HISTORY - 2; // -2 for system message + first user query we always keep
         int startFromEnd = Math.min(targetSize, conversationHistory.size() - 1);
         
         // Start from desired point and look backwards for a safe boundary
