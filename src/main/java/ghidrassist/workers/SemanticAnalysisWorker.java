@@ -12,7 +12,6 @@ public class SemanticAnalysisWorker extends AnalysisWorker<SemanticAnalysisWorke
 
     private final AnalysisDB analysisDB;
     private final Program program;
-    private volatile SemanticExtractor extractor;
 
     public static class Result {
         public final int summarized;
@@ -34,9 +33,12 @@ public class SemanticAnalysisWorker extends AnalysisWorker<SemanticAnalysisWorke
     @Override
     public void requestCancel() {
         super.requestCancel();
-        // Also cancel the extractor if it's running
-        if (extractor != null) {
-            extractor.cancel();
+        // Cancel the extractor via the service
+        try {
+            GraphRAGService service = GraphRAGService.getInstance(analysisDB);
+            service.cancelSemanticExtraction();
+        } catch (Exception e) {
+            // Ignore - service may not be initialized
         }
     }
 
@@ -66,9 +68,6 @@ public class SemanticAnalysisWorker extends AnalysisWorker<SemanticAnalysisWorke
                     }
                 }
         );
-
-        // Store extractor reference for cancellation
-        // Note: The actual extractor is managed internally by GraphRAGService
 
         if (isCancelRequested()) {
             return new Result(result.summarized, result.errors, result.elapsedMs);

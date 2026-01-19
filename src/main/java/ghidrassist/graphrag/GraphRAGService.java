@@ -53,6 +53,7 @@ public class GraphRAGService {
     private final ConcurrentLinkedQueue<SemanticQueueEntry> semanticQueue = new ConcurrentLinkedQueue<>();
     private volatile boolean semanticWorkerRunning = false;
     private volatile Program currentProgram;  // For background processing
+    private volatile SemanticExtractor currentExtractor;  // For cancellation support
 
     /**
      * Entry in the semantic analysis queue.
@@ -422,8 +423,22 @@ public class GraphRAGService {
         String programHash = program.getExecutableSHA256();
         BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
 
-        SemanticExtractor extractor = new SemanticExtractor(llmProvider, graph);
-        return extractor.summarizeStaleNodes(limit, callback);
+        currentExtractor = new SemanticExtractor(llmProvider, graph);
+        try {
+            return currentExtractor.summarizeStaleNodes(limit, callback);
+        } finally {
+            currentExtractor = null;  // Clear when done
+        }
+    }
+
+    /**
+     * Cancel any running semantic extraction.
+     */
+    public void cancelSemanticExtraction() {
+        SemanticExtractor extractor = currentExtractor;
+        if (extractor != null) {
+            extractor.cancel();
+        }
     }
 
     // ========================================
