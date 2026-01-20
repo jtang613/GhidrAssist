@@ -156,6 +156,13 @@ public class MCPServerDialog extends JDialog {
             nameField.requestFocus();
             return false;
         }
+
+        if (!name.matches("^[a-zA-Z0-9_-]+$")) {
+            showError("Name can only contain letters, numbers, underscores, and hyphens.\n" +
+                      "Spaces and special characters are not allowed.");
+            nameField.requestFocus();
+            return false;
+        }
         
         if (url.isEmpty()) {
             showError("URL cannot be empty.");
