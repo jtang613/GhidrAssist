@@ -254,11 +254,15 @@ public class BackgroundIndexer {
 
             if (isCancelled.get()) {
                 setPhase(Phase.CANCELLED, "Cancelled during semantic extraction");
+                graph.rebuildFts();
                 return;
             }
 
             notifyCallback(Phase.SEMANTIC_EXTRACTION, semResult.toString());
         }
+
+        // Rebuild FTS index after all extraction is complete
+        graph.rebuildFts();
 
         // Done
         setPhase(Phase.COMPLETED, "Indexing complete");

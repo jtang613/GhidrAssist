@@ -69,6 +69,10 @@ public class SemanticAnalysisWorker extends AnalysisWorker<SemanticAnalysisWorke
                 }
         );
 
+        // Rebuild FTS index to reflect newly-populated summaries
+        publishProgress(99, 100, "Rebuilding search index...");
+        analysisDB.rebuildFts();
+
         if (isCancelRequested()) {
             return new Result(result.summarized, result.errors, result.elapsedMs);
         }

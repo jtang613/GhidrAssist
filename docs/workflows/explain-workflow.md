@@ -28,6 +28,9 @@ Navigate to a function in Ghidra:
 
 The Explain tab shows the current function automatically.
 
+![Function Selected](../screenshots/explain-function-selected.png)
+<!-- SCREENSHOT: Explain tab header showing function name and address -->
+
 ### Step 2: Generate an Explanation
 
 Click **Explain Function** to generate a summary.
@@ -36,6 +39,9 @@ The explanation includes:
 - Purpose and behavior
 - Parameters and return values
 - Notable operations
+
+![Explanation Streaming](../screenshots/explain-streaming.png)
+<!-- SCREENSHOT: Explain tab showing explanation text streaming in -->
 
 ### Step 3: Review Security Analysis
 
@@ -49,6 +55,9 @@ Expand the security panel to view:
 | **Network APIs** | Network calls detected |
 | **File I/O APIs** | File operations detected |
 
+![Security Panel](../screenshots/explain-security-expanded.png)
+<!-- SCREENSHOT: Security panel expanded with populated data -->
+
 ### Step 4: Edit and Save
 
 If needed:
@@ -58,6 +67,9 @@ If needed:
 3. Click **Save** to store updates
 
 Edits are persisted and protected from auto-overwrite.
+
+![Edit Mode](../screenshots/explain-edit-mode.png)
+<!-- SCREENSHOT: Explain tab in edit mode with Save button visible -->
 
 ### Step 5: Clear Analysis (Optional)
 

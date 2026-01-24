@@ -18,8 +18,10 @@ import ghidrassist.LlmApi;
 import ghidrassist.apiprovider.APIProvider;
 import ghidrassist.apiprovider.APIProviderConfig;
 import ghidrassist.core.TabController;
+import ghidrassist.ui.GhidrAssistUI;
 import ghidrassist.mcp2.server.MCPServerConfig;
 import ghidrassist.mcp2.server.MCPServerRegistry;
+import ghidrassist.services.symgraph.SymGraphService;
 import ghidrassist.apiprovider.oauth.OAuthCallbackServer;
 import ghidrassist.apiprovider.oauth.OAuthTokenManager;
 import ghidrassist.apiprovider.oauth.OpenAIOAuthTokenManager;
@@ -29,13 +31,14 @@ import ghidrassist.apiprovider.oauth.OpenAIOAuthTokenManager;
  * Contains all settings in scrollable grouped sections:
  * - LLM Providers
  * - MCP Servers
+ * - SymGraph
  * - System Prompt
  * - Database Paths
  * - Analysis Options
  */
 public class SettingsTab extends JPanel {
     private static final long serialVersionUID = 1L;
-    private static final String VERSION = "1.14.0";
+    private static final String VERSION = "1.15.0";
     private static final String[] REASONING_EFFORT_OPTIONS = {"None", "Low", "Medium", "High"};
 
     private final TabController controller;
@@ -52,6 +55,14 @@ public class SettingsTab extends JPanel {
     // MCP Servers section components
     private JTable mcpServersTable;
     private MCPServersTableModel mcpTableModel;
+
+    // SymGraph section components
+    private JTextField symGraphUrlField;
+    private JPasswordField symGraphKeyField;
+    private JButton showKeyButton;
+    private JButton symGraphTestButton;
+    private JLabel symGraphTestStatusLabel;
+    private boolean keyVisible = false;
 
     // System Prompt section components
     private JTextArea contextArea;
@@ -155,6 +166,14 @@ public class SettingsTab extends JPanel {
         mcpServersTable.getColumnModel().getColumn(2).setPreferredWidth(80);
         mcpServersTable.getColumnModel().getColumn(3).setPreferredWidth(100);
 
+        // SymGraph
+        symGraphUrlField = new JTextField(30);
+        symGraphKeyField = new JPasswordField(30);
+        showKeyButton = new JButton("Show");
+        symGraphTestButton = new JButton("Test");
+        symGraphTestStatusLabel = new JLabel();
+        symGraphTestStatusLabel.setPreferredSize(new Dimension(20, 20));
+
         // System Prompt
         contextArea = new JTextArea();
         contextArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
@@ -188,6 +207,10 @@ public class SettingsTab extends JPanel {
         contentPanel.add(createLLMProvidersSection());
         contentPanel.add(Box.createVerticalStrut(10));
         contentPanel.add(createMCPServersSection());
+        if (GhidrAssistUI.isSymGraphEnabled()) {
+            contentPanel.add(Box.createVerticalStrut(10));
+            contentPanel.add(createSymGraphSection());
+        }
         contentPanel.add(Box.createVerticalStrut(10));
         contentPanel.add(createSystemPromptSection());
         contentPanel.add(Box.createVerticalStrut(10));
@@ -291,6 +314,41 @@ public class SettingsTab extends JPanel {
         return panel;
     }
 
+    private JPanel createSymGraphSection() {
+        JPanel panel = new JPanel();
+        panel.setBorder(BorderFactory.createTitledBorder("SymGraph"));
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+
+        // API URL row
+        JPanel urlRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        urlRow.add(new JLabel("API URL:"));
+        symGraphUrlField.setText(Preferences.getProperty("GhidrAssist.SymGraphAPIUrl", "https://api.symgraph.com"));
+        symGraphUrlField.setToolTipText("SymGraph API URL (for self-hosted instances)");
+        urlRow.add(symGraphUrlField);
+
+        // API Key row
+        JPanel keyRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        keyRow.add(new JLabel("API Key:"));
+        symGraphKeyField.setText(Preferences.getProperty("GhidrAssist.SymGraphAPIKey", ""));
+        symGraphKeyField.setToolTipText("Your SymGraph API key (required for push/pull operations)");
+        keyRow.add(symGraphKeyField);
+        keyRow.add(showKeyButton);
+        keyRow.add(symGraphTestButton);
+        keyRow.add(symGraphTestStatusLabel);
+
+        // Info label
+        JLabel infoLabel = new JLabel("<html><i>SymGraph provides cloud-based symbol and graph data sharing. " +
+                                      "Query operations are free; push/pull require an API key.</i></html>");
+        infoLabel.setForeground(Color.GRAY);
+        JPanel infoRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        infoRow.add(infoLabel);
+
+        panel.add(urlRow);
+        panel.add(keyRow);
+        panel.add(infoRow);
+
+        return panel;
+    }
 
     private JPanel createSystemPromptSection() {
         JPanel panel = new JPanel(new BorderLayout());
@@ -389,6 +447,41 @@ public class SettingsTab extends JPanel {
             int maxToolCalls = (Integer) maxToolCallsSpinner.getValue();
             controller.setMaxToolCalls(maxToolCalls);
         });
+
+        // SymGraph key visibility toggle
+        showKeyButton.addActionListener(e -> {
+            keyVisible = !keyVisible;
+            if (keyVisible) {
+                symGraphKeyField.setEchoChar((char) 0);
+                showKeyButton.setText("Hide");
+            } else {
+                symGraphKeyField.setEchoChar('*');
+                showKeyButton.setText("Show");
+            }
+        });
+
+        // SymGraph URL/Key save on focus lost
+        symGraphUrlField.addFocusListener(new FocusListener() {
+            @Override
+            public void focusGained(FocusEvent e) {}
+            @Override
+            public void focusLost(FocusEvent e) {
+                Preferences.setProperty("GhidrAssist.SymGraphAPIUrl", symGraphUrlField.getText().trim());
+                Preferences.store();
+            }
+        });
+        symGraphKeyField.addFocusListener(new FocusListener() {
+            @Override
+            public void focusGained(FocusEvent e) {}
+            @Override
+            public void focusLost(FocusEvent e) {
+                Preferences.setProperty("GhidrAssist.SymGraphAPIKey", new String(symGraphKeyField.getPassword()));
+                Preferences.store();
+            }
+        });
+
+        // SymGraph Test button
+        symGraphTestButton.addActionListener(e -> onTestSymGraph());
 
         // Database paths save on focus lost
         analysisDbPathField.addFocusListener(createPathFocusListener("GhidrAssist.AnalysisDBPath"));
@@ -900,6 +993,73 @@ public class SettingsTab extends JPanel {
                 } catch (Exception e) {
                     mcpTestStatusLabel.setIcon(failureIcon);
                     mcpTestStatusLabel.setToolTipText("Test error: " + e.getMessage());
+                }
+            }
+        };
+        worker.execute();
+    }
+
+    private void onTestSymGraph() {
+        // Save current field values to preferences before testing
+        Preferences.setProperty("GhidrAssist.SymGraphAPIUrl", symGraphUrlField.getText().trim());
+        Preferences.setProperty("GhidrAssist.SymGraphAPIKey", new String(symGraphKeyField.getPassword()));
+        Preferences.store();
+
+        // Show testing state
+        symGraphTestButton.setEnabled(false);
+        symGraphTestStatusLabel.setIcon(null);
+        symGraphTestStatusLabel.setText("...");
+        symGraphTestStatusLabel.setToolTipText("Testing SymGraph API connection...");
+
+        SwingWorker<Boolean, Void> worker = new SwingWorker<Boolean, Void>() {
+            private String errorMessage = "";
+            private String successMessage = "";
+
+            @Override
+            protected Boolean doInBackground() {
+                try {
+                    SymGraphService service = new SymGraphService();
+
+                    // Test basic connectivity by checking if a known test hash exists
+                    // This tests the API URL is reachable without requiring authentication
+                    String testHash = "0000000000000000000000000000000000000000000000000000000000000000";
+                    service.checkBinaryExists(testHash);
+
+                    // If we have an API key, test authentication by trying to get symbols
+                    if (service.hasApiKey()) {
+                        try {
+                            service.getSymbols(testHash);
+                            successMessage = "API reachable, authentication successful";
+                        } catch (SymGraphService.SymGraphAuthException e) {
+                            errorMessage = "API reachable but authentication failed: " + e.getMessage();
+                            return false;
+                        }
+                    } else {
+                        successMessage = "API reachable (no API key configured)";
+                    }
+
+                    return true;
+                } catch (Exception e) {
+                    errorMessage = e.getMessage();
+                    return false;
+                }
+            }
+
+            @Override
+            protected void done() {
+                symGraphTestButton.setEnabled(true);
+                symGraphTestStatusLabel.setText("");
+                try {
+                    if (get()) {
+                        symGraphTestStatusLabel.setIcon(successIcon);
+                        symGraphTestStatusLabel.setToolTipText(successMessage);
+                    } else {
+                        symGraphTestStatusLabel.setIcon(failureIcon);
+                        symGraphTestStatusLabel.setToolTipText("Connection failed: " + errorMessage);
+                    }
+                } catch (Exception e) {
+                    symGraphTestStatusLabel.setIcon(failureIcon);
+                    symGraphTestStatusLabel.setToolTipText("Test error: " + e.getMessage());
                 }
             }
         };

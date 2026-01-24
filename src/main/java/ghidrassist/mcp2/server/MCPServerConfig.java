@@ -10,14 +10,14 @@ public class MCPServerConfig {
     
     public enum TransportType {
         SSE("Server-Sent Events"),
-        STDIO("Standard I/O");
-        
+        STREAMABLE_HTTP("Streamable HTTP");
+
         private final String displayName;
-        
+
         TransportType(String displayName) {
             this.displayName = displayName;
         }
-        
+
         public String getDisplayName() {
             return displayName;
         }

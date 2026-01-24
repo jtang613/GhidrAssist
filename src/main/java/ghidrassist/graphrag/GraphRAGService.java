@@ -231,6 +231,9 @@ public class GraphRAGService {
                 }
             }
         }
+
+        // Rebuild FTS to reflect newly-summarized nodes
+        analysisDB.rebuildFts();
     }
 
     /**
@@ -802,6 +805,7 @@ public class GraphRAGService {
         String programHash = program.getExecutableSHA256();
         BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
         graph.clearGraph();
+        analysisDB.rebuildFts();
         analysisDB.invalidateKnowledgeGraphCache(programHash);
     }
 

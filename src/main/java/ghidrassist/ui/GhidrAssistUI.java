@@ -2,6 +2,7 @@ package ghidrassist.ui;
 
 import javax.swing.*;
 
+import ghidra.framework.preferences.Preferences;
 import ghidra.program.util.ProgramLocation;
 
 import java.awt.*;
@@ -12,6 +13,11 @@ import ghidrassist.ui.common.UIConstants;
 
 public class GhidrAssistUI extends JPanel {
     private static final long serialVersionUID = 1L;
+
+    public static boolean isSymGraphEnabled() {
+        return Boolean.parseBoolean(Preferences.getProperty("GhidrAssist.SymGraph", "false"));
+    }
+
 	private final GhidrAssistPlugin plugin;
     private final TabController controller;
     private final JTabbedPane tabbedPane;
@@ -21,6 +27,7 @@ public class GhidrAssistUI extends JPanel {
     private final RAGManagementTab ragManagementTab;
     private final SettingsTab settingsTab;
     private final SemanticGraphTab semanticGraphTab;
+    private SymGraphTab symGraphTab;
 
     public GhidrAssistUI(GhidrAssistPlugin plugin) {
         super(new BorderLayout());
@@ -37,6 +44,9 @@ public class GhidrAssistUI extends JPanel {
         this.ragManagementTab = new RAGManagementTab(controller);
         this.settingsTab = new SettingsTab(controller);
         this.semanticGraphTab = new SemanticGraphTab(controller);
+        if (isSymGraphEnabled()) {
+            this.symGraphTab = new SymGraphTab(controller);
+        }
 
         // Set tab references in controller
         controller.setExplainTab(explainTab);
@@ -45,6 +55,9 @@ public class GhidrAssistUI extends JPanel {
         controller.setRAGManagementTab(ragManagementTab);
         controller.setSettingsTab(settingsTab);
         controller.setSemanticGraphTab(semanticGraphTab);
+        if (symGraphTab != null) {
+            controller.setSymGraphTab(symGraphTab);
+        }
 
         initializeUI();
     }
@@ -57,6 +70,9 @@ public class GhidrAssistUI extends JPanel {
         tabbedPane.addTab("Query", queryTab);
         tabbedPane.addTab("Actions", actionsTab);
         tabbedPane.addTab("Semantic Graph", semanticGraphTab);
+        if (symGraphTab != null) {
+            tabbedPane.addTab("SymGraph", symGraphTab);
+        }
         tabbedPane.addTab("RAG", ragManagementTab);
         tabbedPane.addTab("Settings", settingsTab);
 
@@ -75,6 +91,9 @@ public class GhidrAssistUI extends JPanel {
             if (tabbedPane.getSelectedComponent() == settingsTab) {
                 // Load current context when Settings tab is selected
                 controller.handleContextLoad();
+            } else if (symGraphTab != null && tabbedPane.getSelectedComponent() == symGraphTab) {
+                // Update binary info when SymGraph tab is selected
+                controller.updateSymGraphBinaryInfo();
             }
         });
     }
@@ -84,6 +103,7 @@ public class GhidrAssistUI extends JPanel {
             explainTab.updateOffset(loc.getAddress().toString());
             controller.updateAnalysis(loc);
             controller.updateSemanticGraphLocation(loc);
+            controller.handleLocationUpdate(loc);  // Update line explanation display
         }
     }
 

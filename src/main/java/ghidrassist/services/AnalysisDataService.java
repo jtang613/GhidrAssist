@@ -32,35 +32,38 @@ public class AnalysisDataService {
     }
     
     /**
-     * Get context for the current program
+     * Get context for the current program.
+     * If no context is stored (or stored as empty), populates with the default and saves it.
      */
     public String getContext() {
         if (plugin.getCurrentProgram() == null) {
             return getDefaultContext();
         }
-        
+
         String programHash = plugin.getCurrentProgram().getExecutableSHA256();
         String context = analysisDB.getContext(programHash);
-        
-        if (context == null) {
-            return getDefaultContext();
+
+        if (context == null || context.trim().isEmpty()) {
+            String defaultContext = getDefaultContext();
+            analysisDB.upsertContext(programHash, defaultContext);
+            return defaultContext;
         }
-        
+
         return context;
     }
     
     /**
-     * Revert context to default for the current program
+     * Revert context to default for the current program.
+     * Saves the default to the database so it persists.
      */
     public String revertToDefaultContext() {
         String defaultContext = getDefaultContext();
-        
+
         if (plugin.getCurrentProgram() != null) {
-            // Clear custom context, will fall back to default
             String programHash = plugin.getCurrentProgram().getExecutableSHA256();
-            analysisDB.upsertContext(programHash, null);
+            analysisDB.upsertContext(programHash, defaultContext);
         }
-        
+
         return defaultContext;
     }
     

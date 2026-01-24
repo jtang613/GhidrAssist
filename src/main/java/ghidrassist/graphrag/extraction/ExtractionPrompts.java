@@ -261,6 +261,70 @@ public class ExtractionPrompts {
     }
 
     /**
+     * Generate a prompt to explain a single line of code.
+     *
+     * @param lineContent The line to explain
+     * @param contextBefore Lines before for context
+     * @param contextAfter Lines after for context
+     * @param functionName Name of the containing function
+     * @param isDecompiled true if decompiled C code, false if assembly
+     * @return Prompt string for LLM
+     */
+    public static String lineExplanationPrompt(String lineContent, String contextBefore,
+                                                String contextAfter, String functionName,
+                                                boolean isDecompiled) {
+        StringBuilder prompt = new StringBuilder();
+
+        if (isDecompiled) {
+            prompt.append("Explain this line of decompiled C code in the context of the surrounding code.\n\n");
+        } else {
+            prompt.append("Explain this assembly instruction in the context of the surrounding instructions.\n\n");
+        }
+
+        prompt.append("## Function: ").append(functionName).append("\n\n");
+
+        // Build code block with target line marked
+        prompt.append("```");
+        prompt.append(isDecompiled ? "c" : "asm");
+        prompt.append("\n");
+
+        // Context before
+        if (contextBefore != null && !contextBefore.isEmpty()) {
+            prompt.append(contextBefore);
+            if (!contextBefore.endsWith("\n")) {
+                prompt.append("\n");
+            }
+        }
+
+        // Target line with marker
+        prompt.append(">>> ").append(lineContent).append("  <<< [EXPLAIN THIS LINE]\n");
+
+        // Context after
+        if (contextAfter != null && !contextAfter.isEmpty()) {
+            prompt.append(contextAfter);
+        }
+
+        prompt.append("```\n\n");
+
+        prompt.append("## Instructions:\n");
+        prompt.append("Explain the marked line (>>> ... <<<) in 2-4 sentences. Focus on:\n");
+
+        if (isDecompiled) {
+            prompt.append("1. What this statement does (data flow, function calls, assignments)\n");
+            prompt.append("2. How it relates to the surrounding code context\n");
+            prompt.append("3. Any security-relevant observations (if applicable)\n");
+        } else {
+            prompt.append("1. What this instruction does at the CPU level\n");
+            prompt.append("2. Its role in the surrounding instruction sequence\n");
+            prompt.append("3. What high-level operation this might represent\n");
+        }
+
+        prompt.append("\nProvide a concise, direct explanation without repeating the code.\n");
+
+        return prompt.toString();
+    }
+
+    /**
      * Generate a prompt to analyze taint flow between functions.
      */
     public static String taintAnalysisPrompt(String sourceFunctionCode, String sinkFunctionCode,

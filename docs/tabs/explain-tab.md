@@ -43,6 +43,9 @@ The main display area renders the LLM response as markdown, including:
 
 ### Security Analysis Panel
 
+![Security Panel](../screenshots/explain-security-panel.png)
+<!-- SCREENSHOT: Expanded security analysis panel showing Risk Level, Activity Profile, Flags, Network APIs, File I/O APIs -->
+
 | Field | Description |
 |--------|-------------|
 | **Risk Level** | Overall security assessment (Low, Medium, High) |

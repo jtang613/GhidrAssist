@@ -29,8 +29,11 @@ import ghidrassist.graphrag.extraction.StructureExtractor;
 import ghidrassist.graphrag.extraction.SemanticExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatureExtractor;
 import ghidrassist.graphrag.extraction.SecurityFeatures;
+import ghidrassist.services.symgraph.SymGraphService;
+import ghidrassist.services.symgraph.SymGraphModels.*;
 import ghidrassist.workers.*;
 
+import com.google.gson.Gson;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -74,11 +77,15 @@ public class TabController {
     // Shared LLM API instance for cancellation
     private volatile LlmApi currentLlmApi;
 
+    // Line explanation LLM API instance (separate from function explain)
+    private volatile LlmApi currentLineExplainLlmApi;
+
     // ReAct orchestrator for cancellation
     private volatile ghidrassist.agent.react.ReActOrchestrator currentOrchestrator;
 
     // UI state
     private volatile boolean isQueryRunning;
+    private volatile boolean isLineQueryRunning;
     private volatile boolean isCancelling;  // Guard against concurrent operations during cancellation
     private volatile ReasoningConfig currentReasoningConfig;  // Current reasoning/thinking effort setting
 
@@ -98,6 +105,10 @@ public class TabController {
     private RAGManagementTab ragManagementTab;
     private SettingsTab settingsTab;
     private SemanticGraphTab semanticGraphTab;
+    private SymGraphTab symGraphTab;
+
+    // SymGraph service
+    private SymGraphService symGraphService;
 
 
     // Background workers for non-blocking analysis
@@ -147,6 +158,12 @@ public class TabController {
     public void setActionsTab(ActionsTab tab) { this.actionsTab = tab; }
     public void setRAGManagementTab(RAGManagementTab tab) { this.ragManagementTab = tab; }
     public void setSemanticGraphTab(SemanticGraphTab tab) { this.semanticGraphTab = tab; }
+    public void setSymGraphTab(SymGraphTab tab) {
+        this.symGraphTab = tab;
+        if (this.symGraphService == null) {
+            this.symGraphService = new SymGraphService();
+        }
+    }
     public void setSettingsTab(SettingsTab tab) { this.settingsTab = tab; }
 
     // ==== Plugin Access ====
@@ -409,9 +426,251 @@ public class TabController {
     }
 
     public void handleExplainLine() {
-        // Statement/block level semantic analysis is planned for a future release
-        Msg.showInfo(getClass(), explainTab, "Coming Soon",
-            "Statement/block level semantic analysis is planned for a future release.");
+        Msg.info(this, "handleExplainLine called, isLineQueryRunning=" + isLineQueryRunning);
+
+        if (isLineQueryRunning) {
+            Msg.info(this, "Line query already running, cancelling...");
+            cancelLineExplainOperation();
+            return;
+        }
+
+        Address currentAddress = plugin.getCurrentAddress();
+        if (currentAddress == null) {
+            Msg.showInfo(getClass(), explainTab, "No Address", "No address at current location.");
+            return;
+        }
+
+        Function currentFunction = plugin.getCurrentFunction();
+        if (currentFunction == null) {
+            Msg.showInfo(getClass(), explainTab, "No Function", "Current address is not within a function.");
+            return;
+        }
+
+        Program program = plugin.getCurrentProgram();
+        if (program == null) {
+            return;
+        }
+
+        String programHash = program.getExecutableSHA256();
+        long lineAddress = currentAddress.getOffset();
+
+        // Determine view type based on current location
+        GhidrAssistPlugin.CodeViewType codeViewType = plugin.checkLastActiveCodeView();
+        String viewType = (codeViewType == GhidrAssistPlugin.CodeViewType.IS_DECOMPILER) ? "DECOMPILER" : "DISASSEMBLY";
+        Msg.info(this, "ExplainLine: Detected view type: " + viewType + " (codeViewType=" + codeViewType + ")");
+
+        // Check cache first
+        AnalysisDB.LineExplanation cached = analysisDB.getLineExplanation(programHash, lineAddress, viewType);
+        if (cached != null) {
+            Msg.info(this, "Using cached line explanation for address " + currentAddress);
+            SwingUtilities.invokeLater(() -> {
+                String html = markdownHelper.markdownToHtml(cached.getExplanation());
+                explainTab.setLineExplanationText(html);
+            });
+            return;
+        }
+
+        // Set UI state for line explanation
+        isLineQueryRunning = true;
+        SwingUtilities.invokeLater(() -> {
+            explainTab.setLineButtonText("Stop");
+            explainTab.setLineExplanationText("<html><body><i>Extracting line context...</i></body></html>");
+        });
+
+        // Run in background thread
+        Thread lineExplainThread = new Thread(() -> {
+            try {
+                Msg.info(this, "ExplainLine: Starting extraction for address " + currentAddress +
+                         " (offset=0x" + Long.toHexString(currentAddress.getOffset()) + ")" +
+                         ", viewType=" + viewType + ", function=" + currentFunction.getName());
+
+                // Extract line context with 5 lines before/after
+                CodeUtils.LineContext lineContext;
+
+                if (viewType.equals("DECOMPILER")) {
+                    Msg.info(this, "ExplainLine: Calling getDecompiledLineWithContext...");
+                    lineContext = CodeUtils.getDecompiledLineWithContext(
+                            currentAddress, ghidra.util.task.TaskMonitor.DUMMY, program, 5);
+                } else {
+                    Msg.info(this, "ExplainLine: Calling getDisassemblyLineWithContext...");
+                    lineContext = CodeUtils.getDisassemblyLineWithContext(currentAddress, program, 5);
+                }
+
+                if (lineContext == null) {
+                    Msg.warn(this, "ExplainLine: lineContext is NULL - extraction failed");
+                    SwingUtilities.invokeLater(() -> {
+                        explainTab.setLineExplanationText("<html><body><i>Could not extract code (null context). Check Ghidra console for details.</i></body></html>");
+                        setLineExplainUIState(false, "Explain Line");
+                    });
+                    return;
+                }
+
+                if (!lineContext.isValid()) {
+                    Msg.warn(this, "ExplainLine: lineContext is invalid - currentLine is empty or null");
+                    Msg.warn(this, "ExplainLine: currentLine='" + lineContext.getCurrentLine() + "'");
+                    SwingUtilities.invokeLater(() -> {
+                        explainTab.setLineExplanationText("<html><body><i>Could not extract code (empty line). Check Ghidra console for details.</i></body></html>");
+                        setLineExplainUIState(false, "Explain Line");
+                    });
+                    return;
+                }
+
+                Msg.info(this, "ExplainLine: SUCCESS - extracted line context:");
+                Msg.info(this, "  currentLine: '" + lineContext.getCurrentLine() + "'");
+                Msg.info(this, "  linesBefore (" + (lineContext.getLinesBefore() != null ? lineContext.getLinesBefore().split("\n").length : 0) + " lines)");
+                Msg.info(this, "  linesAfter (" + (lineContext.getLinesAfter() != null ? lineContext.getLinesAfter().split("\n").length : 0) + " lines)");
+
+                // Update UI to show we're generating explanation
+                SwingUtilities.invokeLater(() ->
+                        explainTab.setLineExplanationText("<html><body><i>Generating explanation...</i></body></html>"));
+
+                // Generate prompt
+                String prompt = ghidrassist.graphrag.extraction.ExtractionPrompts.lineExplanationPrompt(
+                        lineContext.getCurrentLine(),
+                        lineContext.getLinesBefore(),
+                        lineContext.getLinesAfter(),
+                        lineContext.getFunctionName(),
+                        viewType.equals("DECOMPILER")
+                );
+
+                // Create LLM API and send request
+                APIProviderConfig providerConfig = GhidrAssistPlugin.getCurrentProviderConfig();
+                if (providerConfig == null) {
+                    throw new Exception("No LLM provider configured.");
+                }
+
+                currentLineExplainLlmApi = new LlmApi(providerConfig, plugin);
+
+                // Create response handler
+                LlmApi.LlmResponseHandler handler = createLineExplainResponseHandler(
+                        programHash,
+                        currentFunction.getEntryPoint().getOffset(),
+                        lineAddress,
+                        viewType,
+                        lineContext.getCurrentLine(),
+                        lineContext.getLinesBefore(),
+                        lineContext.getLinesAfter()
+                );
+
+                // Execute streaming request
+                currentLineExplainLlmApi.sendRequestAsync(prompt, handler);
+
+            } catch (Exception e) {
+                Msg.error(this, "Line explanation failed: " + e.getMessage(), e);
+                SwingUtilities.invokeLater(() -> {
+                    explainTab.setLineExplanationText("<html><body>Error: " + e.getMessage() + "</body></html>");
+                    setLineExplainUIState(false, "Explain Line");
+                });
+            }
+        }, "GhidrAssist-ExplainLine");
+
+        lineExplainThread.start();
+    }
+
+    /**
+     * Cancel the current line explanation operation.
+     */
+    private void cancelLineExplainOperation() {
+        if (currentLineExplainLlmApi != null) {
+            currentLineExplainLlmApi.cancelCurrentRequest();
+            currentLineExplainLlmApi = null;
+        }
+
+        setLineExplainUIState(false, "Explain Line");
+    }
+
+    /**
+     * Set the line explanation UI state.
+     */
+    private void setLineExplainUIState(boolean running, String buttonText) {
+        isLineQueryRunning = running;
+        SwingUtilities.invokeLater(() -> {
+            if (explainTab != null) {
+                explainTab.setLineButtonText(buttonText);
+            }
+        });
+    }
+
+    /**
+     * Create a response handler for line explanation streaming.
+     */
+    private LlmApi.LlmResponseHandler createLineExplainResponseHandler(
+            String programHash, long functionAddress, long lineAddress,
+            String viewType, String lineContent, String contextBefore, String contextAfter) {
+
+        return new LlmApi.LlmResponseHandler() {
+            private final StringBuilder responseBuffer = new StringBuilder();
+
+            @Override
+            public void onStart() {
+                responseBuffer.setLength(0);
+            }
+
+            @Override
+            public void onUpdate(String partialResponse) {
+                if (partialResponse == null || partialResponse.isEmpty()) {
+                    return;
+                }
+
+                // Accumulate response
+                String currentBuffer = responseBuffer.toString();
+                if (partialResponse.startsWith(currentBuffer)) {
+                    String newContent = partialResponse.substring(currentBuffer.length());
+                    if (!newContent.isEmpty()) {
+                        responseBuffer.append(newContent);
+                    }
+                } else {
+                    responseBuffer.append(partialResponse);
+                }
+
+                // Update UI with streaming content
+                final String content = responseBuffer.toString();
+                SwingUtilities.invokeLater(() -> {
+                    String html = markdownHelper.markdownToHtml(content);
+                    explainTab.setLineExplanationText(html);
+                });
+            }
+
+            @Override
+            public void onComplete(String fullResponse) {
+                final String finalResponse = (fullResponse != null && !fullResponse.isEmpty())
+                        ? fullResponse : responseBuffer.toString();
+
+                // Cache the result
+                analysisDB.upsertLineExplanation(
+                        programHash, functionAddress, lineAddress,
+                        viewType, lineContent, contextBefore, contextAfter,
+                        finalResponse
+                );
+
+                SwingUtilities.invokeLater(() -> {
+                    String html = markdownHelper.markdownToHtml(finalResponse);
+                    explainTab.setLineExplanationText(html);
+                    setLineExplainUIState(false, "Explain Line");
+                    currentLineExplainLlmApi = null;
+                });
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                SwingUtilities.invokeLater(() -> {
+                    String partialContent = responseBuffer.toString();
+                    if (!partialContent.isEmpty()) {
+                        String html = markdownHelper.markdownToHtml(partialContent + "\n\n[Error: " + error.getMessage() + "]");
+                        explainTab.setLineExplanationText(html);
+                    } else {
+                        explainTab.setLineExplanationText("<html><body>Error: " + error.getMessage() + "</body></html>");
+                    }
+                    setLineExplainUIState(false, "Explain Line");
+                    currentLineExplainLlmApi = null;
+                });
+            }
+
+            @Override
+            public boolean shouldContinue() {
+                return isLineQueryRunning;
+            }
+        };
     }
 
     // ==== Query Operations ====
@@ -846,11 +1105,68 @@ public class TabController {
     }
 
     // ==== Location Updates ====
-    
+
     public void handleLocationUpdate(ProgramLocation loc) {
         if (loc != null && loc.getAddress() != null) {
+            Msg.info(this, "handleLocationUpdate: address=" + loc.getAddress());
             explainTab.updateOffset(loc.getAddress().toString());
             updateAnalysisDisplay();
+            updateLineExplanationDisplay(loc.getAddress());
+        }
+    }
+
+    /**
+     * Update the line explanation display when the cursor moves.
+     * Shows cached explanation if available, otherwise clears the panel.
+     */
+    private void updateLineExplanationDisplay(Address address) {
+        Msg.info(this, "updateLineExplanationDisplay: address=" + address);
+
+        if (address == null || explainTab == null) {
+            Msg.info(this, "updateLineExplanationDisplay: address or explainTab is null, returning");
+            return;
+        }
+
+        // Don't update if a line query is currently running
+        if (isLineQueryRunning) {
+            Msg.info(this, "updateLineExplanationDisplay: line query running, skipping");
+            return;
+        }
+
+        Program program = plugin.getCurrentProgram();
+        if (program == null) {
+            Msg.info(this, "updateLineExplanationDisplay: no program, clearing");
+            explainTab.clearLineExplanation();
+            return;
+        }
+
+        // Must be within a function
+        Function function = plugin.getCurrentFunction();
+        if (function == null) {
+            Msg.info(this, "updateLineExplanationDisplay: no function at address, clearing");
+            explainTab.clearLineExplanation();
+            return;
+        }
+
+        String programHash = program.getExecutableSHA256();
+        long lineAddress = address.getOffset();
+
+        // Detect current view type
+        GhidrAssistPlugin.CodeViewType codeViewType = plugin.checkLastActiveCodeView();
+        String viewType = (codeViewType == GhidrAssistPlugin.CodeViewType.IS_DECOMPILER) ? "DECOMPILER" : "DISASSEMBLY";
+
+        Msg.info(this, "updateLineExplanationDisplay: Looking up cache for hash=" + programHash.substring(0, 8) +
+                 "..., address=0x" + Long.toHexString(lineAddress) + ", viewType=" + viewType);
+
+        // Check for cached explanation for this view type
+        AnalysisDB.LineExplanation cached = analysisDB.getLineExplanation(programHash, lineAddress, viewType);
+        if (cached != null) {
+            Msg.info(this, "updateLineExplanationDisplay: CACHE HIT - displaying cached explanation");
+            String html = markdownHelper.markdownToHtml(cached.getExplanation());
+            explainTab.setLineExplanationText(html);
+        } else {
+            Msg.info(this, "updateLineExplanationDisplay: CACHE MISS - clearing panel");
+            explainTab.clearLineExplanation();
         }
     }
 
@@ -2582,7 +2898,7 @@ public class TabController {
 
                 graphView.showContent();
 
-                // Get N-hop neighborhood
+                // Get N-hop neighborhood (only follows outgoing edges due to BFS on directed graph)
                 java.util.List<ghidrassist.graphrag.nodes.KnowledgeNode> neighbors =
                         graph.getNeighborsBatch(centerNode.getId(), nHops);
 
@@ -2591,14 +2907,48 @@ public class TabController {
                 allNodes.add(centerNode);
                 allNodes.addAll(neighbors);
 
-                // Collect all edges between these nodes
+                // Find and add direct callers of the center node (incoming CALLS edges)
+                // getNeighborsBatch uses BFS which only follows outgoing edges, so callers are missed
+                java.util.Set<String> existingNodeIds = new java.util.HashSet<>();
+                for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
+                    existingNodeIds.add(node.getId());
+                }
+
+                // Track caller nodes separately - we only want their edges TO the root, not their other callees
+                java.util.Set<String> callerNodeIds = new java.util.HashSet<>();
+                java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> callerEdges = new java.util.ArrayList<>();
+
+                for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getIncomingEdges(centerNode.getId())) {
+                    if (edge.getType() == ghidrassist.graphrag.nodes.EdgeType.CALLS &&
+                        !existingNodeIds.contains(edge.getSourceId())) {
+                        ghidrassist.graphrag.nodes.KnowledgeNode callerNode = graph.getNode(edge.getSourceId());
+                        if (callerNode != null) {
+                            allNodes.add(callerNode);
+                            existingNodeIds.add(callerNode.getId());
+                            callerNodeIds.add(callerNode.getId());
+                            callerEdges.add(edge);  // Only add the caller→root edge
+                        }
+                    }
+                }
+
+                // Collect all edges between non-caller nodes (center + descendants)
                 java.util.Set<String> nodeIds = new java.util.HashSet<>();
                 for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
                     nodeIds.add(node.getId());
                 }
 
                 java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> allEdges = new java.util.ArrayList<>();
+
+                // Add the caller→root edges first
+                allEdges.addAll(callerEdges);
+
+                // For non-caller nodes, collect their edges normally
                 for (ghidrassist.graphrag.nodes.KnowledgeNode node : allNodes) {
+                    // Skip caller nodes - we already added their specific edges to root
+                    if (callerNodeIds.contains(node.getId())) {
+                        continue;
+                    }
+                    // Include outgoing edges (this node calls others)
                     for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : graph.getOutgoingEdges(node.getId())) {
                         if (nodeIds.contains(edge.getTargetId()) && edgeTypes.contains(edge.getType())) {
                             allEdges.add(edge);
@@ -2769,6 +3119,1225 @@ public class TabController {
                 .replace("\t", "\\t");
     }
 
+    // ==== SymGraph Operations ====
+
+    /**
+     * Handle SymGraph query request.
+     */
+    public void handleSymGraphQuery() {
+        if (symGraphTab == null || symGraphService == null) {
+            Msg.showError(this, null, "Error", "SymGraph tab not initialized");
+            return;
+        }
+
+        String sha256 = getProgramSHA256();
+        if (sha256 == null) {
+            Msg.showInfo(this, symGraphTab, "No Binary", "No binary loaded or unable to compute hash.");
+            return;
+        }
+
+        symGraphTab.setQueryStatus("Checking...", false);
+        symGraphTab.hideStats();
+        symGraphTab.setButtonsEnabled(false);
+
+        Task task = new Task("Query SymGraph", true, true, false) {
+            @Override
+            public void run(TaskMonitor monitor) {
+                try {
+                    QueryResult result = symGraphService.queryBinary(sha256);
+
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.setButtonsEnabled(true);
+                        if (result.getError() != null) {
+                            symGraphTab.setQueryStatus("Error: " + result.getError(), false);
+                        } else if (result.isExists()) {
+                            symGraphTab.setQueryStatus("Found in SymGraph", true);
+                            if (result.getStats() != null) {
+                                BinaryStats stats = result.getStats();
+                                symGraphTab.setStats(
+                                    stats.getSymbolCount(),
+                                    stats.getFunctionCount(),
+                                    stats.getGraphNodeCount(),
+                                    stats.getLastQueriedAt()
+                                );
+                            }
+                        } else {
+                            symGraphTab.setQueryStatus("Not found in SymGraph", false);
+                            symGraphTab.hideStats();
+                        }
+                    });
+                } catch (Exception e) {
+                    Msg.error(this, "Query error: " + e.getMessage(), e);
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.setButtonsEnabled(true);
+                        symGraphTab.setQueryStatus("Error: " + e.getMessage(), false);
+                    });
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle SymGraph push request.
+     */
+    public void handleSymGraphPush(String scope, boolean pushSymbols, boolean pushGraph) {
+        if (symGraphTab == null || symGraphService == null) {
+            Msg.showError(this, null, "Error", "SymGraph tab not initialized");
+            return;
+        }
+
+        String sha256 = getProgramSHA256();
+        if (sha256 == null) {
+            Msg.showInfo(this, symGraphTab, "No Binary", "No binary loaded or unable to compute hash.");
+            return;
+        }
+
+        if (!symGraphService.hasApiKey()) {
+            Msg.showError(this, symGraphTab, "API Key Required",
+                "Push requires a SymGraph API key.\n\nAdd your API key in Settings > General > SymGraph");
+            return;
+        }
+
+        // Use atomic boolean for cancellation
+        final java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        // Show progress bar with cancel callback
+        symGraphTab.setPushStatus("Preparing...", null);
+        symGraphTab.showPushProgress(() -> cancelled.set(true));
+
+        // Create progress callback that updates the UI
+        SymGraphService.ProgressCallback progressCallback = new SymGraphService.ProgressCallback() {
+            @Override
+            public void onProgress(int current, int total, String message) {
+                SwingUtilities.invokeLater(() -> {
+                    symGraphTab.updatePushProgress(current, total, message);
+                });
+            }
+
+            @Override
+            public boolean isCancelled() {
+                return cancelled.get();
+            }
+        };
+
+        // Run in background thread (no modal dialog)
+        Thread pushThread = new Thread(() -> {
+            try {
+                List<Map<String, Object>> symbols = new ArrayList<>();
+                Map<String, Object> graphData = null;
+
+                if (pushSymbols) {
+                    SwingUtilities.invokeLater(() -> symGraphTab.updatePushProgress(0, 100, "Collecting symbols..."));
+                    symbols = collectLocalSymbols(scope);
+                    Msg.info(this, "Collected " + symbols.size() + " symbols to push");
+                }
+
+                if (cancelled.get()) {
+                    handlePushCancelled();
+                    return;
+                }
+
+                if (pushGraph) {
+                    SwingUtilities.invokeLater(() -> symGraphTab.updatePushProgress(0, 100, "Collecting graph data..."));
+                    graphData = collectLocalGraph(scope);
+                }
+
+                if (cancelled.get()) {
+                    handlePushCancelled();
+                    return;
+                }
+
+                if (symbols.isEmpty() && graphData == null) {
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.hidePushProgress();
+                        symGraphTab.setButtonsEnabled(true);
+                        symGraphTab.setPushStatus("No data to push", false);
+                    });
+                    return;
+                }
+
+                PushResult totalResult = PushResult.success(0, 0, 0);
+
+                // Push symbols in chunks with progress
+                if (!symbols.isEmpty()) {
+                    PushResult symbolResult = symGraphService.pushSymbolsChunked(sha256, symbols, progressCallback);
+                    if (!symbolResult.isSuccess()) {
+                        throw new Exception(symbolResult.getError());
+                    }
+                    totalResult.setSymbolsPushed(symbolResult.getSymbolsPushed());
+                }
+
+                if (cancelled.get()) {
+                    handlePushCancelled();
+                    return;
+                }
+
+                // Push graph in chunks with progress
+                if (graphData != null) {
+                    PushResult graphResult = symGraphService.importGraphChunked(sha256, graphData, progressCallback);
+                    if (!graphResult.isSuccess()) {
+                        throw new Exception(graphResult.getError());
+                    }
+                    totalResult.setNodesPushed(graphResult.getNodesPushed());
+                    totalResult.setEdgesPushed(graphResult.getEdgesPushed());
+                }
+
+                if (cancelled.get()) {
+                    handlePushCancelled();
+                    return;
+                }
+
+                // Add fingerprints for debug symbol matching (BuildID for ELF, etc.)
+                SwingUtilities.invokeLater(() -> symGraphTab.updatePushProgress(100, 100, "Adding fingerprints..."));
+                addBinaryFingerprints(sha256);
+
+                final PushResult result = totalResult;
+                SwingUtilities.invokeLater(() -> {
+                    symGraphTab.hidePushProgress();
+                    symGraphTab.setButtonsEnabled(true);
+                    StringBuilder msg = new StringBuilder("Pushed: ");
+                    List<String> parts = new ArrayList<>();
+                    if (result.getSymbolsPushed() > 0) parts.add(result.getSymbolsPushed() + " symbols");
+                    if (result.getNodesPushed() > 0) parts.add(result.getNodesPushed() + " nodes");
+                    if (result.getEdgesPushed() > 0) parts.add(result.getEdgesPushed() + " edges");
+                    msg.append(parts.isEmpty() ? "complete" : String.join(", ", parts));
+                    symGraphTab.setPushStatus(msg.toString(), true);
+                });
+            } catch (Exception e) {
+                Msg.error(this, "Push error: " + e.getMessage(), e);
+                SwingUtilities.invokeLater(() -> {
+                    symGraphTab.hidePushProgress();
+                    symGraphTab.setButtonsEnabled(true);
+                    symGraphTab.setPushStatus("Error: " + e.getMessage(), false);
+                });
+            }
+        }, "SymGraph-Push-Worker");
+        pushThread.setDaemon(true);
+        pushThread.start();
+    }
+
+    private void handlePushCancelled() {
+        SwingUtilities.invokeLater(() -> {
+            symGraphTab.hidePushProgress();
+            symGraphTab.setButtonsEnabled(true);
+            symGraphTab.setPushStatus("Cancelled", false);
+        });
+    }
+
+    /**
+     * Handle SymGraph pull preview request.
+     */
+    public void handleSymGraphPullPreview() {
+        if (symGraphTab == null || symGraphService == null) {
+            Msg.showError(this, null, "Error", "SymGraph tab not initialized");
+            return;
+        }
+
+        String sha256 = getProgramSHA256();
+        if (sha256 == null) {
+            Msg.showInfo(this, symGraphTab, "No Binary", "No binary loaded or unable to compute hash.");
+            return;
+        }
+
+        if (!symGraphService.hasApiKey()) {
+            Msg.showError(this, symGraphTab, "API Key Required",
+                "Pull requires a SymGraph API key.\n\nAdd your API key in Settings > General > SymGraph");
+            return;
+        }
+
+        // Get pull configuration from the tab
+        ghidrassist.ui.tabs.SymGraphTab.PullConfig pullConfig = symGraphTab.getPullConfig();
+        List<String> symbolTypes = pullConfig.getSymbolTypes();
+        double minConfidence = pullConfig.getMinConfidence();
+        boolean includeGraph = pullConfig.isIncludeGraph();
+
+        if (symbolTypes.isEmpty()) {
+            Msg.showInfo(this, symGraphTab, "No Types Selected", "Select at least one symbol type to pull.");
+            return;
+        }
+
+        Msg.info(this, "Fetching symbols from SymGraph: " + sha256 + " (types: " + symbolTypes + ")");
+        symGraphTab.setPullStatus("Fetching...", null);
+        symGraphTab.clearConflicts();
+        symGraphTab.setGraphPreviewData(null, 0, 0, 0);
+        symGraphTab.setButtonsEnabled(false);
+
+        Task task = new Task("Pull from SymGraph", true, true, false) {
+            @Override
+            public void run(TaskMonitor monitor) {
+                try {
+                    // Fetch symbols for each selected type
+                    List<Symbol> allRemoteSymbols = new ArrayList<>();
+
+                    for (String symType : symbolTypes) {
+                        if (monitor.isCancelled()) {
+                            return;
+                        }
+                        monitor.setMessage("Fetching " + symType + " symbols...");
+                        List<Symbol> remoteSymbols = symGraphService.getSymbols(sha256, symType);
+                        allRemoteSymbols.addAll(remoteSymbols);
+                        Msg.info(this, "Fetched " + remoteSymbols.size() + " " + symType + " symbols from API");
+                    }
+
+                    GraphExport graphExport = null;
+                    int graphNodes = 0;
+                    int graphEdges = 0;
+                    int graphCommunities = 0;
+
+                    if (includeGraph) {
+                        monitor.setMessage("Fetching graph data...");
+                        graphExport = symGraphService.exportGraph(sha256);
+                        if (graphExport != null) {
+                            graphNodes = graphExport.getNodes().size();
+                            graphEdges = graphExport.getEdges().size();
+                            graphCommunities = getGraphCommunityCount(graphExport);
+                        }
+                    }
+
+                    if (allRemoteSymbols.isEmpty() && graphExport == null) {
+                        SwingUtilities.invokeLater(() -> {
+                            symGraphTab.setButtonsEnabled(true);
+                            symGraphTab.setPullStatus("No symbols found", false);
+                        });
+                        return;
+                    }
+
+                    monitor.setMessage("Building conflict list...");
+                    Map<Long, String> localSymbols = getLocalSymbolMap();
+                    // Use the overloaded method with minConfidence
+                    List<ConflictEntry> conflicts = symGraphService.buildConflictEntries(
+                        localSymbols, allRemoteSymbols, minConfidence);
+
+                    final GraphExport finalGraphExport = graphExport;
+                    final int finalGraphNodes = graphNodes;
+                    final int finalGraphEdges = graphEdges;
+                    final int finalGraphCommunities = graphCommunities;
+
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.setButtonsEnabled(true);
+                        symGraphTab.setGraphPreviewData(finalGraphExport, finalGraphNodes, finalGraphEdges, finalGraphCommunities);
+                        symGraphTab.populateConflicts(conflicts);
+                        int conflictCount = (int) conflicts.stream()
+                            .filter(c -> c.getAction() == ConflictAction.CONFLICT).count();
+                        int newCount = (int) conflicts.stream()
+                            .filter(c -> c.getAction() == ConflictAction.NEW).count();
+                        String status = String.format("Found %d symbols (%d conflicts, %d new)",
+                            conflicts.size(), conflictCount, newCount);
+                        if (conflicts.isEmpty() && finalGraphExport != null) {
+                            status = "No symbols found (graph data available)";
+                        } else if (finalGraphExport != null) {
+                            status += String.format(" | Graph: %d nodes, %d edges, %d communities",
+                                finalGraphNodes, finalGraphEdges, finalGraphCommunities);
+                        }
+                        symGraphTab.setPullStatus(status, true);
+                    });
+                } catch (Exception e) {
+                    Msg.error(this, "Pull preview error: " + e.getMessage(), e);
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.setButtonsEnabled(true);
+                        symGraphTab.setGraphPreviewData(null, 0, 0, 0);
+                        symGraphTab.setPullStatus("Error: " + e.getMessage(), false);
+                    });
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle applying selected symbols from SymGraph.
+     */
+    private int getGraphCommunityCount(GraphExport export) {
+        if (export == null || export.getMetadata() == null) {
+            return 0;
+        }
+        Object countValue = export.getMetadata().get("community_count");
+        if (countValue instanceof Number) {
+            return ((Number) countValue).intValue();
+        }
+        Object communitiesValue = export.getMetadata().get("communities");
+        if (communitiesValue instanceof List) {
+            return ((List<?>) communitiesValue).size();
+        }
+        return 0;
+    }
+
+    private List<String> getListProperty(Map<String, Object> props, String key) {
+        if (props == null) {
+            return new ArrayList<>();
+        }
+        Object value = props.get(key);
+        if (value instanceof List) {
+            List<String> list = new ArrayList<>();
+            for (Object item : (List<?>) value) {
+                if (item != null) {
+                    list.add(item.toString());
+                }
+            }
+            return list;
+        }
+        return new ArrayList<>();
+    }
+
+    private double getDoubleProperty(Map<String, Object> props, String key, double defaultValue) {
+        if (props == null) {
+            return defaultValue;
+        }
+        Object value = props.get(key);
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        return defaultValue;
+    }
+
+    private void mergeGraphData(GraphExport export, String programHash, String mergePolicy) {
+        if (export == null) {
+            return;
+        }
+        BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+        if ("replace".equals(mergePolicy)) {
+            graph.clearGraph();
+        }
+
+        Map<Long, String> addressToId = new HashMap<>();
+        for (GraphNode node : export.getNodes()) {
+            NodeType nodeType = NodeType.fromString(node.getNodeType());
+            if (nodeType == null) {
+                nodeType = NodeType.FUNCTION;
+            }
+
+            KnowledgeNode existing = graph.getNodeByAddress(node.getAddress());
+            if ("prefer_local".equals(mergePolicy) && existing != null) {
+                addressToId.put(node.getAddress(), existing.getId());
+                continue;
+            }
+
+            KnowledgeNode localNode = node.getId() != null
+                    ? new KnowledgeNode(node.getId(), nodeType, programHash)
+                    : new KnowledgeNode(nodeType, programHash);
+            if (existing != null) {
+                localNode.setId(existing.getId());
+            }
+
+            localNode.setAddress(node.getAddress());
+            localNode.setName(node.getName());
+
+            Map<String, Object> props = node.getProperties();
+            String rawContent = props != null ? (String) props.get("raw_content") : null;
+            if (rawContent == null && props != null) {
+                rawContent = (String) props.get("raw_code");
+            }
+            String summary = node.getSummary();
+            if (summary == null && props != null) {
+                summary = (String) props.get("llm_summary");
+            }
+
+            localNode.setRawContent(rawContent);
+            localNode.setLlmSummary(summary);
+            localNode.setConfidence((float) getDoubleProperty(props, "confidence", 0.0));
+            localNode.setSecurityFlags(getListProperty(props, "security_flags"));
+            localNode.setNetworkAPIs(getListProperty(props, "network_apis"));
+            localNode.setFileIOAPIs(getListProperty(props, "file_io_apis"));
+            localNode.setIPAddresses(getListProperty(props, "ip_addresses"));
+            localNode.setURLs(getListProperty(props, "urls"));
+            localNode.setFilePaths(getListProperty(props, "file_paths"));
+            localNode.setDomains(getListProperty(props, "domains"));
+            localNode.setRegistryKeys(getListProperty(props, "registry_keys"));
+            if (props != null) {
+                localNode.setRiskLevel((String) props.get("risk_level"));
+                localNode.setActivityProfile((String) props.get("activity_profile"));
+                Object depth = props.get("analysis_depth");
+                if (depth instanceof Number) {
+                    localNode.setAnalysisDepth(((Number) depth).intValue());
+                }
+                Object isStale = props.get("is_stale");
+                if (isStale instanceof Boolean) {
+                    localNode.setStale((Boolean) isStale);
+                }
+                Object userEdited = props.get("user_edited");
+                if (userEdited instanceof Boolean) {
+                    localNode.setUserEdited((Boolean) userEdited);
+                }
+            }
+
+            graph.upsertNode(localNode);
+            addressToId.put(node.getAddress(), localNode.getId());
+        }
+
+        Gson gson = new Gson();
+        for (GraphEdge edge : export.getEdges()) {
+            String sourceId = addressToId.get(edge.getSourceAddress());
+            String targetId = addressToId.get(edge.getTargetAddress());
+            if (sourceId == null || targetId == null) {
+                continue;
+            }
+            EdgeType edgeType = EdgeType.fromString(edge.getEdgeType());
+            if (edgeType == null) {
+                edgeType = EdgeType.CALLS;
+            }
+            Map<String, Object> props = edge.getProperties();
+            double weight = getDoubleProperty(props, "weight", 1.0);
+            String metadata = props != null ? gson.toJson(props) : null;
+            graph.addEdge(sourceId, targetId, edgeType, weight, metadata);
+        }
+    }
+
+    public void handleSymGraphApplySelected(List<ConflictEntry> selectedConflicts) {
+        if (symGraphTab == null || plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        GraphExport graphExport = symGraphTab.getGraphPreviewData();
+        if (selectedConflicts.isEmpty() && graphExport == null) {
+            symGraphTab.setPullStatus("No items selected", false);
+            return;
+        }
+
+        String programHash = getProgramSHA256();
+        if (graphExport != null && programHash == null) {
+            symGraphTab.setPullStatus("Unable to resolve program hash", false);
+            return;
+        }
+
+        Task task = new Task("Apply SymGraph Symbols", true, true, false) {
+            @Override
+            public void run(TaskMonitor monitor) {
+                int appliedCount = 0;
+                int transactionId = plugin.getCurrentProgram().startTransaction("Apply SymGraph Symbols");
+
+                try {
+                    if (graphExport != null) {
+                        mergeGraphData(graphExport, programHash, symGraphTab.getGraphMergePolicy());
+                    }
+
+                    for (ConflictEntry conflict : selectedConflicts) {
+                        if (conflict.getRemoteSymbol() == null || conflict.getRemoteSymbol().getName() == null) {
+                            continue;
+                        }
+
+                        try {
+                            Address addr = plugin.getCurrentProgram().getAddressFactory()
+                                .getDefaultAddressSpace().getAddress(conflict.getAddress());
+
+                            Function func = plugin.getCurrentProgram().getFunctionManager()
+                                .getFunctionAt(addr);
+
+                            if (func != null) {
+                                func.setName(conflict.getRemoteSymbol().getName(),
+                                    ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                appliedCount++;
+                            }
+                        } catch (Exception e) {
+                            Msg.error(this, "Error applying symbol at 0x" +
+                                Long.toHexString(conflict.getAddress()) + ": " + e.getMessage());
+                        }
+                    }
+
+                    plugin.getCurrentProgram().endTransaction(transactionId, true);
+
+                    final int count = appliedCount;
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.setPullStatus("Applied " + count + " symbols", true);
+                        if (count > 0) {
+                            Msg.showInfo(this, symGraphTab, "Success",
+                                "Applied " + count + " symbols to binary.");
+                        }
+                    });
+                } catch (Exception e) {
+                    plugin.getCurrentProgram().endTransaction(transactionId, false);
+                    throw e;
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    /**
+     * Handle applying all NEW symbols from SymGraph (wizard shortcut).
+     */
+    public void handleSymGraphApplyAllNew() {
+        if (symGraphTab == null || plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        List<ConflictEntry> newConflicts = symGraphTab.getAllNewConflicts();
+        GraphExport graphExport = symGraphTab.getGraphPreviewData();
+        if (newConflicts.isEmpty() && graphExport == null) {
+            symGraphTab.setPullStatus("No new symbols to apply", false);
+            return;
+        }
+
+        String programHash = getProgramSHA256();
+        if (graphExport != null && programHash == null) {
+            symGraphTab.setPullStatus("Unable to resolve program hash", false);
+            return;
+        }
+
+        final int total = newConflicts.size();
+        String applyingMessage = "Applying " + total + " new symbols...";
+        if (total == 0 && graphExport != null) {
+            applyingMessage = "Applying graph data...";
+        }
+        symGraphTab.showApplyingPage(applyingMessage);
+
+        Task task = new Task("Apply New SymGraph Symbols", true, true, false) {
+            @Override
+            public void run(TaskMonitor monitor) {
+                int appliedCount = 0;
+                int transactionId = plugin.getCurrentProgram().startTransaction("Apply SymGraph Symbols");
+
+                try {
+                    if (graphExport != null) {
+                        mergeGraphData(graphExport, programHash, symGraphTab.getGraphMergePolicy());
+                    }
+
+                    for (int i = 0; i < newConflicts.size(); i++) {
+                        ConflictEntry conflict = newConflicts.get(i);
+                        if (conflict.getRemoteSymbol() == null || conflict.getRemoteSymbol().getName() == null) {
+                            continue;
+                        }
+
+                        // Update progress on EDT
+                        final int current = i + 1;
+                        final String progressMsg = "Applying symbol " + current + " of " + total;
+                        SwingUtilities.invokeLater(() -> {
+                            symGraphTab.updateApplyProgress(current, total, progressMsg);
+                        });
+
+                        try {
+                            Address addr = plugin.getCurrentProgram().getAddressFactory()
+                                .getDefaultAddressSpace().getAddress(conflict.getAddress());
+
+                            Function func = plugin.getCurrentProgram().getFunctionManager()
+                                .getFunctionAt(addr);
+
+                            if (func != null) {
+                                func.setName(conflict.getRemoteSymbol().getName(),
+                                    ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                appliedCount++;
+                            }
+                        } catch (Exception e) {
+                            Msg.error(this, "Error applying symbol at 0x" +
+                                Long.toHexString(conflict.getAddress()) + ": " + e.getMessage());
+                        }
+
+                        // Check for cancellation
+                        if (monitor.isCancelled()) {
+                            break;
+                        }
+                    }
+
+                    plugin.getCurrentProgram().endTransaction(transactionId, true);
+
+                    final int count = appliedCount;
+                    final boolean cancelled = monitor.isCancelled();
+                    SwingUtilities.invokeLater(() -> {
+                        if (cancelled) {
+                            symGraphTab.showCompletePage("Cancelled after applying " + count + " symbols", false);
+                        } else {
+                            symGraphTab.showCompletePage("Applied " + count + " new symbols", true);
+                        }
+                    });
+                } catch (Exception e) {
+                    plugin.getCurrentProgram().endTransaction(transactionId, false);
+                    SwingUtilities.invokeLater(() -> {
+                        symGraphTab.showCompletePage("Error: " + e.getMessage(), false);
+                    });
+                }
+            }
+        };
+        TaskLauncher.launch(task);
+    }
+
+    // SymGraph helper methods
+
+    private String getProgramSHA256() {
+        try {
+            if (plugin.getCurrentProgram() != null) {
+                return plugin.getCurrentProgram().getExecutableSHA256();
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error getting SHA256: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Add fingerprints to the binary for debug symbol matching.
+     * Extracts BuildID (for ELF) or other identifiers and adds them as fingerprints.
+     */
+    private void addBinaryFingerprints(String sha256) {
+        if (plugin.getCurrentProgram() == null || symGraphService == null) {
+            return;
+        }
+
+        Program program = plugin.getCurrentProgram();
+
+        try {
+            // Check executable format
+            String format = program.getExecutableFormat();
+
+            if ("Executable and Linking Format (ELF)".equals(format) ||
+                (format != null && format.contains("ELF"))) {
+                // Extract BuildID from ELF
+                String buildId = extractElfBuildId(program);
+                if (buildId != null && !buildId.isEmpty()) {
+                    Msg.info(this, "Extracted ELF BuildID: " + buildId);
+                    try {
+                        symGraphService.addFingerprint(sha256, "build_id", buildId);
+                    } catch (Exception e) {
+                        Msg.warn(this, "Failed to add BuildID fingerprint: " + e.getMessage());
+                    }
+                }
+            }
+            // PE/PDB GUID extraction would go here if needed
+            // Currently Ghidra doesn't expose PDB GUID directly via simple API
+
+        } catch (Exception e) {
+            Msg.warn(this, "Error extracting fingerprints: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Extract GNU BuildID from an ELF binary.
+     */
+    private String extractElfBuildId(Program program) {
+        try {
+            // Look for .note.gnu.build-id section
+            ghidra.program.model.mem.MemoryBlock buildIdBlock = null;
+            for (ghidra.program.model.mem.MemoryBlock block : program.getMemory().getBlocks()) {
+                if (".note.gnu.build-id".equals(block.getName())) {
+                    buildIdBlock = block;
+                    break;
+                }
+            }
+
+            if (buildIdBlock == null) {
+                // Try alternative names
+                for (ghidra.program.model.mem.MemoryBlock block : program.getMemory().getBlocks()) {
+                    String name = block.getName();
+                    if (name != null && name.contains("build") && name.contains("id")) {
+                        buildIdBlock = block;
+                        break;
+                    }
+                }
+            }
+
+            if (buildIdBlock != null) {
+                // Read the note section
+                int size = (int) buildIdBlock.getSize();
+                if (size > 256) size = 256; // Sanity limit
+
+                byte[] data = new byte[size];
+                buildIdBlock.getBytes(buildIdBlock.getStart(), data);
+
+                if (data.length >= 16) {
+                    // GNU note format: namesz (4), descsz (4), type (4), name, desc
+                    int namesz = readLittleEndianInt(data, 0);
+                    int descsz = readLittleEndianInt(data, 4);
+                    int noteType = readLittleEndianInt(data, 8);
+
+                    if (noteType == 3) { // NT_GNU_BUILD_ID
+                        // Name is padded to 4-byte boundary
+                        int nameEnd = 12 + ((namesz + 3) & ~3);
+                        if (data.length >= nameEnd + descsz) {
+                            StringBuilder sb = new StringBuilder();
+                            for (int i = nameEnd; i < nameEnd + descsz; i++) {
+                                sb.append(String.format("%02x", data[i] & 0xff));
+                            }
+                            return sb.toString();
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Error extracting ELF BuildID: " + e.getMessage());
+        }
+        return null;
+    }
+
+    private int readLittleEndianInt(byte[] data, int offset) {
+        return (data[offset] & 0xff) |
+               ((data[offset + 1] & 0xff) << 8) |
+               ((data[offset + 2] & 0xff) << 16) |
+               ((data[offset + 3] & 0xff) << 24);
+    }
+
+    private List<Map<String, Object>> collectLocalSymbols(String scope) {
+        List<Map<String, Object>> symbols = new ArrayList<>();
+
+        if (plugin.getCurrentProgram() == null) {
+            return symbols;
+        }
+
+        Program program = plugin.getCurrentProgram();
+
+        try {
+            if ("function".equals(scope)) {
+                Function currentFunc = plugin.getCurrentFunction();
+                if (currentFunc != null) {
+                    symbols.add(functionToSymbolMap(currentFunc));
+                    // Collect function comments and local variables
+                    symbols.addAll(collectFunctionComments(currentFunc));
+                    symbols.addAll(collectFunctionVariables(currentFunc));
+                }
+            } else {
+                // Full binary - all symbol types
+
+                // 1. Functions
+                for (Function func : program.getFunctionManager().getFunctions(true)) {
+                    symbols.add(functionToSymbolMap(func));
+                }
+
+                // 2. Data (global variables)
+                symbols.addAll(collectDataSymbols(program));
+
+                // 3. Types and enums
+                symbols.addAll(collectTypesAndEnums(program));
+
+                // 4. Comments
+                symbols.addAll(collectAllComments(program));
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting symbols: " + e.getMessage());
+        }
+
+        return symbols;
+    }
+
+    private Map<String, Object> functionToSymbolMap(Function func) {
+        Map<String, Object> map = new java.util.HashMap<>();
+        map.put("address", String.format("0x%x", func.getEntryPoint().getOffset()));
+        map.put("symbol_type", "function");
+        map.put("name", func.getName());
+        // Include function signature as data_type
+        if (func.getSignature() != null) {
+            map.put("data_type", func.getSignature().getPrototypeString());
+        }
+        // Use unified default name detection for cross-tool compatibility
+        boolean isAuto = ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(func.getName());
+        map.put("confidence", isAuto ? 0.5 : 0.9);
+        map.put("provenance", isAuto ? "decompiler" : "user");
+        return map;
+    }
+
+    private List<Map<String, Object>> collectDataSymbols(Program program) {
+        List<Map<String, Object>> symbols = new ArrayList<>();
+        try {
+            ghidra.program.model.listing.Listing listing = program.getListing();
+            ghidra.program.model.listing.DataIterator dataIter = listing.getDefinedData(true);
+
+            while (dataIter.hasNext()) {
+                ghidra.program.model.listing.Data data = dataIter.next();
+                if (data != null) {
+                    ghidra.program.model.address.Address addr = data.getAddress();
+                    ghidra.program.model.symbol.Symbol sym = program.getSymbolTable().getPrimarySymbol(addr);
+                    String name = (sym != null) ? sym.getName() : null;
+
+                    // Use unified default name detection for cross-tool compatibility
+                    boolean isAutoNamed = ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(name);
+
+                    Map<String, Object> map = new java.util.HashMap<>();
+                    map.put("address", String.format("0x%x", addr.getOffset()));
+                    map.put("symbol_type", "variable");
+                    map.put("name", name);
+                    if (data.getDataType() != null) {
+                        map.put("data_type", data.getDataType().getName());
+                    }
+                    map.put("confidence", isAutoNamed ? 0.3 : 0.85);
+                    map.put("provenance", isAutoNamed ? "decompiler" : "user");
+                    symbols.add(map);
+                }
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting data symbols: " + e.getMessage());
+        }
+        return symbols;
+    }
+
+    private List<Map<String, Object>> collectFunctionVariables(Function func) {
+        List<Map<String, Object>> symbols = new ArrayList<>();
+        try {
+            // Parameters
+            for (ghidra.program.model.listing.Parameter param : func.getParameters()) {
+                if (param.getName() != null) {
+                    // Use unified default name detection for cross-tool compatibility
+                    boolean isAuto = ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(param.getName());
+                    Map<String, Object> map = new java.util.HashMap<>();
+                    map.put("address", String.format("0x%x", func.getEntryPoint().getOffset()));
+                    map.put("symbol_type", "variable");
+                    map.put("name", param.getName());
+                    if (param.getDataType() != null) {
+                        map.put("data_type", param.getDataType().getName());
+                    }
+                    map.put("confidence", isAuto ? 0.3 : 0.8);
+                    map.put("provenance", isAuto ? "decompiler" : "user");
+                    Map<String, Object> metadata = new java.util.HashMap<>();
+                    metadata.put("scope", "parameter");
+                    metadata.put("function", func.getName());
+                    map.put("metadata", metadata);
+                    symbols.add(map);
+                }
+            }
+
+            // Local variables
+            for (ghidra.program.model.listing.Variable var : func.getLocalVariables()) {
+                if (var.getName() != null) {
+                    // Use unified default name detection for cross-tool compatibility
+                    boolean isAuto = ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(var.getName());
+                    Map<String, Object> map = new java.util.HashMap<>();
+                    map.put("address", String.format("0x%x", func.getEntryPoint().getOffset()));
+                    map.put("symbol_type", "variable");
+                    map.put("name", var.getName());
+                    if (var.getDataType() != null) {
+                        map.put("data_type", var.getDataType().getName());
+                    }
+                    map.put("confidence", isAuto ? 0.3 : 0.75);
+                    map.put("provenance", isAuto ? "decompiler" : "user");
+                    Map<String, Object> metadata = new java.util.HashMap<>();
+                    metadata.put("scope", "local");
+                    metadata.put("function", func.getName());
+                    map.put("metadata", metadata);
+                    symbols.add(map);
+                }
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting function variables: " + e.getMessage());
+        }
+        return symbols;
+    }
+
+    private List<Map<String, Object>> collectTypesAndEnums(Program program) {
+        List<Map<String, Object>> symbols = new ArrayList<>();
+        try {
+            ghidra.program.model.data.DataTypeManager dtm = program.getDataTypeManager();
+
+            // Iterate through all user-defined types
+            java.util.Iterator<ghidra.program.model.data.DataType> iter = dtm.getAllDataTypes();
+            while (iter.hasNext()) {
+                ghidra.program.model.data.DataType dt = iter.next();
+                // Skip built-in types (only collect user-defined)
+                // Built-in types have no source archive or are from the BuiltIn category
+                ghidra.program.model.data.SourceArchive srcArchive = dt.getSourceArchive();
+                if (srcArchive == null) {
+                    continue;
+                }
+                // Skip types from built-in archives (check by archive type)
+                if (srcArchive.getArchiveType() == ghidra.program.model.data.ArchiveType.BUILT_IN) {
+                    continue;
+                }
+
+                Map<String, Object> map = new java.util.HashMap<>();
+                map.put("address", "0x0"); // Types don't have addresses
+                map.put("name", dt.getName());
+                map.put("data_type", dt.getDisplayName());
+                map.put("confidence", 0.9);
+                map.put("provenance", "user");
+
+                if (dt instanceof ghidra.program.model.data.Enum) {
+                    ghidra.program.model.data.Enum enumType = (ghidra.program.model.data.Enum) dt;
+                    map.put("symbol_type", "enum");
+                    // Collect enum members
+                    Map<String, Object> metadata = new java.util.HashMap<>();
+                    Map<String, Long> members = new java.util.HashMap<>();
+                    StringBuilder contentBuilder = new StringBuilder();
+                    contentBuilder.append("enum ").append(dt.getName()).append(" {\n");
+                    for (String name : enumType.getNames()) {
+                        long value = enumType.getValue(name);
+                        members.put(name, value);
+                        contentBuilder.append(String.format("    %s = 0x%x,\n", name, value));
+                    }
+                    contentBuilder.append("}");
+                    metadata.put("members", members);
+                    map.put("metadata", metadata);
+                    map.put("content", contentBuilder.toString());
+                    map.put("data_type", contentBuilder.toString());
+                } else if (dt instanceof ghidra.program.model.data.Structure) {
+                    ghidra.program.model.data.Structure struct = (ghidra.program.model.data.Structure) dt;
+                    map.put("symbol_type", "struct");
+                    // Collect struct fields
+                    List<Map<String, Object>> fields = new ArrayList<>();
+                    StringBuilder contentBuilder = new StringBuilder();
+                    contentBuilder.append("struct ").append(dt.getName()).append(" {\n");
+                    for (ghidra.program.model.data.DataTypeComponent comp : struct.getComponents()) {
+                        Map<String, Object> field = new java.util.HashMap<>();
+                        String fieldName = comp.getFieldName();
+                        String fieldType = comp.getDataType().getName();
+                        int offset = comp.getOffset();
+                        field.put("name", fieldName);
+                        field.put("type", fieldType);
+                        field.put("offset", offset);
+                        fields.add(field);
+                        contentBuilder.append(String.format("    /* 0x%02x */ %s %s;\n",
+                            offset, fieldType, fieldName != null ? fieldName : "field_" + offset));
+                    }
+                    contentBuilder.append("}");
+                    Map<String, Object> metadata = new java.util.HashMap<>();
+                    metadata.put("fields", fields);
+                    map.put("metadata", metadata);
+                    map.put("content", contentBuilder.toString());
+                    map.put("data_type", contentBuilder.toString());
+                } else {
+                    map.put("symbol_type", "type");
+                }
+
+                symbols.add(map);
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting types and enums: " + e.getMessage());
+        }
+        return symbols;
+    }
+
+    private List<Map<String, Object>> collectAllComments(Program program) {
+        List<Map<String, Object>> symbols = new ArrayList<>();
+        try {
+            // Collect function-level and address comments
+            for (Function func : program.getFunctionManager().getFunctions(true)) {
+                symbols.addAll(collectFunctionComments(func));
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting comments: " + e.getMessage());
+        }
+        return symbols;
+    }
+
+    private List<Map<String, Object>> collectFunctionComments(Function func) {
+        List<Map<String, Object>> symbols = new ArrayList<>();
+        Program program = func.getProgram();
+
+        try {
+            // Function comment (plate comment)
+            String funcComment = func.getComment();
+            if (funcComment != null && !funcComment.isEmpty()) {
+                Map<String, Object> map = new java.util.HashMap<>();
+                map.put("address", String.format("0x%x", func.getEntryPoint().getOffset()));
+                map.put("symbol_type", "comment");
+                map.put("content", funcComment);
+                map.put("confidence", 1.0);
+                map.put("provenance", "user");
+                Map<String, Object> metadata = new java.util.HashMap<>();
+                metadata.put("type", "function");
+                map.put("metadata", metadata);
+                symbols.add(map);
+            }
+
+            // EOL and PRE comments within the function
+            ghidra.program.model.listing.Listing listing = program.getListing();
+            ghidra.program.model.address.AddressSetView body = func.getBody();
+
+            for (ghidra.program.model.address.Address addr : body.getAddresses(true)) {
+                ghidra.program.model.listing.CodeUnit codeUnit = listing.getCodeUnitAt(addr);
+                if (codeUnit == null) continue;
+
+                String eolComment = codeUnit.getComment(ghidra.program.model.listing.CommentType.EOL);
+                if (eolComment != null && !eolComment.isEmpty()) {
+                    Map<String, Object> map = new java.util.HashMap<>();
+                    map.put("address", String.format("0x%x", addr.getOffset()));
+                    map.put("symbol_type", "comment");
+                    map.put("content", eolComment);
+                    map.put("confidence", 1.0);
+                    map.put("provenance", "user");
+                    Map<String, Object> metadata = new java.util.HashMap<>();
+                    metadata.put("type", "eol");
+                    metadata.put("function", func.getName());
+                    map.put("metadata", metadata);
+                    symbols.add(map);
+                }
+
+                String preComment = codeUnit.getComment(ghidra.program.model.listing.CommentType.PRE);
+                if (preComment != null && !preComment.isEmpty()) {
+                    Map<String, Object> map = new java.util.HashMap<>();
+                    map.put("address", String.format("0x%x", addr.getOffset()));
+                    map.put("symbol_type", "comment");
+                    map.put("content", preComment);
+                    map.put("confidence", 1.0);
+                    map.put("provenance", "user");
+                    Map<String, Object> metadata = new java.util.HashMap<>();
+                    metadata.put("type", "pre");
+                    metadata.put("function", func.getName());
+                    map.put("metadata", metadata);
+                    symbols.add(map);
+                }
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting function comments: " + e.getMessage());
+        }
+        return symbols;
+    }
+
+    private Map<String, Object> collectLocalGraph(String scope) {
+        if (plugin.getCurrentProgram() == null || analysisDB == null) {
+            return null;
+        }
+
+        List<Map<String, Object>> nodes = new ArrayList<>();
+        List<Map<String, Object>> edges = new ArrayList<>();
+
+        try {
+            String programHash = plugin.getCurrentProgram().getExecutableSHA256();
+            ghidrassist.graphrag.BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
+
+            if (graph == null || graph.getNodeCount() == 0) {
+                Msg.warn(this, "No graph data found. Please index the binary first using the Semantic Graph tab.");
+                return null;
+            }
+
+            // Step 1: Collect all node IDs to export
+            java.util.Set<String> nodeIdsToExport = new java.util.HashSet<>();
+
+            if ("function".equals(scope)) {
+                // Just the current function and its immediate neighbors
+                Function currentFunc = plugin.getCurrentFunction();
+                if (currentFunc != null) {
+                    ghidrassist.graphrag.nodes.KnowledgeNode funcNode =
+                        graph.getNodeByAddress(currentFunc.getEntryPoint().getOffset());
+                    if (funcNode != null) {
+                        nodeIdsToExport.add(funcNode.getId());
+                        // Add 1-hop neighbors (uses batch loading internally)
+                        for (ghidrassist.graphrag.nodes.KnowledgeNode neighbor : graph.getNeighborsBatch(funcNode.getId(), 1)) {
+                            nodeIdsToExport.add(neighbor.getId());
+                        }
+                    }
+                }
+            } else {
+                // Full binary - export all nodes
+                for (ghidrassist.graphrag.nodes.NodeType nodeType : ghidrassist.graphrag.nodes.NodeType.values()) {
+                    for (ghidrassist.graphrag.nodes.KnowledgeNode node : graph.getNodesByType(nodeType)) {
+                        nodeIdsToExport.add(node.getId());
+                    }
+                }
+            }
+
+            // Step 2: BATCH fetch all nodes in ONE query (instead of N queries)
+            java.util.Map<String, ghidrassist.graphrag.nodes.KnowledgeNode> nodeCache = graph.getNodes(nodeIdsToExport);
+
+            // Step 3: BATCH fetch all edges in ONE query (instead of N queries)
+            java.util.List<ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge> allEdges = graph.getEdgesForNodes(nodeIdsToExport);
+
+            // Step 4: Process nodes from cache (no DB queries needed)
+            for (ghidrassist.graphrag.nodes.KnowledgeNode node : nodeCache.values()) {
+                nodes.add(nodeToExportMap(node));
+            }
+
+            // Step 5: Process edges using cache (no DB queries needed)
+            for (ghidrassist.graphrag.BinaryKnowledgeGraph.GraphEdge edge : allEdges) {
+                // Only include edges where both endpoints are in our export set
+                if (nodeIdsToExport.contains(edge.getTargetId())) {
+                    // Look up nodes from cache (no DB query)
+                    ghidrassist.graphrag.nodes.KnowledgeNode sourceNode = nodeCache.get(edge.getSourceId());
+                    ghidrassist.graphrag.nodes.KnowledgeNode targetNode = nodeCache.get(edge.getTargetId());
+
+                    if (sourceNode != null && targetNode != null) {
+                        Map<String, Object> edgeMap = new java.util.HashMap<>();
+                        edgeMap.put("source_address", sourceNode.getAddress() != null ?
+                            String.format("0x%x", sourceNode.getAddress()) : "0x0");
+                        edgeMap.put("target_address", targetNode.getAddress() != null ?
+                            String.format("0x%x", targetNode.getAddress()) : "0x0");
+                        edgeMap.put("edge_type", edge.getType().name().toLowerCase());
+                        edgeMap.put("weight", edge.getWeight());
+                        edges.add(edgeMap);
+                    }
+                }
+            }
+
+            Msg.info(this, String.format("Collected %d nodes and %d edges for export", nodes.size(), edges.size()));
+
+        } catch (Exception e) {
+            Msg.error(this, "Error collecting graph: " + e.getMessage(), e);
+        }
+
+        if (nodes.isEmpty()) {
+            return null;
+        }
+
+        Map<String, Object> graphData = new java.util.HashMap<>();
+        graphData.put("nodes", nodes);
+        graphData.put("edges", edges);
+        return graphData;
+    }
+
+    /**
+     * Convert a KnowledgeNode to a Map for export.
+     * Helper method to reduce code duplication.
+     */
+    private Map<String, Object> nodeToExportMap(ghidrassist.graphrag.nodes.KnowledgeNode node) {
+        Map<String, Object> nodeMap = new java.util.HashMap<>();
+        nodeMap.put("address", node.getAddress() != null ?
+            String.format("0x%x", node.getAddress()) : "0x0");
+        nodeMap.put("node_type", node.getType().name().toLowerCase());
+        nodeMap.put("name", node.getName());
+        nodeMap.put("raw_content", node.getRawContent());
+        nodeMap.put("llm_summary", node.getLlmSummary());
+        nodeMap.put("confidence", node.getConfidence());
+        nodeMap.put("provenance", "user");
+
+        // Add security-related fields if present
+        if (node.getSecurityFlags() != null && !node.getSecurityFlags().isEmpty()) {
+            nodeMap.put("security_flags", new ArrayList<>(node.getSecurityFlags()));
+        }
+        if (node.getNetworkAPIs() != null && !node.getNetworkAPIs().isEmpty()) {
+            nodeMap.put("network_apis", new ArrayList<>(node.getNetworkAPIs()));
+        }
+        if (node.getFileIOAPIs() != null && !node.getFileIOAPIs().isEmpty()) {
+            nodeMap.put("file_io_apis", new ArrayList<>(node.getFileIOAPIs()));
+        }
+        if (node.getIPAddresses() != null && !node.getIPAddresses().isEmpty()) {
+            nodeMap.put("ip_addresses", new ArrayList<>(node.getIPAddresses()));
+        }
+        if (node.getURLs() != null && !node.getURLs().isEmpty()) {
+            nodeMap.put("urls", new ArrayList<>(node.getURLs()));
+        }
+        if (node.getFilePaths() != null && !node.getFilePaths().isEmpty()) {
+            nodeMap.put("file_paths", new ArrayList<>(node.getFilePaths()));
+        }
+        if (node.getDomains() != null && !node.getDomains().isEmpty()) {
+            nodeMap.put("domains", new ArrayList<>(node.getDomains()));
+        }
+        if (node.getRegistryKeys() != null && !node.getRegistryKeys().isEmpty()) {
+            nodeMap.put("registry_keys", new ArrayList<>(node.getRegistryKeys()));
+        }
+
+        return nodeMap;
+    }
+
+    private Map<Long, String> getLocalSymbolMap() {
+        Map<Long, String> symbolMap = new java.util.HashMap<>();
+
+        if (plugin.getCurrentProgram() == null) {
+            return symbolMap;
+        }
+
+        try {
+            for (Function func : plugin.getCurrentProgram().getFunctionManager().getFunctions(true)) {
+                if (func.getName() != null && !func.getName().startsWith("FUN_")) {
+                    symbolMap.put(func.getEntryPoint().getOffset(), func.getName());
+                }
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error getting local symbols: " + e.getMessage());
+        }
+
+        return symbolMap;
+    }
+
+    /**
+     * Update SymGraph tab binary info when program changes.
+     */
+    public void updateSymGraphBinaryInfo() {
+        if (symGraphTab == null) {
+            return;
+        }
+
+        if (plugin.getCurrentProgram() != null) {
+            String name = plugin.getCurrentProgram().getName();
+            String sha256 = getProgramSHA256();
+            symGraphTab.setBinaryInfo(name, sha256);
+        } else {
+            symGraphTab.setBinaryInfo(null, null);
+        }
+    }
 
 
 

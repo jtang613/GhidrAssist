@@ -68,6 +68,9 @@ What vulnerabilities exist in #func?
 
 When **Use MCP Tools** is enabled, the LLM can call tools to gather information:
 
+![MCP Tool Call](../screenshots/query-mcp-tool-call.png)
+<!-- SCREENSHOT: Query response showing tool calls with tool name, parameters, and results -->
+
 Typical tool usage:
 - Decompile current function
 - Get cross-references
@@ -82,6 +85,9 @@ The ReAct agent performs multi-step investigations:
 2. **Investigate**: Call tools to gather information
 3. **Reflect**: Adjust plan if needed
 4. **Synthesize**: Provide final answer
+
+![ReAct Progress](../screenshots/query-react-progress.png)
+<!-- SCREENSHOT: Query tab showing ReAct plan with checkboxes, current step, and tool calls -->
 
 **Use ReAct for**:
 - Complex investigations

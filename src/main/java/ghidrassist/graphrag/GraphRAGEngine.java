@@ -67,7 +67,7 @@ public class GraphRAGEngine {
         Msg.info(this, "getSemanticAnalysis: Looking up function name: " + functionName);
         KnowledgeNode node = graph.getNodeByName(functionName);
         Msg.info(this, "getSemanticAnalysis: Graph lookup returned node=" + (node != null ? node.getName() : "null"));
-        return buildSemanticAnalysis(node, node != null ? node.getAddress() : 0);
+        return buildSemanticAnalysis(node, node != null && node.getAddress() != null ? node.getAddress() : 0);
     }
 
     private SemanticAnalysis buildSemanticAnalysis(KnowledgeNode node, long address) {
@@ -90,11 +90,13 @@ public class GraphRAGEngine {
 
         // Get callers and callees
         List<String> callers = graph.getCallers(node.getId()).stream()
-                .map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress()))
+                .map(n -> n.getName() != null ? n.getName() :
+                        (n.getAddress() != null ? String.format("sub_%x", n.getAddress()) : "unknown"))
                 .collect(Collectors.toList());
 
         List<String> callees = graph.getCallees(node.getId()).stream()
-                .map(n -> n.getName() != null ? n.getName() : String.format("sub_%x", n.getAddress()))
+                .map(n -> n.getName() != null ? n.getName() :
+                        (n.getAddress() != null ? String.format("sub_%x", n.getAddress()) : "unknown"))
                 .collect(Collectors.toList());
 
         // Get community if available
@@ -148,7 +150,7 @@ public class GraphRAGEngine {
         List<KnowledgeNode> callers = graph.getCallers(sourceNode.getId());
         for (KnowledgeNode caller : callers) {
             for (KnowledgeNode sibling : graph.getCallees(caller.getId())) {
-                if (!addedIds.contains(sibling.getId()) && sibling.getType() == NodeType.FUNCTION) {
+                if (!addedIds.contains(sibling.getId()) && sibling.getType() == NodeType.FUNCTION && sibling.getAddress() != null) {
                     addedIds.add(sibling.getId());
                     results.add(new SimilarFunction(
                             sibling.getName(),
@@ -168,7 +170,7 @@ public class GraphRAGEngine {
             List<KnowledgeNode> callees = graph.getCallees(sourceNode.getId());
             for (KnowledgeNode callee : callees) {
                 for (KnowledgeNode sibling : graph.getCallers(callee.getId())) {
-                    if (!addedIds.contains(sibling.getId()) && sibling.getType() == NodeType.FUNCTION) {
+                    if (!addedIds.contains(sibling.getId()) && sibling.getType() == NodeType.FUNCTION && sibling.getAddress() != null) {
                         addedIds.add(sibling.getId());
                         results.add(new SimilarFunction(
                                 sibling.getName(),
@@ -192,7 +194,7 @@ public class GraphRAGEngine {
                 String query = String.join(" OR ", keywords);
                 List<KnowledgeNode> ftsResults = graph.ftsSearch(query, limit - results.size() + 5);
                 for (KnowledgeNode match : ftsResults) {
-                    if (!addedIds.contains(match.getId()) && match.getType() == NodeType.FUNCTION) {
+                    if (!addedIds.contains(match.getId()) && match.getType() == NodeType.FUNCTION && match.getAddress() != null) {
                         addedIds.add(match.getId());
                         results.add(new SimilarFunction(
                                 match.getName(),
@@ -263,6 +265,10 @@ public class GraphRAGEngine {
                 graph.getCallers(nodeId) : graph.getCallees(nodeId);
 
         for (KnowledgeNode neighbor : neighbors) {
+            // Skip nodes without addresses (external functions, modules, etc.)
+            if (neighbor.getAddress() == null) {
+                continue;
+            }
             if (visited.contains(neighbor.getId())) continue;
             visited.add(neighbor.getId());
 

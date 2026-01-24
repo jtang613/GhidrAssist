@@ -1312,18 +1312,23 @@ public class BinaryKnowledgeGraph {
      */
     private List<KnowledgeNode> ftsSearchInternal(String query, int limit, boolean isRetry) {
         List<KnowledgeNode> results = new ArrayList<>();
-        String sql = "SELECT id FROM node_fts WHERE node_fts MATCH ? LIMIT ?";
+        // Join with graph_nodes to filter by binary_id BEFORE applying LIMIT
+        String sql = "SELECT node_fts.id FROM node_fts, graph_nodes "
+                   + "WHERE node_fts MATCH ? "
+                   + "AND graph_nodes.rowid = node_fts.rowid "
+                   + "AND graph_nodes.binary_id = ? "
+                   + "LIMIT ?";
 
         try (PreparedStatement stmt = connection.prepareStatement(sql)) {
-            // Escape special FTS5 characters and prepare query
             String ftsQuery = escapeFtsQuery(query);
             stmt.setString(1, ftsQuery);
-            stmt.setInt(2, limit);
+            stmt.setString(2, binaryId);
+            stmt.setInt(3, limit);
 
             ResultSet rs = stmt.executeQuery();
             while (rs.next()) {
                 KnowledgeNode node = getNode(rs.getString("id"));
-                if (node != null && binaryId.equals(node.getBinaryId())) {
+                if (node != null) {
                     results.add(node);
                 }
             }
@@ -1391,11 +1396,10 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Delete all graph data for this binary.
-     * Clears: edges, nodes, communities, and FTS index entries.
+     * Clears: edges, nodes, and communities.
+     * FTS is synced separately via rebuildFts() after batch operations.
      */
     public void clearGraph() {
-        // Delete edges first - they reference nodes but don't have binary_id
-        // Use subquery to find edges connected to this binary's nodes
         String deleteEdges = "DELETE FROM graph_edges WHERE " +
                 "source_id IN (SELECT id FROM graph_nodes WHERE binary_id = ?) OR " +
                 "target_id IN (SELECT id FROM graph_nodes WHERE binary_id = ?)";
@@ -1406,7 +1410,6 @@ public class BinaryKnowledgeGraph {
              PreparedStatement stmtNodes = connection.prepareStatement(deleteNodes);
              PreparedStatement stmtCommunities = connection.prepareStatement(deleteCommunities)) {
 
-            // Order matters: edges first, then nodes (FTS trigger cleans up), then communities
             stmtEdges.setString(1, binaryId);
             stmtEdges.setString(2, binaryId);
             int edgesDeleted = stmtEdges.executeUpdate();
@@ -1417,7 +1420,6 @@ public class BinaryKnowledgeGraph {
             stmtCommunities.setString(1, binaryId);
             int communitiesDeleted = stmtCommunities.executeUpdate();
 
-            // Clear in-memory graph
             memoryGraph = new DefaultDirectedGraph<>(LabeledEdge.class);
             nodeCount = 0;
             edgeCount = 0;
@@ -1426,6 +1428,16 @@ public class BinaryKnowledgeGraph {
                     binaryId, edgesDeleted, nodesDeleted, communitiesDeleted));
         } catch (SQLException e) {
             Msg.error(this, "Failed to clear graph: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Rebuild the FTS index from current graph_nodes data.
+     * Call after batch operations to sync FTS with the base table.
+     */
+    public void rebuildFts() {
+        if (analysisDB != null) {
+            analysisDB.rebuildFts();
         }
     }
 
@@ -1846,22 +1858,10 @@ public class BinaryKnowledgeGraph {
     }
 
     private String escapeFtsQuery(String query) {
-        // FTS5 has many special characters and operators that can cause errors:
-        // - Column filter: column:term
-        // - Phrase: "phrase"
-        // - Prefix: term*
-        // - Boolean: AND, OR, NOT
-        // - Grouping: ( )
-        // - Required/excluded: +term, -term
-        // - NEAR operator
-        //
-        // The safest approach is to quote each term individually to make them literal.
-
         if (query == null || query.trim().isEmpty()) {
-            return "\"\""; // Empty query
+            return "\"\"";
         }
 
-        // Split into words and quote each one
         String[] words = query.trim().split("\\s+");
         StringBuilder sb = new StringBuilder();
 
@@ -1869,17 +1869,18 @@ public class BinaryKnowledgeGraph {
             String word = words[i];
             if (word.isEmpty()) continue;
 
-            // Escape internal quotes by doubling them
-            word = word.replace("\"", "\"\"");
+            // Skip FTS5 operator keywords so they don't become literal terms
+            if (word.equalsIgnoreCase("OR") || word.equalsIgnoreCase("AND") || word.equalsIgnoreCase("NOT")) {
+                continue;
+            }
 
-            // Remove characters that are problematic even inside quotes
+            word = word.replace("\"", "\"\"");
             word = word.replace("*", "");
 
             if (sb.length() > 0) {
-                sb.append(" ");
+                sb.append(" OR ");
             }
 
-            // Quote the word to treat it as a literal
             sb.append("\"").append(word).append("\"");
         }
 

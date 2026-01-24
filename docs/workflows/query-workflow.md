@@ -19,6 +19,9 @@ The Query tab supports:
 2. Type your question
 3. Click **Submit**
 
+![Basic Query](../screenshots/query-basic-question.png)
+<!-- SCREENSHOT: Query tab showing a simple question and streaming response -->
+
 ### Use Context Macros
 
 Macros insert context from Ghidra:
@@ -35,6 +38,9 @@ Example:
 What does #func do with user input?
 ```
 
+![Context Macro](../screenshots/query-context-macro.png)
+<!-- SCREENSHOT: Query showing #func macro and context-based response -->
+
 ### Manage Conversations
 
 - **New**: Start a new conversation
@@ -44,6 +50,9 @@ What does #func do with user input?
 ## MCP Tool Integration
 
 When **Use MCP Tools** is enabled, the LLM can call tools to gather data.
+
+![MCP Tool Call](../screenshots/query-mcp-tools.png)
+<!-- SCREENSHOT: Query conversation showing tool calls and results -->
 
 Common tool usage:
 - Decompile or disassemble
@@ -74,6 +83,12 @@ Use agentic mode for:
 2. **Investigation**: Call tools and gather evidence
 3. **Reflection**: Update the plan if needed
 4. **Synthesis**: Provide a final, evidence-based answer
+
+![ReAct Planning](../screenshots/query-react-planning.png)
+<!-- SCREENSHOT: ReAct planning checklist visible in Query tab -->
+
+![ReAct Synthesis](../screenshots/query-react-synthesis.png)
+<!-- SCREENSHOT: ReAct final response with findings and summary -->
 
 ### Stopping Early
 

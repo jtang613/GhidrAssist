@@ -579,7 +579,21 @@ public class MCPToolManager implements ToolProvider {
             // Notify on EDT for UI updates
             javax.swing.SwingUtilities.invokeLater(() -> notifyToolsUpdated());
         }
-        
+
+        @Override
+        public void onResourcesDiscovered(MCPClientAdapter client, java.util.List<ghidrassist.mcp2.resources.MCPResource> resources) {
+            // Resources are discovered but not actively managed yet
+            // Future enhancement: could add resource management similar to tools
+            Msg.debug(MCPToolManager.this, "Discovered " + resources.size() + " resources from " + serverName);
+        }
+
+        @Override
+        public void onPromptsDiscovered(MCPClientAdapter client, java.util.List<ghidrassist.mcp2.prompts.MCPPrompt> prompts) {
+            // Prompts are discovered but not actively managed yet
+            // Future enhancement: could add prompt management similar to tools
+            Msg.debug(MCPToolManager.this, "Discovered " + prompts.size() + " prompts from " + serverName);
+        }
+
         @Override
         public void onError(MCPClientAdapter client, Throwable error) {
             if (handler != null) {

@@ -35,6 +35,13 @@ public class ExplainTab extends JPanel {
     private JTextArea networkAPIsTextArea;
     private JTextArea fileIOAPIsTextArea;
 
+    // Line explanation panel components
+    private JPanel lineExplanationPanel;
+    private JEditorPane lineExplanationTextPane;
+    private String lineExplanationMarkdown = "";
+    private JSplitPane mainSplitPane;
+    private JButton lineExplanationCloseButton;
+
     public ExplainTab(TabController controller) {
         super(new BorderLayout());
         this.controller = controller;
@@ -66,8 +73,8 @@ public class ExplainTab extends JPanel {
         // Initialize buttons
         explainFunctionButton = new JButton("Explain Function");
         explainLineButton = new JButton("Explain Line");
-        explainLineButton.setEnabled(false);
-        explainLineButton.setToolTipText("Coming soon: statement/block level analysis");
+        explainLineButton.setEnabled(true);
+        explainLineButton.setToolTipText("Explain the current line at cursor position");
         clearExplainButton = new JButton("Clear");
         editSaveButton = new JButton("Edit");
 
@@ -124,6 +131,47 @@ public class ExplainTab extends JPanel {
 
         // Initially hide the security panel until we have data
         securityInfoPanel.setVisible(false);
+
+        // Initialize line explanation panel with header containing close button
+        lineExplanationPanel = new JPanel(new BorderLayout());
+        lineExplanationPanel.setBorder(BorderFactory.createEtchedBorder());
+
+        // Create header panel with title and close button
+        JPanel lineHeaderPanel = new JPanel(new BorderLayout());
+        lineHeaderPanel.setBorder(BorderFactory.createEmptyBorder(2, 5, 2, 2));
+        JLabel lineHeaderLabel = new JLabel("Line Explanation");
+        lineHeaderLabel.setFont(lineHeaderLabel.getFont().deriveFont(Font.BOLD));
+        lineHeaderPanel.add(lineHeaderLabel, BorderLayout.WEST);
+
+        // Close button (small X)
+        lineExplanationCloseButton = new JButton("\u00D7"); // Unicode multiplication sign as X
+        lineExplanationCloseButton.setMargin(new Insets(0, 4, 0, 4));
+        lineExplanationCloseButton.setFont(lineExplanationCloseButton.getFont().deriveFont(Font.BOLD, 14f));
+        lineExplanationCloseButton.setFocusPainted(false);
+        lineExplanationCloseButton.setBorderPainted(false);
+        lineExplanationCloseButton.setContentAreaFilled(false);
+        lineExplanationCloseButton.setToolTipText("Hide line explanation");
+        lineExplanationCloseButton.addActionListener(e -> clearLineExplanation());
+        lineHeaderPanel.add(lineExplanationCloseButton, BorderLayout.EAST);
+
+        lineExplanationPanel.add(lineHeaderPanel, BorderLayout.NORTH);
+
+        lineExplanationTextPane = new JEditorPane();
+        lineExplanationTextPane.setEditable(false);
+        lineExplanationTextPane.setContentType("text/html");
+        lineExplanationTextPane.addHyperlinkListener(controller::handleHyperlinkEvent);
+
+        JScrollPane lineScrollPane = new JScrollPane(lineExplanationTextPane);
+        lineScrollPane.setPreferredSize(new Dimension(0, 150));
+        lineScrollPane.setMinimumSize(new Dimension(0, 80));
+        lineExplanationPanel.add(lineScrollPane, BorderLayout.CENTER);
+
+        // Set preferred/minimum sizes for the panel
+        lineExplanationPanel.setPreferredSize(new Dimension(0, 180));
+        lineExplanationPanel.setMinimumSize(new Dimension(0, 100));
+
+        // Initially hide the line explanation panel
+        lineExplanationPanel.setVisible(false);
     }
 
     private void layoutComponents() {
@@ -141,21 +189,33 @@ public class ExplainTab extends JPanel {
 
         add(topPanel, BorderLayout.NORTH);
 
-        // Text content panel with card layout
-        add(contentPanel, BorderLayout.CENTER);
+        // Create split pane with function explanation (top) and line explanation (bottom)
+        mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+        mainSplitPane.setTopComponent(contentPanel);
+        mainSplitPane.setBottomComponent(lineExplanationPanel);
+        mainSplitPane.setResizeWeight(1.0); // Give all extra space to top component
+        mainSplitPane.setOneTouchExpandable(true);
+        mainSplitPane.setContinuousLayout(true);
+
+        // Initially hide bottom component (line explanation)
+        mainSplitPane.setDividerSize(0);
+        mainSplitPane.setBottomComponent(null);
+
+        add(mainSplitPane, BorderLayout.CENTER);
 
         // Bottom panel containing security info + buttons
-        JPanel bottomPanel = new JPanel(new BorderLayout());
+        JPanel bottomPanel = new JPanel();
+        bottomPanel.setLayout(new BoxLayout(bottomPanel, BoxLayout.Y_AXIS));
 
         // Security info panel
-        bottomPanel.add(securityInfoPanel, BorderLayout.CENTER);
+        bottomPanel.add(securityInfoPanel);
 
         // Button panel
         JPanel buttonPanel = new JPanel();
         buttonPanel.add(explainFunctionButton);
         buttonPanel.add(explainLineButton);
         buttonPanel.add(clearExplainButton);
-        bottomPanel.add(buttonPanel, BorderLayout.SOUTH);
+        bottomPanel.add(buttonPanel);
 
         add(bottomPanel, BorderLayout.SOUTH);
     }
@@ -426,5 +486,86 @@ public class ExplainTab extends JPanel {
         networkAPIsTextArea.setText("");
         fileIOAPIsTextArea.setText("");
         securityInfoPanel.setVisible(false);
+    }
+
+    /**
+     * Set the line explanation text and make panel visible.
+     *
+     * @param text The explanation text (can be HTML or plain text)
+     */
+    public void setLineExplanationText(String text) {
+        if (text == null || text.trim().isEmpty()) {
+            clearLineExplanation();
+            return;
+        }
+
+        lineExplanationMarkdown = text;
+        lineExplanationTextPane.setText(text);
+        lineExplanationTextPane.setCaretPosition(0);
+
+        // Show the line explanation panel in the split pane
+        if (mainSplitPane.getBottomComponent() == null) {
+            lineExplanationPanel.setVisible(true);
+            mainSplitPane.setBottomComponent(lineExplanationPanel);
+            mainSplitPane.setDividerSize(8);
+
+            // Set initial divider location to show ~180px for line explanation
+            SwingUtilities.invokeLater(() -> {
+                int totalHeight = mainSplitPane.getHeight();
+                if (totalHeight > 250) {
+                    mainSplitPane.setDividerLocation(totalHeight - 180);
+                } else {
+                    mainSplitPane.setDividerLocation(0.7);
+                }
+            });
+        }
+
+        // Revalidate layout
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * Clear the line explanation panel and hide it.
+     */
+    public void clearLineExplanation() {
+        lineExplanationMarkdown = "";
+        lineExplanationTextPane.setText("");
+
+        // Hide the line explanation panel by removing from split pane
+        mainSplitPane.setBottomComponent(null);
+        mainSplitPane.setDividerSize(0);
+        lineExplanationPanel.setVisible(false);
+
+        // Revalidate layout
+        revalidate();
+        repaint();
+    }
+
+    /**
+     * Set the Explain Line button enabled state.
+     *
+     * @param enabled true to enable, false to disable
+     */
+    public void setLineButtonEnabled(boolean enabled) {
+        explainLineButton.setEnabled(enabled);
+    }
+
+    /**
+     * Get the current line explanation markdown.
+     *
+     * @return The markdown text
+     */
+    public String getLineExplanationMarkdown() {
+        return lineExplanationMarkdown;
+    }
+
+    /**
+     * Check if the line explanation panel is currently visible.
+     *
+     * @return true if visible
+     */
+    public boolean isLineExplanationVisible() {
+        return lineExplanationPanel.isVisible();
     }
 }

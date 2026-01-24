@@ -124,6 +124,8 @@ public class AnalysisDB {
         ensureTableSchema("graph_communities", communityColumns);
         ensureTableSchema("community_members", memberColumns);
         ensureTableSchema("node_fts", ftsColumns);
+
+        ensureFtsSync();
     }
 
     private void dropGraphNodeTriggers() throws SQLException {
@@ -131,6 +133,53 @@ public class AnalysisDB {
             stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ai");
             stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ad");
             stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_au");
+        }
+    }
+
+    private void ensureFtsSync() {
+        try (Statement stmt = connection.createStatement()) {
+            ResultSet nodeRs = stmt.executeQuery(
+                "SELECT COUNT(*) FROM graph_nodes WHERE llm_summary IS NOT NULL AND TRIM(llm_summary) != ''");
+            int nodeCount = nodeRs.next() ? nodeRs.getInt(1) : 0;
+            nodeRs.close();
+            if (nodeCount == 0) return;
+
+            int ftsCount = 0;
+            try {
+                ResultSet ftsRs = stmt.executeQuery("SELECT COUNT(*) FROM node_fts");
+                ftsCount = ftsRs.next() ? ftsRs.getInt(1) : 0;
+                ftsRs.close();
+            } catch (SQLException e) {
+                ftsCount = 0;
+            }
+
+            if (ftsCount < nodeCount * 0.8) {
+                Msg.info(this, String.format("FTS out of sync (FTS: %d, nodes with summaries: %d). Rebuilding...",
+                    ftsCount, nodeCount));
+                try {
+                    stmt.execute("INSERT INTO node_fts(node_fts) VALUES('rebuild')");
+                    Msg.info(this, "FTS rebuild completed.");
+                } catch (SQLException rebuildEx) {
+                    Msg.warn(this, "FTS rebuild failed (likely corrupt), attempting full repair: " + rebuildEx.getMessage());
+                    repairFtsTable();
+                }
+            }
+        } catch (SQLException e) {
+            Msg.warn(this, "FTS sync check failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Rebuild the FTS index from current graph_nodes data.
+     * Call after batch operations (semantic analysis, reindex) to sync FTS.
+     */
+    public void rebuildFts() {
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("INSERT INTO node_fts(node_fts) VALUES('rebuild')");
+            Msg.info(this, "FTS index rebuilt successfully.");
+        } catch (SQLException e) {
+            Msg.warn(this, "FTS rebuild failed, attempting full repair: " + e.getMessage());
+            repairFtsTable();
         }
     }
 
@@ -194,10 +243,10 @@ public class AnalysisDB {
     /**
      * Repair or recreate the FTS table when it's corrupt.
      * This properly handles severe corruption by:
-     * 1. Dropping triggers
-     * 2. Removing FTS entries from sqlite_master
+     * 1. Dropping any leftover triggers (FTS is managed via explicit rebuild, not triggers)
+     * 2. Removing FTS entries from sqlite_master if needed
      * 3. Running VACUUM to rebuild the database
-     * 4. Recreating FTS table and triggers
+     * 4. Recreating FTS table
      * 5. Rebuilding the index from existing data
      *
      * @return true if repair was successful
@@ -205,11 +254,10 @@ public class AnalysisDB {
     public boolean repairFtsTable() {
         Msg.info(this, "Attempting full FTS table repair...");
         try (Statement stmt = connection.createStatement()) {
-            // Step 1: Drop triggers first (this always works)
+            // Step 1: Drop any leftover triggers
             stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ai");
             stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_ad");
             stmt.execute("DROP TRIGGER IF EXISTS graph_nodes_au");
-            Msg.info(this, "Triggers dropped");
 
             // Step 2: Try normal drop
             boolean normalDropWorked = false;
@@ -230,7 +278,6 @@ public class AnalysisDB {
                 stmt.execute("DELETE FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'graph_nodes_%'");
                 stmt.execute("PRAGMA writable_schema = OFF");
 
-                // VACUUM rebuilds the database file, clearing stale state
                 Msg.info(this, "Running VACUUM to rebuild database...");
                 stmt.execute("VACUUM");
                 Msg.info(this, "VACUUM completed");
@@ -247,23 +294,7 @@ public class AnalysisDB {
                     + "content_rowid='rowid'"
                     + ")");
 
-            // Step 5: Recreate triggers
-            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_ai AFTER INSERT ON graph_nodes BEGIN "
-                    + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
-                    + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
-                    + "END");
-            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_ad AFTER DELETE ON graph_nodes BEGIN "
-                    + "INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags) "
-                    + "VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.llm_summary, OLD.security_flags); "
-                    + "END");
-            stmt.execute("CREATE TRIGGER IF NOT EXISTS graph_nodes_au AFTER UPDATE ON graph_nodes BEGIN "
-                    + "INSERT INTO node_fts(node_fts, rowid, id, name, llm_summary, security_flags) "
-                    + "VALUES ('delete', OLD.rowid, OLD.id, OLD.name, OLD.llm_summary, OLD.security_flags); "
-                    + "INSERT INTO node_fts(rowid, id, name, llm_summary, security_flags) "
-                    + "VALUES (NEW.rowid, NEW.id, NEW.name, NEW.llm_summary, NEW.security_flags); "
-                    + "END");
-
-            // Step 6: Rebuild FTS index from existing graph_nodes data
+            // Step 5: Rebuild FTS index from existing graph_nodes data
             Msg.info(this, "Rebuilding FTS index from existing data...");
             stmt.execute("INSERT INTO node_fts(node_fts) VALUES('rebuild')");
 
@@ -1084,6 +1115,183 @@ public class AnalysisDB {
         public int getId() { return id; }
         public String getDescription() { return description; }
         public Timestamp getLastUpdate() { return lastUpdate; }
+    }
+
+    /**
+     * Data class for line explanations.
+     */
+    public static class LineExplanation {
+        private final int id;
+        private final String binaryId;
+        private final long functionAddress;
+        private final long lineAddress;
+        private final String viewType;  // 'DECOMPILER' or 'DISASSEMBLY'
+        private final String lineContent;
+        private final String contextBefore;
+        private final String contextAfter;
+        private final String explanation;
+        private final long createdAt;
+        private final long updatedAt;
+
+        public LineExplanation(int id, String binaryId, long functionAddress, long lineAddress,
+                               String viewType, String lineContent, String contextBefore,
+                               String contextAfter, String explanation, long createdAt, long updatedAt) {
+            this.id = id;
+            this.binaryId = binaryId;
+            this.functionAddress = functionAddress;
+            this.lineAddress = lineAddress;
+            this.viewType = viewType;
+            this.lineContent = lineContent;
+            this.contextBefore = contextBefore;
+            this.contextAfter = contextAfter;
+            this.explanation = explanation;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
+        }
+
+        public int getId() { return id; }
+        public String getBinaryId() { return binaryId; }
+        public long getFunctionAddress() { return functionAddress; }
+        public long getLineAddress() { return lineAddress; }
+        public String getViewType() { return viewType; }
+        public String getLineContent() { return lineContent; }
+        public String getContextBefore() { return contextBefore; }
+        public String getContextAfter() { return contextAfter; }
+        public String getExplanation() { return explanation; }
+        public long getCreatedAt() { return createdAt; }
+        public long getUpdatedAt() { return updatedAt; }
+    }
+
+    // ========================================
+    // Line Explanation Methods
+    // ========================================
+
+    /**
+     * Get a cached line explanation.
+     *
+     * @param binaryId The binary hash
+     * @param lineAddress The address of the line
+     * @param viewType 'DECOMPILER' or 'DISASSEMBLY'
+     * @return LineExplanation if found, null otherwise
+     */
+    public LineExplanation getLineExplanation(String binaryId, long lineAddress, String viewType) {
+        String sql = "SELECT id, binary_id, function_address, line_address, view_type, " +
+                     "line_content, context_before, context_after, explanation, created_at, updated_at " +
+                     "FROM line_explanations WHERE binary_id = ? AND line_address = ? AND view_type = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            stmt.setLong(2, lineAddress);
+            stmt.setString(3, viewType);
+
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return new LineExplanation(
+                    rs.getInt("id"),
+                    rs.getString("binary_id"),
+                    rs.getLong("function_address"),
+                    rs.getLong("line_address"),
+                    rs.getString("view_type"),
+                    rs.getString("line_content"),
+                    rs.getString("context_before"),
+                    rs.getString("context_after"),
+                    rs.getString("explanation"),
+                    rs.getLong("created_at"),
+                    rs.getLong("updated_at")
+                );
+            }
+        } catch (SQLException e) {
+            Msg.warn(this, "Error getting line explanation: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Insert or update a line explanation.
+     *
+     * @param binaryId The binary hash
+     * @param functionAddress The function containing this line
+     * @param lineAddress The address of the line
+     * @param viewType 'DECOMPILER' or 'DISASSEMBLY'
+     * @param lineContent The actual code/instruction content
+     * @param contextBefore Context lines before
+     * @param contextAfter Context lines after
+     * @param explanation The LLM-generated explanation
+     */
+    public void upsertLineExplanation(String binaryId, long functionAddress, long lineAddress,
+                                       String viewType, String lineContent, String contextBefore,
+                                       String contextAfter, String explanation) {
+        String sql = "INSERT INTO line_explanations " +
+                     "(binary_id, function_address, line_address, view_type, line_content, " +
+                     "context_before, context_after, explanation, created_at, updated_at) " +
+                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                     "ON CONFLICT(binary_id, line_address, view_type) DO UPDATE SET " +
+                     "function_address = excluded.function_address, " +
+                     "line_content = excluded.line_content, " +
+                     "context_before = excluded.context_before, " +
+                     "context_after = excluded.context_after, " +
+                     "explanation = excluded.explanation, " +
+                     "updated_at = excluded.updated_at";
+
+        long now = System.currentTimeMillis();
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            stmt.setLong(2, functionAddress);
+            stmt.setLong(3, lineAddress);
+            stmt.setString(4, viewType);
+            stmt.setString(5, lineContent);
+            stmt.setString(6, contextBefore);
+            stmt.setString(7, contextAfter);
+            stmt.setString(8, explanation);
+            stmt.setLong(9, now);
+            stmt.setLong(10, now);
+            stmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to upsert line explanation: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Clear all line explanations for a function.
+     * Useful when function is re-analyzed or renamed.
+     *
+     * @param binaryId The binary hash
+     * @param functionAddress The function address
+     * @return Number of deleted rows
+     */
+    public int clearLineExplanationsForFunction(String binaryId, long functionAddress) {
+        String sql = "DELETE FROM line_explanations WHERE binary_id = ? AND function_address = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            stmt.setLong(2, functionAddress);
+            return stmt.executeUpdate();
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to clear line explanations: " + e.getMessage(), e);
+        }
+        return 0;
+    }
+
+    /**
+     * Clear a specific line explanation.
+     *
+     * @param binaryId The binary hash
+     * @param lineAddress The line address
+     * @param viewType 'DECOMPILER' or 'DISASSEMBLY'
+     * @return true if deleted
+     */
+    public boolean clearLineExplanation(String binaryId, long lineAddress, String viewType) {
+        String sql = "DELETE FROM line_explanations WHERE binary_id = ? AND line_address = ? AND view_type = ?";
+
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            stmt.setLong(2, lineAddress);
+            stmt.setString(3, viewType);
+            return stmt.executeUpdate() > 0;
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to clear line explanation: " + e.getMessage(), e);
+        }
+        return false;
     }
 
     // ReAct Message Storage Methods

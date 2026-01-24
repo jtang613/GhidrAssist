@@ -212,57 +212,128 @@ public class MCPServerRegistry {
      */
     private void loadServers() {
         String serversJson = Preferences.getProperty(PREFERENCE_KEY, "[]");
-        
+
         try {
             Gson gson = new Gson();
             Type listType = new TypeToken<List<MCPServerConfig>>(){}.getType();
             List<MCPServerConfig> loadedServers = gson.fromJson(serversJson, listType);
-            
+
             if (loadedServers != null) {
                 // Validate and migrate loaded servers
                 servers = loadedServers.stream()
                     .filter(MCPServerConfig::isValid)
                     .map(this::migrateServerConfig)  // Apply migration
                     .collect(Collectors.toList());
-                
+
                 Msg.info(this, "Loaded " + servers.size() + " MCP server configurations");
-                
+
                 // Save migrated configurations
                 saveServers();
             }
         } catch (Exception e) {
             Msg.error(this, "Failed to load MCP server configurations: " + e.getMessage());
             servers = new ArrayList<>();
+
+            // Try to recover by parsing and migrating old format
+            try {
+                servers = migrateOldFormat(serversJson);
+                if (!servers.isEmpty()) {
+                    saveServers();
+                }
+            } catch (Exception e2) {
+                Msg.debug(this, "Migration also failed: " + e2.getMessage());
+            }
         }
-        
+
         // Initialize defaults if no servers loaded
         if (servers.isEmpty()) {
             initializeDefaults();
         }
     }
+
+    /**
+     * Attempt to migrate servers from old format that might have STDIO transport.
+     */
+    private List<MCPServerConfig> migrateOldFormat(String serversJson) {
+        List<MCPServerConfig> migrated = new ArrayList<>();
+
+        try {
+            // Parse as generic JSON array
+            com.google.gson.JsonArray array = new Gson().fromJson(serversJson, com.google.gson.JsonArray.class);
+            if (array == null) return migrated;
+
+            for (com.google.gson.JsonElement element : array) {
+                if (!element.isJsonObject()) continue;
+                com.google.gson.JsonObject obj = element.getAsJsonObject();
+
+                String name = obj.has("name") ? obj.get("name").getAsString() : null;
+                String url = obj.has("url") ? obj.get("url").getAsString() : null;
+
+                if (name == null || url == null) continue;
+
+                MCPServerConfig config = new MCPServerConfig(name, url);
+
+                // Check transport type - migrate STDIO to SSE
+                if (obj.has("transport")) {
+                    String transportStr = obj.get("transport").getAsString();
+                    if ("STDIO".equals(transportStr)) {
+                        config.setTransport(MCPServerConfig.TransportType.SSE);
+                        Msg.info(this, "Migrated server '" + name + "' from STDIO to SSE transport");
+                    } else if ("STREAMABLE_HTTP".equals(transportStr)) {
+                        config.setTransport(MCPServerConfig.TransportType.STREAMABLE_HTTP);
+                    } else {
+                        config.setTransport(MCPServerConfig.TransportType.SSE);
+                    }
+                }
+
+                if (obj.has("enabled")) {
+                    config.setEnabled(obj.get("enabled").getAsBoolean());
+                }
+                if (obj.has("description")) {
+                    config.setDescription(obj.get("description").getAsString());
+                }
+
+                if (config.isValid()) {
+                    migrated.add(migrateServerConfig(config));
+                }
+            }
+        } catch (Exception e) {
+            Msg.debug(this, "Old format migration failed: " + e.getMessage());
+        }
+
+        return migrated;
+    }
     
     /**
-     * Migrate server configuration to apply new timeout defaults
+     * Migrate server configuration to apply new timeout defaults and handle transport migration.
      */
     private MCPServerConfig migrateServerConfig(MCPServerConfig server) {
         boolean needsMigration = false;
-        
+
+        // Handle null transport (fallback to SSE)
+        if (server.getTransport() == null) {
+            server.setTransport(MCPServerConfig.TransportType.SSE);
+            Msg.info(this, "Migrated server '" + server.getName() + "' with null transport to SSE");
+            needsMigration = true;
+        }
+
         // Update old timeout values to new optimized defaults
         if (server.getConnectionTimeout() >= 10) {  // Old default was 10 seconds
             server.setConnectionTimeout(5);  // New optimized default
             needsMigration = true;
         }
-        
-        if (server.getRequestTimeout() >= 30) {  // Old default was 30 seconds  
+
+        if (server.getRequestTimeout() >= 30) {  // Old default was 30 seconds
             server.setRequestTimeout(15);  // New optimized default
             needsMigration = true;
         }
-        
+
         if (needsMigration) {
-            Msg.info(this, "Migrated timeout settings for MCP server: " + server.getName() + 
-                     " (connection: " + server.getConnectionTimeout() + "s, request: " + server.getRequestTimeout() + "s)");
+            Msg.info(this, "Migrated settings for MCP server: " + server.getName() +
+                     " (transport: " + server.getTransport() + ", connection: " + server.getConnectionTimeout() +
+                     "s, request: " + server.getRequestTimeout() + "s)");
         }
-        
+
         return server;
     }
     

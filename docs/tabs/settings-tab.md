@@ -1,9 +1,9 @@
 # Settings Tab Reference
 
-The Settings tab configures LLM providers, MCP servers, and analysis options for GhidrAssist.
+The Settings tab configures LLM providers, MCP servers, SymGraph, and analysis options for GhidrAssist.
 
 ![Settings Tab Overview](../screenshots/settings-tab-full.png)
-<!-- SCREENSHOT: Full Settings tab showing LLM Providers, MCP Servers, System Prompt, Database Paths, Analysis Options -->
+<!-- SCREENSHOT: Full Settings tab showing LLM Providers, MCP Servers, SymGraph, System Prompt, Database Paths, Analysis Options -->
 
 ## LLM Providers Section
 
@@ -100,9 +100,27 @@ Configure Model Context Protocol (MCP) servers that provide tools.
 - Symbol lookup
 - Semantic graph queries
 
+## SymGraph Section
+
+Configure the SymGraph cloud service for symbol sharing.
+
+![SymGraph Settings](../screenshots/settings-symgraph.png)
+<!-- SCREENSHOT: SymGraph section showing API URL, API Key field, Show/Hide button, Test Connection button -->
+
+Fields:
+- **API URL**: Default `https://api.symgraph.com`
+- **API Key**: Required for push/pull operations
+- **Show/Hide**: Toggle visibility
+- **Test Connection**: Verify credentials
+
+SymGraph accounts are required for push/pull operations. See the [SymGraph Workflow](../workflows/symgraph-workflow.md).
+
 ## System Prompt Section
 
 Customize the system prompt sent to the LLM.
+
+![System Prompt](../screenshots/settings-system-prompt.png)
+<!-- SCREENSHOT: System Prompt section showing text area and Reset/Save buttons -->
 
 - **Save**: Persist prompt
 - **Revert**: Reset to default
@@ -119,6 +137,9 @@ Configure local storage paths:
 | **RLHF DB** | Stores feedback data | `ghidrassist_rlhf.db` |
 | **RAG Index** | Lucene index directory | `ghidrassist_lucene` |
 
+![Database Paths](../screenshots/settings-database-paths.png)
+<!-- SCREENSHOT: Database Paths section showing Analysis DB, RLHF DB, RAG Index fields with Browse buttons -->
+
 ## Analysis Options Section
 
 Additional analysis controls:
@@ -126,8 +147,12 @@ Additional analysis controls:
 - **Max Tool Calls/Iteration**: Limits tool calls in ReAct loops
 - **API Timeout (seconds)**: Request timeout for LLM APIs
 
+![Analysis Options](../screenshots/settings-analysis-options.png)
+<!-- SCREENSHOT: Analysis Options section showing max tool calls spinner and API timeout field -->
+
 ## Related Documentation
 
 - [Getting Started](../getting-started.md)
 - [Query Tab](query-tab.md) - MCP usage
+- [SymGraph Tab](symgraph-tab.md) - SymGraph operations
 - [RAG Tab](rag-tab.md) - Document management

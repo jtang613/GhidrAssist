@@ -43,6 +43,9 @@ GhidrAssist is installed as a Ghidra extension.
 1. In CodeBrowser, open **Window → GhidrAssist**
 2. The GhidrAssist panel appears with the tab interface
 
+![GhidrAssist Window](screenshots/ghidrassist-window.png)
+<!-- SCREENSHOT: Ghidra CodeBrowser with GhidrAssist window open and docked -->
+
 ## Initial Configuration
 
 You need to configure at least one LLM provider.
@@ -51,6 +54,9 @@ You need to configure at least one LLM provider.
 
 1. In the GhidrAssist panel, click the **Settings** tab
 2. The LLM Providers section appears at the top
+
+![Settings Tab](screenshots/settings-tab-overview.png)
+<!-- SCREENSHOT: Settings tab showing empty LLM providers table with Add button visible -->
 
 ## Setting Up an LLM Provider
 
@@ -88,12 +94,15 @@ ollama serve
 2. Fill in:
    - **Name**: `Ollama Local`
    - **Type**: `Ollama`
-   - **Model**: `llama3.1:8b`
+   - **Model**: `gpt-oss:20b`
    - **URL**: `http://localhost:11434`
    - **API Key**: Leave empty
-   - **Max Tokens**: `4096`
+   - **Max Tokens**: `16384`
 3. Click **Save**
 4. Click **Test**
+
+![Add Ollama Provider](screenshots/add-provider-ollama.png)
+<!-- SCREENSHOT: Add Provider dialog filled out for Ollama with localhost URL -->
 
 ### Option 2: OpenAI Platform API
 
@@ -162,6 +171,9 @@ If you have a Claude Pro/Max or ChatGPT Pro/Plus subscription, use OAuth instead
 5. A browser window opens for login
 6. After authorization, credentials are saved automatically
 7. Click **Save**
+
+![OAuth Authentication](screenshots/oauth-authenticate.png)
+<!-- SCREENSHOT: Add Provider dialog showing OAuth type selected with Authenticate button -->
 
 ### Setting the Active Provider
 

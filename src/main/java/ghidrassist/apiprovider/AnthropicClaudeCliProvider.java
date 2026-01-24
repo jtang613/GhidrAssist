@@ -257,7 +257,16 @@ public class AnthropicClaudeCliProvider extends APIProvider implements FunctionC
 
             JsonObject serverConfig = new JsonObject();
             String transport = server.getTransport().name().toLowerCase();
-            serverConfig.addProperty("type", "sse".equals(transport) ? "sse" : "http");
+            // Map transport types to Claude CLI config types
+            String cliType;
+            if ("sse".equals(transport)) {
+                cliType = "sse";
+            } else if ("streamable_http".equals(transport)) {
+                cliType = "streamable-http";
+            } else {
+                cliType = "sse"; // Default fallback
+            }
+            serverConfig.addProperty("type", cliType);
             serverConfig.addProperty("url", server.getBaseUrl());
 
             mcpServers.add(server.getName(), serverConfig);

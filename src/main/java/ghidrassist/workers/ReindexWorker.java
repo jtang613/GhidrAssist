@@ -59,8 +59,12 @@ public class ReindexWorker extends AnalysisWorker<ReindexWorker.Result> {
             return new Result(result.functionsExtracted, result.callEdgesCreated);
         }
 
+        // Rebuild FTS index to reflect newly-indexed nodes
+        publishProgress(95, 100, "Rebuilding search index...");
+        analysisDB.rebuildFts();
+
         // Invalidate cache
-        publishProgress(95, 100, "Finalizing...");
+        publishProgress(98, 100, "Finalizing...");
         analysisDB.invalidateKnowledgeGraphCache(program.getExecutableSHA256());
 
         publishProgress(100, 100, "Complete");

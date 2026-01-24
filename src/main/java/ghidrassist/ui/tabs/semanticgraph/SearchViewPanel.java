@@ -613,13 +613,19 @@ public class SearchViewPanel extends JPanel {
                 JsonObject obj = elem.getAsJsonObject();
                 count++;
 
-                String funcName = getJsonString(obj, "function_name",
-                        getJsonString(obj, "name", "Unknown"));
-                String address = getJsonString(obj, "address", "-");
-                String score = obj.has("score") ?
-                        String.format("%.2f", obj.get("score").getAsDouble()) : "-";
-                String summary = getJsonString(obj, "summary",
-                        getJsonString(obj, "description", ""));
+                // CallContext results have info nested in "center"
+                JsonObject displayObj = obj;
+                if (obj.has("center") && obj.get("center").isJsonObject()) {
+                    displayObj = obj.getAsJsonObject("center");
+                }
+
+                String funcName = getJsonString(displayObj, "function_name",
+                        getJsonString(displayObj, "name", "Unknown"));
+                String address = getJsonString(displayObj, "address", "-");
+                String score = displayObj.has("score") ?
+                        String.format("%.2f", displayObj.get("score").getAsDouble()) : "-";
+                String summary = getJsonString(displayObj, "summary",
+                        getJsonString(displayObj, "description", ""));
                 if (summary.length() > 80) {
                     summary = summary.substring(0, 77) + "...";
                 }
@@ -644,16 +650,22 @@ public class SearchViewPanel extends JPanel {
 
         JsonObject result = lastResults.get(modelRow).getAsJsonObject();
 
-        String funcName = getJsonString(result, "function_name",
-                getJsonString(result, "name", "Unknown"));
-        String address = getJsonString(result, "address", "-");
+        // CallContext results have info nested in "center"
+        JsonObject infoObj = result;
+        if (result.has("center") && result.get("center").isJsonObject()) {
+            infoObj = result.getAsJsonObject("center");
+        }
+
+        String funcName = getJsonString(infoObj, "function_name",
+                getJsonString(infoObj, "name", "Unknown"));
+        String address = getJsonString(infoObj, "address", "-");
         selectedAddress = address;
 
         detailsFunctionLabel.setText("Function: " + funcName + " @ " + address);
 
         // Security flags
-        if (result.has("security_flags") && result.get("security_flags").isJsonArray()) {
-            JsonArray flags = result.getAsJsonArray("security_flags");
+        if (infoObj.has("security_flags") && infoObj.get("security_flags").isJsonArray()) {
+            JsonArray flags = infoObj.getAsJsonArray("security_flags");
             StringBuilder sb = new StringBuilder();
             for (JsonElement f : flags) {
                 if (sb.length() > 0) sb.append(", ");
@@ -679,8 +691,8 @@ public class SearchViewPanel extends JPanel {
         }
 
         // Summary
-        String summary = getJsonString(result, "summary",
-                getJsonString(result, "description", ""));
+        String summary = getJsonString(infoObj, "summary",
+                getJsonString(infoObj, "description", ""));
         detailsSummaryArea.setText(summary);
         detailsSummaryArea.setCaretPosition(0);
 
@@ -700,8 +712,16 @@ public class SearchViewPanel extends JPanel {
                     break;
                 }
                 if (e.isJsonObject()) {
-                    sb.append(getJsonString(e.getAsJsonObject(), "name",
-                            getJsonString(e.getAsJsonObject(), "function_name", "?")));
+                    JsonObject entry = e.getAsJsonObject();
+                    // CallContext entries nest name inside "function" object
+                    if (entry.has("function") && entry.get("function").isJsonObject()) {
+                        JsonObject func = entry.getAsJsonObject("function");
+                        sb.append(getJsonString(func, "name",
+                                getJsonString(func, "function_name", "?")));
+                    } else {
+                        sb.append(getJsonString(entry, "name",
+                                getJsonString(entry, "function_name", "?")));
+                    }
                 } else {
                     sb.append(e.getAsString());
                 }

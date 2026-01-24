@@ -137,13 +137,13 @@ public class MCPServerDialog extends JDialog {
     }
     
     private void updateUrlPlaceholder() {
-        MCPServerConfig.TransportType transport = 
+        MCPServerConfig.TransportType transport =
             (MCPServerConfig.TransportType) transportCombo.getSelectedItem();
-        
+
         if (transport == MCPServerConfig.TransportType.SSE) {
             urlField.setToolTipText("HTTP(S) URL for Server-Sent Events transport (e.g., http://localhost:8080)");
-        } else {
-            urlField.setToolTipText("Command or path for stdio transport");
+        } else if (transport == MCPServerConfig.TransportType.STREAMABLE_HTTP) {
+            urlField.setToolTipText("HTTP(S) URL for Streamable HTTP transport (e.g., http://localhost:8080) - uses /mcp endpoint");
         }
     }
     
@@ -170,18 +170,19 @@ public class MCPServerDialog extends JDialog {
             return false;
         }
         
-        // Basic URL validation for SSE transport
-        MCPServerConfig.TransportType transport = 
+        // Both SSE and Streamable HTTP transports require HTTP(S) URLs
+        MCPServerConfig.TransportType transport =
             (MCPServerConfig.TransportType) transportCombo.getSelectedItem();
-        
-        if (transport == MCPServerConfig.TransportType.SSE) {
+
+        if (transport == MCPServerConfig.TransportType.SSE ||
+            transport == MCPServerConfig.TransportType.STREAMABLE_HTTP) {
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
-                showError("URL must start with http:// or https:// for SSE transport.");
+                showError("URL must start with http:// or https:// for " + transport.getDisplayName() + " transport.");
                 urlField.requestFocus();
                 return false;
             }
         }
-        
+
         return true;
     }
     
