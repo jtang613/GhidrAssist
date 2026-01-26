@@ -32,6 +32,8 @@ import ghidrassist.graphrag.extraction.SecurityFeatures;
 import ghidrassist.services.symgraph.SymGraphService;
 import ghidrassist.services.symgraph.SymGraphModels.*;
 import ghidrassist.workers.*;
+import ghidrassist.core.streaming.RenderUpdate;
+import ghidrassist.core.streaming.StreamingMarkdownRenderer;
 
 import com.google.gson.Gson;
 
@@ -50,7 +52,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -89,11 +90,17 @@ public class TabController {
     private volatile boolean isCancelling;  // Guard against concurrent operations during cancellation
     private volatile ReasoningConfig currentReasoningConfig;  // Current reasoning/thinking effort setting
 
-    // Streaming performance: debounced HTML rendering
-    private static final int RENDER_INTERVAL_MS = 1000;  // Render markdown every 1 second
-    private final ScheduledExecutorService updateScheduler = Executors.newSingleThreadScheduledExecutor();
-    private volatile ScheduledFuture<?> activeRenderTask;  // Tracked at class level for proper cancellation
-    private final Object renderLock = new Object();
+    // Streaming markdown renderer for incremental HTML updates
+    private volatile StreamingMarkdownRenderer currentStreamingRenderer;
+
+    // Streaming markdown renderer for Explain tab (separate from Query tab)
+    private volatile StreamingMarkdownRenderer currentExplainStreamingRenderer;
+
+    // Streaming markdown renderer for Line Explanation (separate from Function Explain)
+    private volatile StreamingMarkdownRenderer currentLineExplainStreamingRenderer;
+
+    // Scheduler for safety timeouts
+    private final ScheduledExecutorService safetyScheduler = Executors.newSingleThreadScheduledExecutor();
 
     // Chat edit manager for chunked editing
     private final ChatEditManager chatEditManager = new ChatEditManager();
@@ -338,11 +345,7 @@ public class TabController {
                             hasExistingSummary, node.isStale(), node.isUserEdited(), needsSummary));
 
                     if (needsSummary) {
-                        // Show processing message
-                        SwingUtilities.invokeLater(() ->
-                            explainTab.setExplanationText("<html><body><i>Running semantic analysis...</i></body></html>"));
-
-                        // Create semantic extractor and summarize
+                        // Create semantic extractor
                         APIProviderConfig providerConfig = GhidrAssistPlugin.getCurrentProviderConfig();
                         if (providerConfig == null) {
                             throw new Exception("No LLM provider configured. Please configure an API provider in Analysis Options.");
@@ -352,22 +355,99 @@ public class TabController {
                         SemanticExtractor semanticExtractor = new SemanticExtractor(
                                 providerConfig.createProvider(), graph);
 
-                        // Use existing non-streaming summarizeNode method
-                        Msg.info(this, "Calling summarizeNode...");
-                        boolean success = semanticExtractor.summarizeNode(node);
-                        Msg.info(this, "summarizeNode returned: " + success);
+                        // Initialize streaming UI
+                        // Note: StreamingMarkdownRenderer already calls invokeLater, so callback runs on EDT
+                        currentExplainStreamingRenderer = new StreamingMarkdownRenderer(
+                            update -> explainTab.applyRenderUpdate(update),
+                            markdownHelper
+                        );
+                        SwingUtilities.invokeLater(() -> explainTab.initializeForStreaming(""));
 
-                        if (success) {
-                            node.setStale(false);
-                        } else {
-                            Msg.warn(this, "summarizeNode failed - node rawContent length: " +
-                                    (node.getRawContent() != null ? node.getRawContent().length() : "null"));
-                        }
+                        final KnowledgeNode nodeForCallback = node;
+
+                        // Use streaming summarizeNode method
+                        Msg.info(this, "Calling summarizeNodeStreaming...");
+                        semanticExtractor.summarizeNodeStreaming(node, new SemanticExtractor.StreamingSummaryCallback() {
+                            // Track previously received content to compute deltas
+                            private final StringBuilder previousContent = new StringBuilder();
+
+                            @Override
+                            public void onStart() {
+                                previousContent.setLength(0);
+                                Msg.info(this, "Streaming started for function explain");
+                            }
+
+                            @Override
+                            public void onPartialSummary(String accumulated) {
+                                if (currentExplainStreamingRenderer != null) {
+                                    // Compute delta from accumulated content
+                                    String prev = previousContent.toString();
+                                    String delta;
+                                    if (accumulated.startsWith(prev)) {
+                                        delta = accumulated.substring(prev.length());
+                                    } else {
+                                        // Fallback: treat as new content
+                                        delta = accumulated;
+                                        previousContent.setLength(0);
+                                    }
+                                    previousContent.append(delta);
+
+                                    if (!delta.isEmpty()) {
+                                        currentExplainStreamingRenderer.onChunkReceived(delta);
+                                    }
+                                }
+                            }
+
+                            @Override
+                            public void onSummaryComplete(String fullSummary, KnowledgeNode updatedNode) {
+                                Msg.info(this, "Streaming complete for function explain");
+
+                                // Complete streaming
+                                if (currentExplainStreamingRenderer != null) {
+                                    currentExplainStreamingRenderer.onStreamComplete();
+                                    currentExplainStreamingRenderer = null;
+                                }
+
+                                // Mark as not stale
+                                updatedNode.setStale(false);
+                                graph.upsertNode(updatedNode);
+
+                                // Update security info panel only (don't overwrite streamed content)
+                                SwingUtilities.invokeLater(() -> {
+                                    explainTab.updateSecurityInfo(
+                                        updatedNode.getRiskLevel(),
+                                        updatedNode.getActivityProfile(),
+                                        updatedNode.getSecurityFlags(),
+                                        updatedNode.getNetworkAPIs(),
+                                        updatedNode.getFileIOAPIs()
+                                    );
+                                    setUIState(false, "Explain Function", null);
+                                });
+                            }
+
+                            @Override
+                            public void onError(Throwable error) {
+                                Msg.error(this, "Streaming error: " + error.getMessage());
+                                currentExplainStreamingRenderer = null;
+                                SwingUtilities.invokeLater(() -> {
+                                    explainTab.setExplanationText("Error: " + error.getMessage());
+                                    setUIState(false, "Explain Function", null);
+                                });
+                            }
+
+                            @Override
+                            public boolean shouldContinue() {
+                                return isQueryRunning;
+                            }
+                        });
+
+                        // Return early - the callback will handle completion
+                        return;
                     } else {
                         Msg.info(this, "Skipping semantic analysis - using existing summary");
                     }
 
-                    // Step 4: Save node to graph
+                    // Step 4: Save node to graph (only reached if no summary needed)
                     graph.upsertNode(node);
 
                     // Step 5: Update display
@@ -385,7 +465,10 @@ public class TabController {
                 }
 
             } catch (Exception e) {
-                cancelActiveRenderTask();
+                // Clean up any active streaming renderer
+                if (currentExplainStreamingRenderer != null) {
+                    currentExplainStreamingRenderer = null;
+                }
                 SwingUtilities.invokeLater(() -> {
                     Msg.showError(getClass(), explainTab, "Error",
                         "Failed to explain function: " + e.getMessage());
@@ -576,6 +659,11 @@ public class TabController {
             currentLineExplainLlmApi = null;
         }
 
+        // Clean up streaming renderer
+        if (currentLineExplainStreamingRenderer != null) {
+            currentLineExplainStreamingRenderer = null;
+        }
+
         setLineExplainUIState(false, "Explain Line");
     }
 
@@ -593,6 +681,7 @@ public class TabController {
 
     /**
      * Create a response handler for line explanation streaming.
+     * Uses StreamingMarkdownRenderer for incremental HTML updates.
      */
     private LlmApi.LlmResponseHandler createLineExplainResponseHandler(
             String programHash, long functionAddress, long lineAddress,
@@ -604,6 +693,15 @@ public class TabController {
             @Override
             public void onStart() {
                 responseBuffer.setLength(0);
+
+                // Initialize streaming for line explanation pane
+                // Note: StreamingMarkdownRenderer already calls invokeLater, so callback runs on EDT
+                currentLineExplainStreamingRenderer = new StreamingMarkdownRenderer(
+                    update -> explainTab.applyLineRenderUpdate(update),
+                    markdownHelper
+                );
+
+                SwingUtilities.invokeLater(() -> explainTab.initializeLineExplanationForStreaming());
             }
 
             @Override
@@ -612,29 +710,33 @@ public class TabController {
                     return;
                 }
 
-                // Accumulate response
+                // Extract delta from cumulative response
                 String currentBuffer = responseBuffer.toString();
+                String delta;
                 if (partialResponse.startsWith(currentBuffer)) {
-                    String newContent = partialResponse.substring(currentBuffer.length());
-                    if (!newContent.isEmpty()) {
-                        responseBuffer.append(newContent);
-                    }
+                    delta = partialResponse.substring(currentBuffer.length());
+                    responseBuffer.append(delta);
                 } else {
-                    responseBuffer.append(partialResponse);
+                    delta = partialResponse;
+                    responseBuffer.append(delta);
                 }
 
-                // Update UI with streaming content
-                final String content = responseBuffer.toString();
-                SwingUtilities.invokeLater(() -> {
-                    String html = markdownHelper.markdownToHtml(content);
-                    explainTab.setLineExplanationText(html);
-                });
+                // Feed delta to streaming renderer
+                if (!delta.isEmpty() && currentLineExplainStreamingRenderer != null) {
+                    currentLineExplainStreamingRenderer.onChunkReceived(delta);
+                }
             }
 
             @Override
             public void onComplete(String fullResponse) {
                 final String finalResponse = (fullResponse != null && !fullResponse.isEmpty())
                         ? fullResponse : responseBuffer.toString();
+
+                // Complete streaming
+                if (currentLineExplainStreamingRenderer != null) {
+                    currentLineExplainStreamingRenderer.onStreamComplete();
+                    currentLineExplainStreamingRenderer = null;
+                }
 
                 // Cache the result
                 analysisDB.upsertLineExplanation(
@@ -644,8 +746,6 @@ public class TabController {
                 );
 
                 SwingUtilities.invokeLater(() -> {
-                    String html = markdownHelper.markdownToHtml(finalResponse);
-                    explainTab.setLineExplanationText(html);
                     setLineExplainUIState(false, "Explain Line");
                     currentLineExplainLlmApi = null;
                 });
@@ -653,6 +753,13 @@ public class TabController {
 
             @Override
             public void onError(Throwable error) {
+                // Clean up streaming renderer
+                if (currentLineExplainStreamingRenderer != null) {
+                    // Try to complete with what we have
+                    currentLineExplainStreamingRenderer.onStreamComplete();
+                    currentLineExplainStreamingRenderer = null;
+                }
+
                 SwingUtilities.invokeLater(() -> {
                     String partialContent = responseBuffer.toString();
                     if (!partialContent.isEmpty()) {
@@ -1234,11 +1341,14 @@ public class TabController {
     // ==== Chat History Management ====
     
     public void handleNewChatSession() {
-        // Cancel any running operation and render task first
+        // Cancel any running operation first
         if (isQueryRunning) {
             cancelCurrentOperation();
         }
-        cancelActiveRenderTask();
+        // Clean up any active streaming renderer
+        if (currentStreamingRenderer != null) {
+            currentStreamingRenderer = null;
+        }
 
         SwingUtilities.invokeLater(() -> {
             // Clear current conversation and create new session immediately
@@ -1263,11 +1373,14 @@ public class TabController {
     }
     
     public void handleDeleteCurrentSession() {
-        // Cancel any running operation and render task first
+        // Cancel any running operation first
         if (isQueryRunning) {
             cancelCurrentOperation();
         }
-        cancelActiveRenderTask();
+        // Clean up any active streaming renderer
+        if (currentStreamingRenderer != null) {
+            currentStreamingRenderer = null;
+        }
 
         // Get all selected rows from the table (supports multi-select)
         int[] selectedRows = queryTab.getSelectedChatSessions();
@@ -1611,8 +1724,13 @@ public class TabController {
         // Mark that we're cancelling to prevent concurrent operations
         isCancelling = true;
 
-        // Cancel active render task FIRST to stop stale UI updates
-        cancelActiveRenderTask();
+        // Clean up streaming renderers FIRST to stop stale UI updates
+        if (currentStreamingRenderer != null) {
+            currentStreamingRenderer = null;
+        }
+        if (currentExplainStreamingRenderer != null) {
+            currentExplainStreamingRenderer = null;
+        }
 
         // Cancel the ReAct orchestrator if it exists
         if (currentOrchestrator != null) {
@@ -1637,7 +1755,7 @@ public class TabController {
 
         // Schedule a safety reset in case the completion handlers don't fire
         // This prevents the UI from getting stuck if something goes wrong
-        updateScheduler.schedule(() -> {
+        safetyScheduler.schedule(() -> {
             if (isCancelling) {
                 Msg.warn(this, "Cancellation safety timeout - forcing UI reset");
                 SwingUtilities.invokeLater(() -> {
@@ -1645,25 +1763,13 @@ public class TabController {
                     isQueryRunning = false;
                     currentOrchestrator = null;
                     currentLlmApi = null;
+                    currentStreamingRenderer = null;
                     setUIState(false, "Submit", null);
                 });
             }
         }, 5, TimeUnit.SECONDS);
     }
     
-    /**
-     * Cancel the active render task to prevent stale UI updates.
-     * Should be called when cancelling, starting new queries, or clearing state.
-     */
-    private void cancelActiveRenderTask() {
-        synchronized (renderLock) {
-            if (activeRenderTask != null) {
-                activeRenderTask.cancel(false);
-                activeRenderTask = null;
-            }
-        }
-    }
-
     private void setUIState(boolean running, String buttonText, String statusText) {
         isQueryRunning = running;
         // Reset cancellation flag when transitioning to non-running state
@@ -1775,72 +1881,51 @@ public class TabController {
                     responseBuffer.setLength(0);
                 }
 
-                // Cancel any existing render task before starting new one
-                cancelActiveRenderTask();
+                // Render existing conversation history as prefix
+                String existingHtml = markdownHelper.markdownToHtmlFragment(
+                    queryService.getConversationHistory());
 
-                // Show initial processing message
-                SwingUtilities.invokeLater(() -> {
-                    queryTab.setResponseText("<html><body><i>Processing...</i></body></html>");
-                });
+                // Create streaming renderer with callback to update UI
+                // Note: StreamingMarkdownRenderer already calls invokeLater, so callback runs on EDT
+                currentStreamingRenderer = new StreamingMarkdownRenderer(
+                    update -> queryTab.applyRenderUpdate(update),
+                    markdownHelper
+                );
+                currentStreamingRenderer.setConversationPrefix(existingHtml);
 
-                // Start periodic markdown rendering using class-level tracking
-                synchronized (renderLock) {
-                    activeRenderTask = updateScheduler.scheduleAtFixedRate(
-                        this::renderCurrentContent,
-                        RENDER_INTERVAL_MS,
-                        RENDER_INTERVAL_MS,
-                        TimeUnit.MILLISECONDS
-                    );
-                }
+                // Initialize streaming display with conversation history
+                SwingUtilities.invokeLater(() -> queryTab.initializeForStreaming(existingHtml));
             }
 
             @Override
             public void onUpdate(String partialResponse) {
-                synchronized (bufferLock) {
-                    if (partialResponse == null || partialResponse.isEmpty()) {
-                        return;
-                    }
+                if (partialResponse == null || partialResponse.isEmpty()) {
+                    return;
+                }
 
-                    // Handle cumulative vs delta responses - just accumulate in buffer
+                String delta;
+                synchronized (bufferLock) {
+                    // Handle cumulative vs delta responses - extract only new content
                     String currentBuffer = responseBuffer.toString();
                     if (partialResponse.startsWith(currentBuffer)) {
-                        String newContent = partialResponse.substring(currentBuffer.length());
-                        if (!newContent.isEmpty()) {
-                            responseBuffer.append(newContent);
+                        delta = partialResponse.substring(currentBuffer.length());
+                        if (!delta.isEmpty()) {
+                            responseBuffer.append(delta);
                         }
                     } else {
-                        responseBuffer.append(partialResponse);
+                        delta = partialResponse;
+                        responseBuffer.append(delta);
                     }
-
-                    // No immediate UI update - let the periodic render handle it
-                    // This prevents UI flooding while keeping content responsive
-                }
-            }
-
-            /**
-             * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
-             */
-            private void renderCurrentContent() {
-                final String content;
-                synchronized (bufferLock) {
-                    if (responseBuffer.length() == 0) {
-                        return;
-                    }
-                    content = queryService.getConversationHistory() +
-                        "**Assistant**:\n" + responseBuffer.toString();
                 }
 
-                SwingUtilities.invokeLater(() -> {
-                    String html = markdownHelper.markdownToHtml(content);
-                    queryTab.setResponseText(html);
-                });
+                // Send delta to streaming renderer for incremental processing
+                if (!delta.isEmpty() && currentStreamingRenderer != null) {
+                    currentStreamingRenderer.onChunkReceived(delta);
+                }
             }
 
             @Override
             public void onComplete(String fullResponse) {
-                // Cancel periodic render task
-                cancelActiveRenderTask();
-
                 synchronized (bufferLock) {
                     // IMPORTANT: Don't clear responseBuffer!
                     // It contains all streaming content including tool calling details.
@@ -1852,6 +1937,12 @@ public class TabController {
                     }
 
                     final String finalResponse = responseBuffer.toString();
+
+                    // Signal stream complete to renderer
+                    if (currentStreamingRenderer != null) {
+                        currentStreamingRenderer.onStreamComplete();
+                        currentStreamingRenderer = null;
+                    }
 
                     SwingUtilities.invokeLater(() -> {
                         feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), finalResponse);
@@ -1870,8 +1961,10 @@ public class TabController {
 
             @Override
             public void onError(Throwable error) {
-                // Cancel periodic render task
-                cancelActiveRenderTask();
+                // Clean up streaming renderer
+                if (currentStreamingRenderer != null) {
+                    currentStreamingRenderer = null;
+                }
 
                 // Save partial response if we have content before the error
                 synchronized (bufferLock) {
@@ -1914,10 +2007,12 @@ public class TabController {
                         // Clear buffer to prevent duplicate saves
                         responseBuffer.setLength(0);
 
-                        SwingUtilities.invokeLater(() -> {
-                            // Cancel the render task
-                            cancelActiveRenderTask();
+                        // Clean up streaming renderer
+                        if (currentStreamingRenderer != null) {
+                            currentStreamingRenderer = null;
+                        }
 
+                        SwingUtilities.invokeLater(() -> {
                             // Save partial response
                             queryService.addAssistantMessage(partialResponse + "\n\n[Cancelled by user]",
                                 queryService.getCurrentProviderType(), null);
@@ -1944,6 +2039,7 @@ public class TabController {
             private final StringBuilder synthesisBuffer = new StringBuilder();  // Separate buffer for synthesis streaming
             private boolean synthesisStarted = false;
             private int lastIterationSeen = -1;  // Start at -1 so iteration 0 triggers header
+            private StreamingMarkdownRenderer synthesisRenderer = null;  // Used for synthesis phase streaming
 
             @Override
             public void onStart(String objective) {
@@ -1954,25 +2050,15 @@ public class TabController {
                     chronologicalHistory.append("---\n\n");
                     currentIterationOutput = "";
                     lastIterationSeen = -1;
+                    synthesisBuffer.setLength(0);
+                    synthesisStarted = false;
                 }
 
-                // Cancel any existing render task before starting new one
-                cancelActiveRenderTask();
+                // Initialize streaming display
+                SwingUtilities.invokeLater(() -> queryTab.initializeForStreaming(""));
 
-                // Show initial message
-                SwingUtilities.invokeLater(() -> {
-                    queryTab.setResponseText("<html><body><i>Starting ReAct investigation...</i></body></html>");
-                });
-
-                // Start periodic markdown rendering using class-level tracking
-                synchronized (renderLock) {
-                    activeRenderTask = updateScheduler.scheduleAtFixedRate(
-                        this::renderCurrentContent,
-                        RENDER_INTERVAL_MS,
-                        RENDER_INTERVAL_MS,
-                        TimeUnit.MILLISECONDS
-                    );
-                }
+                // Render initial state
+                renderCurrentContent();
             }
 
             @Override
@@ -1990,7 +2076,8 @@ public class TabController {
                     }
                     currentIterationOutput = thought;
                 }
-                // No immediate render - let periodic task handle it
+                // Render immediately for thought updates (they're discrete events)
+                renderCurrentContent();
             }
 
             @Override
@@ -2012,13 +2099,13 @@ public class TabController {
                     }
                     chronologicalHistory.append("💡 **Finding**: ").append(finding).append("\n\n");
                 }
-                // No immediate render - let periodic task handle it
+                renderCurrentContent();
             }
 
             @Override
             public void onComplete(ghidrassist.agent.react.ReActResult result) {
-                // Cancel periodic render task
-                cancelActiveRenderTask();
+                // Clean up synthesis renderer if used
+                synthesisRenderer = null;
 
                 synchronized (historyLock) {
                     if (!currentIterationOutput.isEmpty()) {
@@ -2051,8 +2138,8 @@ public class TabController {
 
             @Override
             public void onError(Throwable error) {
-                // Cancel periodic render task
-                cancelActiveRenderTask();
+                // Clean up synthesis renderer
+                synthesisRenderer = null;
 
                 synchronized (historyLock) {
                     chronologicalHistory.append("\n\n❌ **ERROR**: ").append(error.getMessage()).append("\n");
@@ -2071,6 +2158,7 @@ public class TabController {
                 synchronized (historyLock) {
                     chronologicalHistory.append("⚠️ *").append(remaining).append(" iteration(s) remaining*\n\n");
                 }
+                renderCurrentContent();
             }
 
             @Override
@@ -2078,6 +2166,7 @@ public class TabController {
                 synchronized (historyLock) {
                     chronologicalHistory.append("⚠️ *").append(remaining).append(" tool call(s) remaining*\n\n");
                 }
+                renderCurrentContent();
             }
 
             @Override
@@ -2091,6 +2180,7 @@ public class TabController {
                     chronologicalHistory.append(todosFormatted).append("\n\n");
                     chronologicalHistory.append("---\n\n");
                 }
+                renderCurrentContent();
             }
 
             @Override
@@ -2099,10 +2189,12 @@ public class TabController {
                     chronologicalHistory.append("📝 **Summarizing context...**\n\n");
                     chronologicalHistory.append("```\n").append(summary).append("\n```\n\n");
                 }
+                renderCurrentContent();
             }
 
             @Override
             public void onSynthesisChunk(String chunk) {
+                String delta;
                 synchronized (historyLock) {
                     // Add synthesis header on first chunk
                     if (!synthesisStarted) {
@@ -2114,26 +2206,41 @@ public class TabController {
                         chronologicalHistory.append("---\n\n");
                         chronologicalHistory.append("## 🎯 Final Analysis\n\n");
                         synthesisStarted = true;
+
+                        // Create streaming renderer for synthesis phase with committed history as prefix
+                        String prefixHtml = markdownHelper.markdownToHtmlFragment(chronologicalHistory.toString());
+                        synthesisRenderer = new StreamingMarkdownRenderer(
+                            update -> queryTab.applyRenderUpdate(update),
+                            markdownHelper
+                        );
+                        synthesisRenderer.setConversationPrefix(prefixHtml);
+                        SwingUtilities.invokeLater(() -> queryTab.initializeForStreaming(prefixHtml));
                     }
 
                     // Handle cumulative vs delta responses - extract only new content
                     String currentBuffer = synthesisBuffer.toString();
                     if (chunk.startsWith(currentBuffer)) {
                         // Cumulative response - extract delta
-                        String newContent = chunk.substring(currentBuffer.length());
-                        if (!newContent.isEmpty()) {
-                            synthesisBuffer.append(newContent);
+                        delta = chunk.substring(currentBuffer.length());
+                        if (!delta.isEmpty()) {
+                            synthesisBuffer.append(delta);
                         }
                     } else {
                         // Delta response - append directly
-                        synthesisBuffer.append(chunk);
+                        delta = chunk;
+                        synthesisBuffer.append(delta);
                     }
                 }
-                // Let periodic render task handle display - no immediate UI update
+
+                // Send delta to streaming renderer for incremental processing
+                if (!delta.isEmpty() && synthesisRenderer != null) {
+                    synthesisRenderer.onChunkReceived(delta);
+                }
             }
 
             /**
-             * Periodic render task - renders markdown to HTML every RENDER_INTERVAL_MS
+             * Render the current content state to the UI.
+             * Used for discrete event updates (not during synthesis streaming).
              */
             private void renderCurrentContent() {
                 final String content;
@@ -2146,8 +2253,8 @@ public class TabController {
                         display.append(currentIterationOutput).append("\n\n");
                     }
 
-                    // Include synthesis buffer if streaming
-                    if (synthesisBuffer.length() > 0) {
+                    // Include synthesis buffer if streaming (only if not using streaming renderer)
+                    if (synthesisBuffer.length() > 0 && synthesisRenderer == null) {
                         display.append(synthesisBuffer);
                     }
 
@@ -4350,9 +4457,9 @@ public class TabController {
         analysisDataService.close();
         feedbackService.close();
 
-        // Shutdown update scheduler
-        if (updateScheduler != null) {
-            updateScheduler.shutdown();
+        // Shutdown safety scheduler
+        if (safetyScheduler != null) {
+            safetyScheduler.shutdown();
         }
     }
 }

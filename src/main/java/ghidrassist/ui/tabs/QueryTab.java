@@ -3,6 +3,9 @@ package ghidrassist.ui.tabs;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.text.*;
+import javax.swing.text.html.HTML;
+import javax.swing.text.html.HTMLDocument;
+import javax.swing.text.html.HTMLEditorKit;
 import java.awt.*;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
@@ -16,6 +19,8 @@ import java.util.Date;
 import ghidra.util.Msg;
 import ghidrassist.core.MarkdownHelper;
 import ghidrassist.core.TabController;
+import ghidrassist.core.streaming.RenderUpdate;
+import ghidrassist.core.streaming.StreamingScrollManager;
 import ghidrassist.mcp2.server.MCPServerRegistry;
 import ghidrassist.AnalysisDB;
 
@@ -43,11 +48,28 @@ public class QueryTab extends JPanel {
     private CardLayout contentLayout;
     private boolean isEditMode = false;
     private String currentMarkdownSource = "";
-    private static final String QUERY_HINT_TEXT = 
+    private static final String QUERY_HINT_TEXT =
         "#line to include the current disassembly line.\n" +
         "#func to include current function disassembly.\n" +
         "#addr to include the current hex address.\n" +
         "#range(start, end) to include the view data in a given range.";
+
+    // Streaming markdown rendering CSS
+    private static final String STREAMING_CSS =
+        "body { font-family: sans-serif; font-size: 14px; margin: 8px; }" +
+        "pre { background-color: #f4f4f4; padding: 8px; border: 1px solid #ddd; overflow-x: auto; }" +
+        "code { background-color: #f4f4f4; padding: 2px 4px; }" +
+        "table { border-collapse: collapse; margin: 8px 0; }" +
+        "th, td { border: 1px solid #ddd; padding: 4px 8px; }" +
+        "th { background-color: #f0f0f0; }" +
+        "blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 12px; color: #555; }";
+
+    // Streaming state fields
+    private StringBuilder accumulatedCommittedHtml = new StringBuilder();
+    private String lastPendingHtml = "<span></span>";
+    private boolean documentCorrupted = false;
+    private StreamingScrollManager scrollManager;
+    private JScrollPane responseScrollPane;
 
     public QueryTab(TabController controller) {
         super(new BorderLayout());
@@ -145,7 +167,9 @@ public class QueryTab extends JPanel {
         add(topPanel, BorderLayout.NORTH);
 
         // Setup content panel with CardLayout (view mode + edit mode)
-        JScrollPane responseScrollPane = new JScrollPane(responseTextPane);
+        responseScrollPane = new JScrollPane(responseTextPane);
+        responseScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+        scrollManager = new StreamingScrollManager(responseScrollPane);
         JScrollPane editScrollPane = new JScrollPane(markdownEditArea);
         contentPanel.add(responseScrollPane, "view");
         contentPanel.add(editScrollPane, "edit");
@@ -285,17 +309,26 @@ public class QueryTab extends JPanel {
     /**
      * Set response text - switches to HTML mode and renders full content.
      * PERFORMANCE: This is used at completion for full markdown rendering.
+     * Preserves scroll position if user has scrolled up from bottom.
      */
     public void setResponseText(String htmlText) {
         SwingUtilities.invokeLater(() -> {
             try {
+                // Capture scroll state BEFORE any modifications
+                boolean wasAtBottom = scrollManager.isAtBottom();
+                int savedScrollValue = scrollManager.getScrollPane().getVerticalScrollBar().getValue();
+
                 // Switch to HTML mode for final markdown rendering
                 responseTextPane.setContentType("text/html");
                 responseTextPane.setText(htmlText);
 
-                // Auto-scroll to end
+                // Restore scroll position - only auto-scroll if user was at bottom
                 SwingUtilities.invokeLater(() -> {
-                    responseTextPane.setCaretPosition(responseTextPane.getDocument().getLength());
+                    if (wasAtBottom) {
+                        scrollManager.scrollToBottom();
+                    } else {
+                        scrollManager.getScrollPane().getVerticalScrollBar().setValue(savedScrollValue);
+                    }
                 });
             } catch (Exception e) {
                 Msg.error(this, "Error setting response text", e);
@@ -304,42 +337,169 @@ public class QueryTab extends JPanel {
     }
 
     /**
-     * Append text incrementally without full document replacement.
-     * PERFORMANCE: This is the key optimization - true incremental append in plain text mode.
+     * Initialize the response pane for streaming with a two-div DOM structure.
+     * Optionally includes conversation history as a prefix.
+     *
+     * @param prefixHtml Pre-rendered HTML for conversation history (may be empty)
      */
-    public void appendStreamingText(String textDelta) {
-        if (textDelta == null || textDelta.isEmpty()) {
-            return;
-        }
-
+    public void initializeForStreaming(String prefixHtml) {
         SwingUtilities.invokeLater(() -> {
-            try {
-                int endPos = responseDocument.getLength();
-                responseDocument.insertString(endPos, textDelta, null);
+            // Capture scroll state BEFORE any modifications
+            boolean wasAtBottom = scrollManager.isAtBottom();
+            int savedScrollValue = scrollManager.getScrollPane().getVerticalScrollBar().getValue();
 
-                // Auto-scroll to end
-                responseTextPane.setCaretPosition(responseDocument.getLength());
-            } catch (BadLocationException e) {
-                Msg.error(this, "Error appending streaming text", e);
+            // Reset streaming state
+            accumulatedCommittedHtml.setLength(0);
+            lastPendingHtml = "<span></span>";
+            documentCorrupted = false;
+
+            // Switch to HTML mode
+            responseTextPane.setContentType("text/html");
+            HTMLEditorKit kit = new HTMLEditorKit();
+            responseTextPane.setEditorKit(kit);
+
+            // Build initial HTML with two-div structure
+            String prefix = (prefixHtml != null && !prefixHtml.isEmpty()) ? prefixHtml : "";
+            String initialHtml = String.format(
+                "<html><head><style>%s</style></head><body>%s" +
+                "<div id=\"committed\"></div>" +
+                "<div id=\"pending\"><span></span></div>" +
+                "</body></html>",
+                STREAMING_CSS, prefix);
+
+            responseTextPane.setText(initialHtml);
+            responseDocument = responseTextPane.getStyledDocument();
+
+            // Restore scroll position
+            if (wasAtBottom) {
+                SwingUtilities.invokeLater(() -> scrollManager.scrollToBottom());
+            } else {
+                SwingUtilities.invokeLater(() ->
+                        scrollManager.getScrollPane().getVerticalScrollBar().setValue(savedScrollValue));
             }
         });
     }
 
     /**
-     * Clear the response document and switch to plain text streaming mode.
-     * PERFORMANCE: Plain text mode is used during streaming for better performance.
+     * Apply a render update to the streaming display.
+     * Handles both incremental (append/replace) and full document replacement.
+     * Note: This method is called from EDT (via StreamingMarkdownRenderer's invokeLater).
+     *
+     * @param update The render update to apply
+     */
+    public void applyRenderUpdate(RenderUpdate update) {
+        if (update == null) {
+            return;
+        }
+
+        // Capture scroll state BEFORE any DOM modification
+        boolean wasAtBottom = scrollManager.isAtBottom();
+        int savedScrollValue = scrollManager.getScrollPane().getVerticalScrollBar().getValue();
+
+        // Apply the update
+        switch (update.getType()) {
+            case INCREMENTAL -> applyIncrementalUpdate(update);
+            case FULL_REPLACE -> applyFullReplaceUpdate(update);
+        }
+
+        // Restore scroll position or auto-scroll (matching reference implementation)
+        if (wasAtBottom) {
+            SwingUtilities.invokeLater(() -> scrollManager.scrollToBottom());
+        } else {
+            // Restore the user's scroll position exactly
+            SwingUtilities.invokeLater(() ->
+                    scrollManager.getScrollPane().getVerticalScrollBar().setValue(savedScrollValue));
+        }
+    }
+
+    private void applyIncrementalUpdate(RenderUpdate update) {
+        // Track content for fallback rebuilds
+        String committedHtml = update.getCommittedHtmlToAppend();
+        if (committedHtml != null && !committedHtml.isEmpty()) {
+            accumulatedCommittedHtml.append(committedHtml);
+        }
+        String pendingHtml = update.getPendingHtml();
+        if (pendingHtml != null) {
+            lastPendingHtml = pendingHtml;
+        }
+
+        // If document was previously corrupted, use full rebuild strategy
+        if (documentCorrupted) {
+            rebuildDocument();
+            return;
+        }
+
+        HTMLDocument doc = (HTMLDocument) responseTextPane.getDocument();
+
+        try {
+            // Append committed HTML
+            if (committedHtml != null && !committedHtml.isEmpty()) {
+                Element committedDiv = findElement(doc, "committed");
+                if (committedDiv != null) {
+                    doc.insertBeforeEnd(committedDiv, committedHtml);
+                }
+            }
+
+            // Replace pending div atomically using setOuterHTML
+            // (avoids the BiDi corruption bug in setInnerHTML)
+            if (pendingHtml != null) {
+                Element pendingDiv = findElement(doc, "pending");
+                if (pendingDiv != null) {
+                    String wrappedPending = "<div id=\"pending\">" + pendingHtml + "</div>";
+                    doc.setOuterHTML(pendingDiv, wrappedPending);
+                }
+            }
+        } catch (Exception e) {
+            Msg.warn(this, "DOM update failed, switching to rebuild strategy: " + e.getMessage());
+            documentCorrupted = true;
+            rebuildDocument();
+        }
+    }
+
+    private void applyFullReplaceUpdate(RenderUpdate update) {
+        String fullHtml = update.getFullHtml();
+        if (fullHtml != null) {
+            String wrapped = "<html><head><style>" + STREAMING_CSS + "</style></head><body>" +
+                    fullHtml + "</body></html>";
+            responseTextPane.setText(wrapped);
+            documentCorrupted = false;
+        }
+    }
+
+    private void rebuildDocument() {
+        String html = "<html><head><style>" + STREAMING_CSS + "</style></head><body>" +
+                accumulatedCommittedHtml.toString() +
+                lastPendingHtml +
+                "</body></html>";
+        responseTextPane.setText(html);
+    }
+
+    private Element findElement(HTMLDocument doc, String id) {
+        return findElementById(doc.getDefaultRootElement(), id);
+    }
+
+    private Element findElementById(Element element, String id) {
+        // Check this element's attributes for an id
+        Object idAttr = element.getAttributes().getAttribute(HTML.Attribute.ID);
+        if (id.equals(idAttr)) {
+            return element;
+        }
+
+        // Recursively search children
+        for (int i = 0; i < element.getElementCount(); i++) {
+            Element found = findElementById(element.getElement(i), id);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Clear the response and prepare for streaming.
      */
     public void clearResponse() {
-        SwingUtilities.invokeLater(() -> {
-            try {
-                // Switch to plain text mode for fast streaming
-                responseTextPane.setContentType("text/plain");
-                responseDocument = responseTextPane.getStyledDocument();
-                responseDocument.remove(0, responseDocument.getLength());
-            } catch (BadLocationException e) {
-                Msg.error(this, "Error clearing response", e);
-            }
-        });
+        initializeForStreaming("");
     }
 
     public void appendToResponse(String html) {

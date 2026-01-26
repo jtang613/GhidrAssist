@@ -2,6 +2,10 @@ package ghidrassist.ui.tabs;
 
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
+import javax.swing.text.Element;
+import javax.swing.text.html.HTML;
+import javax.swing.text.html.HTMLDocument;
+import javax.swing.text.html.HTMLEditorKit;
 import java.awt.*;
 import java.awt.datatransfer.Clipboard;
 import java.awt.datatransfer.StringSelection;
@@ -9,6 +13,8 @@ import java.util.List;
 import ghidra.util.Msg;
 import ghidrassist.core.MarkdownHelper;
 import ghidrassist.core.TabController;
+import ghidrassist.core.streaming.RenderUpdate;
+import ghidrassist.core.streaming.StreamingScrollManager;
 
 public class ExplainTab extends JPanel {
     private static final long serialVersionUID = 1L;
@@ -41,6 +47,30 @@ public class ExplainTab extends JPanel {
     private String lineExplanationMarkdown = "";
     private JSplitPane mainSplitPane;
     private JButton lineExplanationCloseButton;
+
+    // Streaming markdown rendering CSS (same as QueryTab)
+    private static final String STREAMING_CSS =
+        "body { font-family: sans-serif; font-size: 14px; margin: 8px; }" +
+        "pre { background-color: #f4f4f4; padding: 8px; border: 1px solid #ddd; overflow-x: auto; }" +
+        "code { background-color: #f4f4f4; padding: 2px 4px; }" +
+        "table { border-collapse: collapse; margin: 8px 0; }" +
+        "th, td { border: 1px solid #ddd; padding: 4px 8px; }" +
+        "th { background-color: #f0f0f0; }" +
+        "blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 12px; color: #555; }";
+
+    // Streaming state for function explanation pane
+    private StringBuilder accumulatedCommittedHtml = new StringBuilder();
+    private String lastPendingHtml = "<span></span>";
+    private boolean documentCorrupted = false;
+    private StreamingScrollManager scrollManager;
+    private JScrollPane explainScrollPane;
+
+    // Streaming state for line explanation pane
+    private StringBuilder lineAccumulatedCommittedHtml = new StringBuilder();
+    private String lineLastPendingHtml = "<span></span>";
+    private boolean lineDocumentCorrupted = false;
+    private StreamingScrollManager lineScrollManager;
+    private JScrollPane lineExplanationScrollPane;
 
     public ExplainTab(TabController controller) {
         super(new BorderLayout());
@@ -81,7 +111,10 @@ public class ExplainTab extends JPanel {
         // Setup card layout for switching between view and edit modes
         contentLayout = new CardLayout();
         contentPanel = new JPanel(contentLayout);
-        contentPanel.add(new JScrollPane(explainTextPane), "view");
+        explainScrollPane = new JScrollPane(explainTextPane);
+        explainScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+        scrollManager = new StreamingScrollManager(explainScrollPane);
+        contentPanel.add(explainScrollPane, "view");
         contentPanel.add(new JScrollPane(markdownTextArea), "edit");
 
         // Initialize security info panel
@@ -161,10 +194,12 @@ public class ExplainTab extends JPanel {
         lineExplanationTextPane.setContentType("text/html");
         lineExplanationTextPane.addHyperlinkListener(controller::handleHyperlinkEvent);
 
-        JScrollPane lineScrollPane = new JScrollPane(lineExplanationTextPane);
-        lineScrollPane.setPreferredSize(new Dimension(0, 150));
-        lineScrollPane.setMinimumSize(new Dimension(0, 80));
-        lineExplanationPanel.add(lineScrollPane, BorderLayout.CENTER);
+        lineExplanationScrollPane = new JScrollPane(lineExplanationTextPane);
+        lineExplanationScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+        lineExplanationScrollPane.setPreferredSize(new Dimension(0, 150));
+        lineExplanationScrollPane.setMinimumSize(new Dimension(0, 80));
+        lineScrollManager = new StreamingScrollManager(lineExplanationScrollPane);
+        lineExplanationPanel.add(lineExplanationScrollPane, BorderLayout.CENTER);
 
         // Set preferred/minimum sizes for the panel
         lineExplanationPanel.setPreferredSize(new Dimension(0, 180));
@@ -567,5 +602,308 @@ public class ExplainTab extends JPanel {
      */
     public boolean isLineExplanationVisible() {
         return lineExplanationPanel.isVisible();
+    }
+
+    // ========================================
+    // Streaming Methods for Function Explanation Pane
+    // ========================================
+
+    /**
+     * Initialize the function explanation pane for streaming with a two-div DOM structure.
+     *
+     * @param prefixHtml Pre-rendered HTML for any prefix content (may be empty)
+     */
+    public void initializeForStreaming(String prefixHtml) {
+        SwingUtilities.invokeLater(() -> {
+            // Reset streaming state
+            accumulatedCommittedHtml.setLength(0);
+            lastPendingHtml = "<span></span>";
+            documentCorrupted = false;
+
+            // Switch to HTML mode
+            explainTextPane.setContentType("text/html");
+            HTMLEditorKit kit = new HTMLEditorKit();
+            explainTextPane.setEditorKit(kit);
+
+            // Build initial HTML with two-div structure
+            String prefix = (prefixHtml != null && !prefixHtml.isEmpty()) ? prefixHtml : "";
+            String initialHtml = String.format(
+                "<html><head><style>%s</style></head><body>%s" +
+                "<div id=\"committed\"></div>" +
+                "<div id=\"pending\"><span></span></div>" +
+                "</body></html>",
+                STREAMING_CSS, prefix);
+
+            explainTextPane.setText(initialHtml);
+
+            // Switch to view mode if in edit mode
+            if (isEditMode) {
+                contentLayout.show(contentPanel, "view");
+                editSaveButton.setText("Edit");
+                isEditMode = false;
+            }
+        });
+    }
+
+    /**
+     * Apply a render update to the function explanation streaming display.
+     * Note: This method is called from EDT (via StreamingMarkdownRenderer's invokeLater).
+     *
+     * @param update The render update to apply
+     */
+    public void applyRenderUpdate(RenderUpdate update) {
+        if (update == null) {
+            return;
+        }
+
+        // Capture scroll state BEFORE any DOM modification
+        boolean wasAtBottom = scrollManager.isAtBottom();
+        int savedScrollValue = scrollManager.getScrollPane().getVerticalScrollBar().getValue();
+
+        // Apply the update
+        switch (update.getType()) {
+            case INCREMENTAL -> applyIncrementalUpdate(update);
+            case FULL_REPLACE -> applyFullReplaceUpdate(update);
+        }
+
+        // Restore scroll position or auto-scroll (matching reference implementation)
+        if (wasAtBottom) {
+            SwingUtilities.invokeLater(() -> scrollManager.scrollToBottom());
+        } else {
+            // Restore the user's scroll position exactly
+            SwingUtilities.invokeLater(() ->
+                    scrollManager.getScrollPane().getVerticalScrollBar().setValue(savedScrollValue));
+        }
+    }
+
+    private void applyIncrementalUpdate(RenderUpdate update) {
+        // Track content for fallback rebuilds
+        String committedHtml = update.getCommittedHtmlToAppend();
+        if (committedHtml != null && !committedHtml.isEmpty()) {
+            accumulatedCommittedHtml.append(committedHtml);
+        }
+        String pendingHtml = update.getPendingHtml();
+        if (pendingHtml != null) {
+            lastPendingHtml = pendingHtml;
+        }
+
+        // If document was previously corrupted, use full rebuild strategy
+        if (documentCorrupted) {
+            rebuildDocument();
+            return;
+        }
+
+        HTMLDocument doc = (HTMLDocument) explainTextPane.getDocument();
+
+        try {
+            // Append committed HTML
+            if (committedHtml != null && !committedHtml.isEmpty()) {
+                Element committedDiv = findElement(doc, "committed");
+                if (committedDiv != null) {
+                    doc.insertBeforeEnd(committedDiv, committedHtml);
+                }
+            }
+
+            // Replace pending div atomically using setOuterHTML
+            if (pendingHtml != null) {
+                Element pendingDiv = findElement(doc, "pending");
+                if (pendingDiv != null) {
+                    String wrappedPending = "<div id=\"pending\">" + pendingHtml + "</div>";
+                    doc.setOuterHTML(pendingDiv, wrappedPending);
+                }
+            }
+        } catch (Exception e) {
+            Msg.warn(this, "DOM update failed, switching to rebuild strategy: " + e.getMessage());
+            documentCorrupted = true;
+            rebuildDocument();
+        }
+    }
+
+    private void applyFullReplaceUpdate(RenderUpdate update) {
+        String fullHtml = update.getFullHtml();
+        if (fullHtml != null) {
+            String wrapped = "<html><head><style>" + STREAMING_CSS + "</style></head><body>" +
+                    fullHtml + "</body></html>";
+            explainTextPane.setText(wrapped);
+            documentCorrupted = false;
+
+            // Store the markdown equivalent for edit mode
+            currentMarkdown = markdownHelper.extractMarkdownFromLlmResponse(fullHtml);
+        }
+    }
+
+    private void rebuildDocument() {
+        String html = "<html><head><style>" + STREAMING_CSS + "</style></head><body>" +
+                accumulatedCommittedHtml.toString() +
+                lastPendingHtml +
+                "</body></html>";
+        explainTextPane.setText(html);
+    }
+
+    private Element findElement(HTMLDocument doc, String id) {
+        return findElementById(doc.getDefaultRootElement(), id);
+    }
+
+    private Element findElementById(Element element, String id) {
+        // Check this element's attributes for an id
+        Object idAttr = element.getAttributes().getAttribute(HTML.Attribute.ID);
+        if (id.equals(idAttr)) {
+            return element;
+        }
+
+        // Recursively search children
+        for (int i = 0; i < element.getElementCount(); i++) {
+            Element found = findElementById(element.getElement(i), id);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
+    // ========================================
+    // Streaming Methods for Line Explanation Pane
+    // ========================================
+
+    /**
+     * Initialize the line explanation pane for streaming with a two-div DOM structure.
+     */
+    public void initializeLineExplanationForStreaming() {
+        SwingUtilities.invokeLater(() -> {
+            // Reset streaming state
+            lineAccumulatedCommittedHtml.setLength(0);
+            lineLastPendingHtml = "<span></span>";
+            lineDocumentCorrupted = false;
+
+            // Switch to HTML mode
+            lineExplanationTextPane.setContentType("text/html");
+            HTMLEditorKit kit = new HTMLEditorKit();
+            lineExplanationTextPane.setEditorKit(kit);
+
+            // Build initial HTML with two-div structure
+            String initialHtml = String.format(
+                "<html><head><style>%s</style></head><body>" +
+                "<div id=\"line-committed\"></div>" +
+                "<div id=\"line-pending\"><span></span></div>" +
+                "</body></html>",
+                STREAMING_CSS);
+
+            lineExplanationTextPane.setText(initialHtml);
+
+            // Ensure the line explanation panel is visible
+            if (mainSplitPane.getBottomComponent() == null) {
+                lineExplanationPanel.setVisible(true);
+                mainSplitPane.setBottomComponent(lineExplanationPanel);
+                mainSplitPane.setDividerSize(8);
+
+                // Set initial divider location
+                SwingUtilities.invokeLater(() -> {
+                    int totalHeight = mainSplitPane.getHeight();
+                    if (totalHeight > 250) {
+                        mainSplitPane.setDividerLocation(totalHeight - 180);
+                    } else {
+                        mainSplitPane.setDividerLocation(0.7);
+                    }
+                });
+            }
+
+            revalidate();
+            repaint();
+        });
+    }
+
+    /**
+     * Apply a render update to the line explanation streaming display.
+     * Note: This method is called from EDT (via StreamingMarkdownRenderer's invokeLater).
+     *
+     * @param update The render update to apply
+     */
+    public void applyLineRenderUpdate(RenderUpdate update) {
+        if (update == null) {
+            return;
+        }
+
+        // Capture scroll state BEFORE any DOM modification
+        boolean wasAtBottom = lineScrollManager.isAtBottom();
+        int savedScrollValue = lineScrollManager.getScrollPane().getVerticalScrollBar().getValue();
+
+        // Apply the update
+        switch (update.getType()) {
+            case INCREMENTAL -> applyLineIncrementalUpdate(update);
+            case FULL_REPLACE -> applyLineFullReplaceUpdate(update);
+        }
+
+        // Restore scroll position or auto-scroll (matching reference implementation)
+        if (wasAtBottom) {
+            SwingUtilities.invokeLater(() -> lineScrollManager.scrollToBottom());
+        } else {
+            // Restore the user's scroll position exactly
+            SwingUtilities.invokeLater(() ->
+                    lineScrollManager.getScrollPane().getVerticalScrollBar().setValue(savedScrollValue));
+        }
+    }
+
+    private void applyLineIncrementalUpdate(RenderUpdate update) {
+        // Track content for fallback rebuilds
+        String committedHtml = update.getCommittedHtmlToAppend();
+        if (committedHtml != null && !committedHtml.isEmpty()) {
+            lineAccumulatedCommittedHtml.append(committedHtml);
+        }
+        String pendingHtml = update.getPendingHtml();
+        if (pendingHtml != null) {
+            lineLastPendingHtml = pendingHtml;
+        }
+
+        // If document was previously corrupted, use full rebuild strategy
+        if (lineDocumentCorrupted) {
+            rebuildLineDocument();
+            return;
+        }
+
+        HTMLDocument doc = (HTMLDocument) lineExplanationTextPane.getDocument();
+
+        try {
+            // Append committed HTML
+            if (committedHtml != null && !committedHtml.isEmpty()) {
+                Element committedDiv = findElement(doc, "line-committed");
+                if (committedDiv != null) {
+                    doc.insertBeforeEnd(committedDiv, committedHtml);
+                }
+            }
+
+            // Replace pending div atomically using setOuterHTML
+            if (pendingHtml != null) {
+                Element pendingDiv = findElement(doc, "line-pending");
+                if (pendingDiv != null) {
+                    String wrappedPending = "<div id=\"line-pending\">" + pendingHtml + "</div>";
+                    doc.setOuterHTML(pendingDiv, wrappedPending);
+                }
+            }
+        } catch (Exception e) {
+            Msg.warn(this, "Line DOM update failed, switching to rebuild strategy: " + e.getMessage());
+            lineDocumentCorrupted = true;
+            rebuildLineDocument();
+        }
+    }
+
+    private void applyLineFullReplaceUpdate(RenderUpdate update) {
+        String fullHtml = update.getFullHtml();
+        if (fullHtml != null) {
+            String wrapped = "<html><head><style>" + STREAMING_CSS + "</style></head><body>" +
+                    fullHtml + "</body></html>";
+            lineExplanationTextPane.setText(wrapped);
+            lineDocumentCorrupted = false;
+
+            // Store the markdown equivalent
+            lineExplanationMarkdown = markdownHelper.extractMarkdownFromLlmResponse(fullHtml);
+        }
+    }
+
+    private void rebuildLineDocument() {
+        String html = "<html><head><style>" + STREAMING_CSS + "</style></head><body>" +
+                lineAccumulatedCommittedHtml.toString() +
+                lineLastPendingHtml +
+                "</body></html>";
+        lineExplanationTextPane.setText(html);
     }
 }

@@ -72,6 +72,30 @@ public class MarkdownHelper {
     }
 
     /**
+     * Convert Markdown text to HTML fragment without any wrapper tags.
+     * Used for streaming rendering where fragments are inserted into an existing document.
+     * Includes table attribute post-processing for Swing compatibility.
+     *
+     * @param markdown The markdown text to convert
+     * @return HTML fragment without html/body wrapper tags
+     */
+    public String markdownToHtmlFragment(String markdown) {
+        if (markdown == null || markdown.isEmpty()) {
+            return "";
+        }
+
+        Document document = parser.parse(markdown);
+        String html = renderer.render(document);
+
+        // Post-process: add HTML attributes for table rendering in Swing
+        // (Swing's HTMLDocument doesn't support CSS border on td/th,
+        //  but does support border/cellpadding/cellspacing attributes)
+        html = html.replace("<table>", "<table border=\"1\" cellpadding=\"4\" cellspacing=\"0\">");
+
+        return html;
+    }
+
+    /**
      * Convert plain text to HTML without markdown parsing.
      * PERFORMANCE OPTIMIZATION: Used during streaming for better responsiveness.
      * Full markdown rendering happens at completion.
