@@ -54,15 +54,8 @@ public class QueryTab extends JPanel {
         "#addr to include the current hex address.\n" +
         "#range(start, end) to include the view data in a given range.";
 
-    // Streaming markdown rendering CSS
-    private static final String STREAMING_CSS =
-        "body { font-family: sans-serif; font-size: 14px; margin: 8px; }" +
-        "pre { background-color: #f4f4f4; padding: 8px; border: 1px solid #ddd; overflow-x: auto; }" +
-        "code { background-color: #f4f4f4; padding: 2px 4px; }" +
-        "table { border-collapse: collapse; margin: 8px 0; }" +
-        "th, td { border: 1px solid #ddd; padding: 4px 8px; }" +
-        "th { background-color: #f0f0f0; }" +
-        "blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 12px; color: #555; }";
+    // Use shared CSS from MarkdownHelper for consistency between streaming and final rendering
+    private static final String STREAMING_CSS = MarkdownHelper.MARKDOWN_CSS;
 
     // Streaming state fields
     private StringBuilder accumulatedCommittedHtml = new StringBuilder();

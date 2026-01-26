@@ -441,6 +441,15 @@ public class ExplainTab extends JPanel {
     }
 
     /**
+     * Set the markdown source directly (avoids lossy HTML-to-markdown conversion).
+     *
+     * @param markdown The original markdown content
+     */
+    public void setMarkdownSource(String markdown) {
+        this.currentMarkdown = markdown != null ? markdown : "";
+    }
+
+    /**
      * Update the security info panel with analysis results.
      *
      * @param riskLevel Risk level (LOW, MEDIUM, HIGH) or null

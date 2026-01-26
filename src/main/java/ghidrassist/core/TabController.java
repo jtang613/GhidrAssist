@@ -414,6 +414,7 @@ public class TabController {
 
                                 // Update security info panel only (don't overwrite streamed content)
                                 SwingUtilities.invokeLater(() -> {
+                                    explainTab.setMarkdownSource(fullSummary);
                                     explainTab.updateSecurityInfo(
                                         updatedNode.getRiskLevel(),
                                         updatedNode.getActivityProfile(),
@@ -1851,6 +1852,7 @@ public class TabController {
                     feedbackService.cacheLastInteraction(feedbackService.getLastPrompt(), fullResponse);
                     explainTab.setExplanationText(
                         markdownHelper.markdownToHtml(fullResponse));
+                    explainTab.setMarkdownSource(fullResponse);
                     setUIState(false, "Explain Line", null);
                 });
             }
@@ -1949,8 +1951,10 @@ public class TabController {
                         queryService.addAssistantResponse(finalResponse);
 
                         // Final markdown rendering
-                        String html = markdownHelper.markdownToHtml(queryService.getConversationHistory());
+                        String conversationHistory = queryService.getConversationHistory();
+                        String html = markdownHelper.markdownToHtml(conversationHistory);
                         queryTab.setResponseText(html);
+                        queryTab.setMarkdownSource(conversationHistory);
                         setUIState(false, "Submit", null);
                         currentLlmApi = null;
 

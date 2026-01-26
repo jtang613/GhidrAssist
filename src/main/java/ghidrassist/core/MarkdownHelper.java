@@ -13,6 +13,13 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MarkdownHelper {
+    /**
+     * Shared CSS for consistent markdown rendering in Swing JEditorPane.
+     * Used for both streaming and final rendering.
+     * Minimal/empty to rely on JEditorPane's clean default styling.
+     */
+    public static final String MARKDOWN_CSS = "";
+
     private final Parser parser;
     private final HtmlRenderer renderer;
     private final FlexmarkHtmlConverter htmlToMdConverter;
@@ -50,7 +57,8 @@ public class MarkdownHelper {
         String feedbackLinks = "<br><div style=\"text-align: center; color: grey; font-size: 18px;\">" +
             "<a href='thumbsup'>\u2714</a> | <a href='thumbsdown'>\u2716</a></div>";
             
-        return "<html><body>" + html + feedbackLinks + "</body></html>";
+        return "<html><head><style>" + MARKDOWN_CSS + "</style></head><body>" +
+               html + feedbackLinks + "</body></html>";
     }
     
     /**
@@ -68,7 +76,8 @@ public class MarkdownHelper {
         Document document = parser.parse(markdown);
         String html = renderer.render(document);
 
-        return "<html><body>" + html + "</body></html>";
+        return "<html><head><style>" + MARKDOWN_CSS + "</style></head><body>" +
+               html + "</body></html>";
     }
 
     /**
