@@ -198,7 +198,7 @@ public class SymGraphTab extends JPanel {
         });
 
         conflictTableModel = new DefaultTableModel(
-                new Object[]{"Select", "Address", "Local Name", "Remote Name", "Action"}, 0) {
+                new Object[]{"Select", "Address", "Type/Storage", "Local Name", "Remote Name", "Action"}, 0) {
             private static final long serialVersionUID = 1L;
 
             @Override
@@ -216,7 +216,7 @@ public class SymGraphTab extends JPanel {
         conflictTable.setAutoResizeMode(JTable.AUTO_RESIZE_SUBSEQUENT_COLUMNS);
         conflictTable.setFillsViewportHeight(true);
 
-        // Set column widths - Select narrow, Action narrow, others flexible
+        // Set column widths - Select narrow, Type/Storage, Action narrow, others flexible
         conflictTable.getColumnModel().getColumn(0).setMinWidth(50);
         conflictTable.getColumnModel().getColumn(0).setMaxWidth(60);
         conflictTable.getColumnModel().getColumn(0).setPreferredWidth(50);
@@ -224,18 +224,21 @@ public class SymGraphTab extends JPanel {
         conflictTable.getColumnModel().getColumn(1).setMinWidth(80);
         conflictTable.getColumnModel().getColumn(1).setPreferredWidth(100);
 
-        conflictTable.getColumnModel().getColumn(2).setMinWidth(100);
-        conflictTable.getColumnModel().getColumn(2).setPreferredWidth(150);
+        conflictTable.getColumnModel().getColumn(2).setMinWidth(90);
+        conflictTable.getColumnModel().getColumn(2).setPreferredWidth(120);
 
         conflictTable.getColumnModel().getColumn(3).setMinWidth(100);
         conflictTable.getColumnModel().getColumn(3).setPreferredWidth(150);
 
-        conflictTable.getColumnModel().getColumn(4).setMinWidth(70);
-        conflictTable.getColumnModel().getColumn(4).setMaxWidth(90);
-        conflictTable.getColumnModel().getColumn(4).setPreferredWidth(80);
+        conflictTable.getColumnModel().getColumn(4).setMinWidth(100);
+        conflictTable.getColumnModel().getColumn(4).setPreferredWidth(150);
+
+        conflictTable.getColumnModel().getColumn(5).setMinWidth(70);
+        conflictTable.getColumnModel().getColumn(5).setMaxWidth(90);
+        conflictTable.getColumnModel().getColumn(5).setPreferredWidth(80);
 
         // Custom renderer for action column (color-coded)
-        conflictTable.getColumnModel().getColumn(4).setCellRenderer(new ActionCellRenderer());
+        conflictTable.getColumnModel().getColumn(5).setCellRenderer(new ActionCellRenderer());
 
         selectAllButton = new JButton("Select All");
         deselectAllButton = new JButton("Deselect All");
@@ -1000,13 +1003,59 @@ public class SymGraphTab extends JPanel {
         showSummaryPage();
     }
 
+    private String formatStorageInfo(Symbol symbol) {
+        if (symbol == null) {
+            return "";
+        }
+
+        String symType = symbol.getSymbolType();
+        if (!"variable".equals(symType)) {
+            return "func";
+        }
+
+        java.util.Map<String, Object> metadata = symbol.getMetadata();
+        if (metadata == null) {
+            return "variable";
+        }
+
+        String storageClass = (String) metadata.get("storage_class");
+        String scope = (String) metadata.get("scope");
+
+        if ("parameter".equals(storageClass)) {
+            Object idx = metadata.get("parameter_index");
+            String reg = (String) metadata.get("register");
+            String idxStr = idx != null ? idx.toString() : "?";
+            if (reg != null) {
+                return String.format("param[%s] (%s)", idxStr, reg);
+            }
+            return String.format("param[%s]", idxStr);
+        } else if ("stack".equals(storageClass)) {
+            Object offsetObj = metadata.get("stack_offset");
+            if (offsetObj != null) {
+                int offset = ((Number) offsetObj).intValue();
+                String sign = offset >= 0 ? "+" : "";
+                return String.format("local [%s0x%x]", sign, Math.abs(offset));
+            }
+            return "local [stack]";
+        } else if ("register".equals(storageClass)) {
+            String reg = (String) metadata.get("register");
+            return reg != null ? String.format("local (%s)", reg) : "local (reg)";
+        } else if ("local".equals(scope)) {
+            return "local";
+        }
+
+        return "global";
+    }
+
     private void refreshConflictTable(List<ConflictEntry> conflicts) {
         conflictTableModel.setRowCount(0);
         displayedConflicts = new ArrayList<>(conflicts);
         for (ConflictEntry conflict : displayedConflicts) {
+            String storageInfo = formatStorageInfo(conflict.getRemoteSymbol());
             conflictTableModel.addRow(new Object[]{
                     conflict.isSelected(),
                     conflict.getAddressHex(),
+                    storageInfo,
                     conflict.getLocalNameDisplay(),
                     conflict.getRemoteNameDisplay(),
                     conflict.getAction().getValue().toUpperCase()

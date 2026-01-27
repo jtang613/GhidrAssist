@@ -32,7 +32,6 @@ import ghidrassist.graphrag.extraction.SecurityFeatures;
 import ghidrassist.services.symgraph.SymGraphService;
 import ghidrassist.services.symgraph.SymGraphModels.*;
 import ghidrassist.workers.*;
-import ghidrassist.core.streaming.RenderUpdate;
 import ghidrassist.core.streaming.StreamingMarkdownRenderer;
 
 import com.google.gson.Gson;
@@ -362,8 +361,6 @@ public class TabController {
                             markdownHelper
                         );
                         SwingUtilities.invokeLater(() -> explainTab.initializeForStreaming(""));
-
-                        final KnowledgeNode nodeForCallback = node;
 
                         // Use streaming summarizeNode method
                         Msg.info(this, "Calling summarizeNodeStreaming...");
@@ -1324,6 +1321,14 @@ public class TabController {
                 node.setUserEdited(false);
                 node.markStale();
                 graph.upsertNode(node);
+            }
+
+            // Clear all line explanations for this function
+            int deletedLines = analysisDB.clearLineExplanationsForFunction(
+                programHash, function.getEntryPoint().getOffset()
+            );
+            if (deletedLines > 0) {
+                Msg.info(this, "Cleared " + deletedLines + " line explanation(s) for function");
             }
 
             explainTab.setExplanationText("");
@@ -3694,6 +3699,72 @@ public class TabController {
         }
     }
 
+    private boolean applyVariableSymbol(Function func,
+            ghidrassist.services.symgraph.SymGraphModels.Symbol remoteSymbol) {
+        if (remoteSymbol == null || remoteSymbol.getName() == null) {
+            return false;
+        }
+
+        Map<String, Object> metadata = remoteSymbol.getMetadata();
+        if (metadata == null) {
+            return false;
+        }
+
+        String storageClass = (String) metadata.get("storage_class");
+        String targetName = remoteSymbol.getName();
+
+        try {
+            if ("parameter".equals(storageClass)) {
+                Object paramIdxObj = metadata.get("parameter_index");
+                if (paramIdxObj != null) {
+                    int paramIdx = ((Number) paramIdxObj).intValue();
+                    ghidra.program.model.listing.Parameter[] params = func.getParameters();
+                    if (paramIdx < params.length) {
+                        params[paramIdx].setName(targetName,
+                            ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                        return true;
+                    }
+                }
+            } else if ("stack".equals(storageClass)) {
+                Object stackOffsetObj = metadata.get("stack_offset");
+                if (stackOffsetObj != null) {
+                    int stackOffset = ((Number) stackOffsetObj).intValue();
+                    for (ghidra.program.model.listing.Variable var : func.getLocalVariables()) {
+                        if (var.isStackVariable()) {
+                            try {
+                                if (var.getStackOffset() == stackOffset) {
+                                    var.setName(targetName,
+                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                    return true;
+                                }
+                            } catch (UnsupportedOperationException e) {
+                                // Not a simple stack var
+                            }
+                        }
+                    }
+                }
+            } else if ("register".equals(storageClass)) {
+                String regName = (String) metadata.get("register");
+                if (regName != null) {
+                    for (ghidra.program.model.listing.Variable var : func.getLocalVariables()) {
+                        if (var.isRegisterVariable()) {
+                            ghidra.program.model.lang.Register reg = var.getRegister();
+                            if (reg != null && regName.equals(reg.getName())) {
+                                var.setName(targetName,
+                                    ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Msg.error(this, "Error applying variable: " + e.getMessage());
+        }
+
+        return false;
+    }
+
     public void handleSymGraphApplySelected(List<ConflictEntry> selectedConflicts) {
         if (symGraphTab == null || plugin.getCurrentProgram() == null) {
             return;
@@ -3728,16 +3799,31 @@ public class TabController {
                         }
 
                         try {
-                            Address addr = plugin.getCurrentProgram().getAddressFactory()
-                                .getDefaultAddressSpace().getAddress(conflict.getAddress());
+                            long addr = conflict.getAddress();
+                            Address address = plugin.getCurrentProgram().getAddressFactory()
+                                .getDefaultAddressSpace().getAddress(addr);
 
-                            Function func = plugin.getCurrentProgram().getFunctionManager()
-                                .getFunctionAt(addr);
+                            String symbolType = conflict.getRemoteSymbol().getSymbolType();
 
-                            if (func != null) {
-                                func.setName(conflict.getRemoteSymbol().getName(),
-                                    ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                                appliedCount++;
+                            if ("variable".equals(symbolType)) {
+                                // Variable - use storage-aware application
+                                Function func = plugin.getCurrentProgram().getFunctionManager()
+                                    .getFunctionContaining(address);
+                                if (func != null && func.getEntryPoint().getOffset() == addr) {
+                                    if (applyVariableSymbol(func, conflict.getRemoteSymbol())) {
+                                        appliedCount++;
+                                    }
+                                }
+                            } else {
+                                // Function or other symbol
+                                Function func = plugin.getCurrentProgram().getFunctionManager()
+                                    .getFunctionAt(address);
+
+                                if (func != null) {
+                                    func.setName(conflict.getRemoteSymbol().getName(),
+                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                    appliedCount++;
+                                }
                             }
                         } catch (Exception e) {
                             Msg.error(this, "Error applying symbol at 0x" +
@@ -3817,16 +3903,31 @@ public class TabController {
                         });
 
                         try {
-                            Address addr = plugin.getCurrentProgram().getAddressFactory()
-                                .getDefaultAddressSpace().getAddress(conflict.getAddress());
+                            long addrVal = conflict.getAddress();
+                            Address address = plugin.getCurrentProgram().getAddressFactory()
+                                .getDefaultAddressSpace().getAddress(addrVal);
 
-                            Function func = plugin.getCurrentProgram().getFunctionManager()
-                                .getFunctionAt(addr);
+                            String symbolType = conflict.getRemoteSymbol().getSymbolType();
 
-                            if (func != null) {
-                                func.setName(conflict.getRemoteSymbol().getName(),
-                                    ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                                appliedCount++;
+                            if ("variable".equals(symbolType)) {
+                                // Variable - use storage-aware application
+                                Function func = plugin.getCurrentProgram().getFunctionManager()
+                                    .getFunctionContaining(address);
+                                if (func != null && func.getEntryPoint().getOffset() == addrVal) {
+                                    if (applyVariableSymbol(func, conflict.getRemoteSymbol())) {
+                                        appliedCount++;
+                                    }
+                                }
+                            } else {
+                                // Function or other symbol
+                                Function func = plugin.getCurrentProgram().getFunctionManager()
+                                    .getFunctionAt(address);
+
+                                if (func != null) {
+                                    func.setName(conflict.getRemoteSymbol().getName(),
+                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                                    appliedCount++;
+                                }
                             }
                         } catch (Exception e) {
                             Msg.error(this, "Error applying symbol at 0x" +
@@ -4046,6 +4147,11 @@ public class TabController {
                     ghidra.program.model.symbol.Symbol sym = program.getSymbolTable().getPrimarySymbol(addr);
                     String name = (sym != null) ? sym.getName() : null;
 
+                    // Skip variables without names
+                    if (name == null || name.isEmpty()) {
+                        continue;
+                    }
+
                     // Use unified default name detection for cross-tool compatibility
                     boolean isAutoNamed = ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(name);
 
@@ -4070,8 +4176,10 @@ public class TabController {
     private List<Map<String, Object>> collectFunctionVariables(Function func) {
         List<Map<String, Object>> symbols = new ArrayList<>();
         try {
-            // Parameters
-            for (ghidra.program.model.listing.Parameter param : func.getParameters()) {
+            // Parameters - use ordinal for index
+            ghidra.program.model.listing.Parameter[] params = func.getParameters();
+            for (int i = 0; i < params.length; i++) {
+                ghidra.program.model.listing.Parameter param = params[i];
                 if (param.getName() != null) {
                     // Use unified default name detection for cross-tool compatibility
                     boolean isAuto = ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(param.getName());
@@ -4084,9 +4192,27 @@ public class TabController {
                     }
                     map.put("confidence", isAuto ? 0.3 : 0.8);
                     map.put("provenance", isAuto ? "decompiler" : "user");
+
                     Map<String, Object> metadata = new java.util.HashMap<>();
                     metadata.put("scope", "parameter");
                     metadata.put("function", func.getName());
+                    metadata.put("storage_class", "parameter");
+                    metadata.put("parameter_index", param.getOrdinal());
+
+                    // Also capture actual storage location
+                    try {
+                        if (param.isRegisterVariable()) {
+                            ghidra.program.model.lang.Register reg = param.getRegister();
+                            if (reg != null) {
+                                metadata.put("register", reg.getName());
+                            }
+                        } else if (param.isStackVariable()) {
+                            metadata.put("stack_offset", param.getStackOffset());
+                        }
+                    } catch (Exception e) {
+                        // Storage info optional
+                    }
+
                     map.put("metadata", metadata);
                     symbols.add(map);
                 }
@@ -4106,9 +4232,30 @@ public class TabController {
                     }
                     map.put("confidence", isAuto ? 0.3 : 0.75);
                     map.put("provenance", isAuto ? "decompiler" : "user");
+
                     Map<String, Object> metadata = new java.util.HashMap<>();
                     metadata.put("scope", "local");
                     metadata.put("function", func.getName());
+
+                    try {
+                        if (var.isStackVariable()) {
+                            metadata.put("storage_class", "stack");
+                            metadata.put("stack_offset", var.getStackOffset());
+                        } else if (var.isRegisterVariable()) {
+                            metadata.put("storage_class", "register");
+                            ghidra.program.model.lang.Register reg = var.getRegister();
+                            if (reg != null) {
+                                metadata.put("register", reg.getName());
+                            }
+                        } else {
+                            metadata.put("storage_class", "compound");
+                            metadata.put("storage_string", var.getVariableStorage().toString());
+                        }
+                    } catch (UnsupportedOperationException e) {
+                        metadata.put("storage_class", "compound");
+                        metadata.put("storage_string", var.getVariableStorage().toString());
+                    }
+
                     map.put("metadata", metadata);
                     symbols.add(map);
                 }
