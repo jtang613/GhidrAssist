@@ -390,6 +390,7 @@ public class BinaryKnowledgeGraph {
 
         // Step 2: UPDATE existing nodes (for when INSERT was ignored)
         String updateSql = "UPDATE graph_nodes SET "
+                + "name = COALESCE(?, name), "
                 + "raw_content = COALESCE(?, raw_content), "
                 + "llm_summary = COALESCE(?, llm_summary), "
                 + "confidence = ?, "
@@ -448,25 +449,26 @@ public class BinaryKnowledgeGraph {
             // Step 2: UPDATE existing node data (handles case where INSERT was ignored)
             // This ensures summaries and other updated fields get saved
             try (PreparedStatement updateStmt = connection.prepareStatement(updateSql)) {
-                updateStmt.setString(1, node.getRawContent());
-                updateStmt.setString(2, node.getLlmSummary());
-                updateStmt.setFloat(3, node.getConfidence());
-                updateStmt.setBytes(4, node.serializeEmbedding());
-                updateStmt.setString(5, node.serializeSecurityFlags());
-                updateStmt.setString(6, node.serializeNetworkAPIs());
-                updateStmt.setString(7, node.serializeFileIOAPIs());
-                updateStmt.setString(8, node.serializeIPAddresses());
-                updateStmt.setString(9, node.serializeURLs());
-                updateStmt.setString(10, node.serializeFilePaths());
-                updateStmt.setString(11, node.serializeDomains());
-                updateStmt.setString(12, node.serializeRegistryKeys());
-                updateStmt.setString(13, node.getRiskLevel());
-                updateStmt.setString(14, node.getActivityProfile());
-                updateStmt.setInt(15, node.getAnalysisDepth());
-                updateStmt.setLong(16, node.getUpdatedAt().toEpochMilli());
-                updateStmt.setInt(17, node.isStale() ? 1 : 0);
-                updateStmt.setInt(18, node.isUserEdited() ? 1 : 0);
-                updateStmt.setString(19, node.getId());
+                updateStmt.setString(1, node.getName());
+                updateStmt.setString(2, node.getRawContent());
+                updateStmt.setString(3, node.getLlmSummary());
+                updateStmt.setFloat(4, node.getConfidence());
+                updateStmt.setBytes(5, node.serializeEmbedding());
+                updateStmt.setString(6, node.serializeSecurityFlags());
+                updateStmt.setString(7, node.serializeNetworkAPIs());
+                updateStmt.setString(8, node.serializeFileIOAPIs());
+                updateStmt.setString(9, node.serializeIPAddresses());
+                updateStmt.setString(10, node.serializeURLs());
+                updateStmt.setString(11, node.serializeFilePaths());
+                updateStmt.setString(12, node.serializeDomains());
+                updateStmt.setString(13, node.serializeRegistryKeys());
+                updateStmt.setString(14, node.getRiskLevel());
+                updateStmt.setString(15, node.getActivityProfile());
+                updateStmt.setInt(16, node.getAnalysisDepth());
+                updateStmt.setLong(17, node.getUpdatedAt().toEpochMilli());
+                updateStmt.setInt(18, node.isStale() ? 1 : 0);
+                updateStmt.setInt(19, node.isUserEdited() ? 1 : 0);
+                updateStmt.setString(20, node.getId());
 
                 updateStmt.executeUpdate();
             }

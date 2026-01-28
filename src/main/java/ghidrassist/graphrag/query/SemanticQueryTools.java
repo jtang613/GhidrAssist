@@ -21,6 +21,7 @@ import ghidrassist.graphrag.extraction.StructureExtractor;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
 import ghidrassist.mcp2.tools.MCPTool;
 import ghidrassist.mcp2.tools.MCPToolResult;
+import ghidrassist.services.symgraph.SymGraphUtils;
 
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
@@ -390,6 +391,8 @@ public class SemanticQueryTools {
                         return executeFindTaintPaths(arguments);
                     case "ga_create_edge":
                         return executeCreateEdge(arguments);
+                    case "ga_refresh_names":
+                        return executeRefreshNames(arguments);
                     default:
                         return MCPToolResult.error("Unknown tool: " + toolName);
                 }
@@ -420,7 +423,8 @@ public class SemanticQueryTools {
                lowerName.equals("ga_detect_communities") ||
                lowerName.equals("ga_global_query") ||
                lowerName.equals("ga_find_taint_paths") ||
-               lowerName.equals("ga_create_edge");
+               lowerName.equals("ga_create_edge") ||
+               lowerName.equals("ga_refresh_names");
     }
 
     // ========================================
@@ -820,7 +824,8 @@ public class SemanticQueryTools {
             return false;
         }
 
-        String currentName = function.getName();
+        // Use qualified name to include namespace (e.g., "Class::method")
+        String currentName = SymGraphUtils.getQualifiedFunctionName(function);
         String storedName = node.getName();
 
         if (currentName != null && !currentName.equals(storedName)) {
