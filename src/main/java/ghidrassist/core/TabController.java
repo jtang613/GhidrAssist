@@ -2738,6 +2738,14 @@ public class TabController {
         symGraphController.handleApplyAllNew();
     }
 
+    public void cancelSymGraphApply() {
+        symGraphController.cancelApply();
+    }
+
+    public void cancelSymGraphPull() {
+        symGraphController.cancelPull();
+    }
+
     public void updateSymGraphBinaryInfo() {
         symGraphController.updateBinaryInfo();
     }

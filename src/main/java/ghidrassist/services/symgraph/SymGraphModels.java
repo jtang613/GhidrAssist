@@ -90,6 +90,7 @@ public class SymGraphModels {
         private double confidence;
         private String provenance;
         private String source;
+        private String content;  // For comments - stores the comment text
         private Map<String, Object> metadata;
 
         public Symbol() {}
@@ -117,6 +118,8 @@ public class SymGraphModels {
         public void setProvenance(String provenance) { this.provenance = provenance; }
         public String getSource() { return source; }
         public void setSource(String source) { this.source = source; }
+        public String getContent() { return content; }
+        public void setContent(String content) { this.content = content; }
         public Map<String, Object> getMetadata() { return metadata; }
         public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
     }

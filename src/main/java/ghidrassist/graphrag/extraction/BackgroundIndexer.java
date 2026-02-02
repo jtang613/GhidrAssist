@@ -320,9 +320,26 @@ public class BackgroundIndexer {
      */
     public static StructureExtractor.ExtractionResult runStructureSync(
             Program program, BinaryKnowledgeGraph graph, TaskMonitor monitor, boolean includeBlocks) {
+        return runStructureSync(program, graph, monitor, includeBlocks, false);
+    }
+
+    /**
+     * Run structure extraction synchronously with optional incremental mode.
+     *
+     * @param program       The program to extract from
+     * @param graph         The knowledge graph to populate
+     * @param monitor       Task monitor for progress/cancellation
+     * @param includeBlocks Whether to extract basic blocks
+     * @param incremental   If true, preserves existing semantic data (summaries, embeddings, flags)
+     * @return Extraction result with statistics
+     */
+    public static StructureExtractor.ExtractionResult runStructureSync(
+            Program program, BinaryKnowledgeGraph graph, TaskMonitor monitor,
+            boolean includeBlocks, boolean incremental) {
 
         StructureExtractor extractor = new StructureExtractor(program, graph, monitor);
         try {
+            extractor.setIncrementalMode(incremental);
             return extractor.extractAll(includeBlocks);
         } finally {
             extractor.dispose();

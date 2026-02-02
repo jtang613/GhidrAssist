@@ -46,7 +46,6 @@ public class GraphViewPanel extends JPanel {
     // Controls
     private JSpinner nHopsSpinner;
     private JCheckBox showCallsCheckbox;
-    private JCheckBox showRefsCheckbox;
     private JCheckBox showVulnCheckbox;
     private JCheckBox showNetworkCheckbox;
 
@@ -286,7 +285,6 @@ public class GraphViewPanel extends JPanel {
 
         // Edge type checkboxes
         showCallsCheckbox = new JCheckBox("CALLS", true);
-        showRefsCheckbox = new JCheckBox("REFS", false);  // Disabled by default - causes cycles
         showVulnCheckbox = new JCheckBox("VULN", true);
         showNetworkCheckbox = new JCheckBox("NETWORK", true);
 
@@ -377,7 +375,6 @@ public class GraphViewPanel extends JPanel {
         leftControls.add(Box.createHorizontalStrut(10));
         leftControls.add(new JLabel("Edge Types:"));
         leftControls.add(showCallsCheckbox);
-        leftControls.add(showRefsCheckbox);
         leftControls.add(showVulnCheckbox);
         leftControls.add(showNetworkCheckbox);
 
@@ -425,7 +422,6 @@ public class GraphViewPanel extends JPanel {
 
         // Edge type filters
         showCallsCheckbox.addActionListener(e -> refresh());
-        showRefsCheckbox.addActionListener(e -> refresh());
         showVulnCheckbox.addActionListener(e -> refresh());
         showNetworkCheckbox.addActionListener(e -> refresh());
 
@@ -599,9 +595,6 @@ public class GraphViewPanel extends JPanel {
         Set<EdgeType> types = new HashSet<>();
         if (showCallsCheckbox.isSelected()) {
             types.add(EdgeType.CALLS);
-        }
-        if (showRefsCheckbox.isSelected()) {
-            types.add(EdgeType.REFERENCES);
         }
         if (showVulnCheckbox.isSelected()) {
             types.add(EdgeType.CALLS_VULNERABLE);

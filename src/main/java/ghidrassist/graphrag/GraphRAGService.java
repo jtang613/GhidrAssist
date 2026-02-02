@@ -401,10 +401,26 @@ public class GraphRAGService {
     public StructureExtractor.ExtractionResult indexStructureSync(Program program,
                                                                     TaskMonitor monitor,
                                                                     boolean includeBlocks) {
+        return indexStructureSync(program, monitor, includeBlocks, false);
+    }
+
+    /**
+     * Run structure extraction synchronously with optional incremental mode.
+     *
+     * @param program       The program to index
+     * @param monitor       Task monitor for progress/cancellation
+     * @param includeBlocks Whether to extract basic blocks
+     * @param incremental   If true, preserves existing semantic data (summaries, embeddings, flags)
+     * @return Extraction result with statistics
+     */
+    public StructureExtractor.ExtractionResult indexStructureSync(Program program,
+                                                                    TaskMonitor monitor,
+                                                                    boolean includeBlocks,
+                                                                    boolean incremental) {
         String programHash = program.getExecutableSHA256();
         BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
 
-        return BackgroundIndexer.runStructureSync(program, graph, monitor, includeBlocks);
+        return BackgroundIndexer.runStructureSync(program, graph, monitor, includeBlocks, incremental);
     }
 
     /**

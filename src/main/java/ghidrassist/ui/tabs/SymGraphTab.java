@@ -51,6 +51,10 @@ public class SymGraphTab extends JPanel {
     private JButton applyButton;
     private JButton cancelButton;
     private JLabel pullStatusLabel;
+    private JProgressBar pullProgressBar;
+    private JLabel pullProgressLabel;
+    private JButton cancelPullButton;
+    private JPanel pullProgressPanel;
 
     // Pull configuration
     private JCheckBox pullFunctionsCheck;
@@ -246,6 +250,13 @@ public class SymGraphTab extends JPanel {
         applyButton = new JButton("Apply Selected");
         cancelButton = new JButton("Cancel");
         pullStatusLabel = new JLabel("");
+
+        // Pull progress components
+        pullProgressBar = new JProgressBar(0, 100);
+        pullProgressBar.setStringPainted(true);
+        pullProgressLabel = new JLabel("Fetching...");
+        pullProgressLabel.setForeground(Color.GRAY);
+        cancelPullButton = new JButton("Cancel");
     }
 
     private void layoutComponents() {
@@ -415,7 +426,15 @@ public class SymGraphTab extends JPanel {
         // Button row
         JPanel buttonRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         buttonRow.add(pullPreviewButton);
+        buttonRow.add(cancelPullButton);
         configPanel.add(buttonRow);
+
+        // Pull progress panel (hidden by default)
+        pullProgressPanel = new JPanel(new BorderLayout(5, 5));
+        pullProgressPanel.add(pullProgressBar, BorderLayout.CENTER);
+        pullProgressPanel.add(pullProgressLabel, BorderLayout.SOUTH);
+        pullProgressPanel.setVisible(false);
+        configPanel.add(pullProgressPanel);
 
         panel.add(configPanel, BorderLayout.NORTH);
 
@@ -817,6 +836,10 @@ public class SymGraphTab extends JPanel {
             }
         });
 
+        // Initially hide the pull cancel button
+        cancelPullButton.setVisible(false);
+        cancelPullButton.addActionListener(e -> controller.cancelSymGraphPull());
+
         selectAllButton.addActionListener(e -> setAllSelected(true));
         deselectAllButton.addActionListener(e -> setAllSelected(false));
         invertSelectionButton.addActionListener(e -> invertSelection());
@@ -829,8 +852,8 @@ public class SymGraphTab extends JPanel {
         backToSummaryButton.addActionListener(e -> showSummaryPage());
         doneButton.addActionListener(e -> resetWizard());
         applyCancelButton.addActionListener(e -> {
-            // Cancel is handled by the controller - just reset
-            resetWizard();
+            // Request cancellation from the controller
+            controller.cancelSymGraphApply();
         });
     }
 
@@ -951,6 +974,45 @@ public class SymGraphTab extends JPanel {
         } else {
             pullStatusLabel.setForeground(Color.RED);
         }
+    }
+
+    /**
+     * Show the pull progress panel.
+     */
+    public void showPullProgress(String message) {
+        SwingUtilities.invokeLater(() -> {
+            pullProgressBar.setValue(0);
+            pullProgressBar.setString(message != null ? message : "Fetching...");
+            pullProgressLabel.setText(message != null ? message : "Fetching...");
+            pullProgressPanel.setVisible(true);
+            cancelPullButton.setVisible(true);
+            pullPreviewButton.setEnabled(false);
+        });
+    }
+
+    /**
+     * Update the pull progress bar.
+     */
+    public void updatePullProgress(int current, int total, String message) {
+        SwingUtilities.invokeLater(() -> {
+            int percent = total > 0 ? (current * 100) / total : 0;
+            pullProgressBar.setValue(percent);
+            pullProgressBar.setString(String.format("%d%%", percent));
+            if (message != null) {
+                pullProgressLabel.setText(message);
+            }
+        });
+    }
+
+    /**
+     * Hide the pull progress panel.
+     */
+    public void hidePullProgress() {
+        SwingUtilities.invokeLater(() -> {
+            pullProgressPanel.setVisible(false);
+            cancelPullButton.setVisible(false);
+            pullPreviewButton.setEnabled(true);
+        });
     }
 
     public void populateConflicts(List<ConflictEntry> conflicts) {
@@ -1160,36 +1222,51 @@ public class SymGraphTab extends JPanel {
      * Show the applying page with a status message.
      */
     public void showApplyingPage(String message) {
-        applyProgressBar.setValue(0);
-        applyProgressLabel.setText(message != null ? message : "Starting...");
-        wizardLayout.show(wizardPanel, PAGE_APPLYING);
+        SwingUtilities.invokeLater(() -> {
+            applyProgressBar.setValue(0);
+            applyProgressLabel.setText(message != null ? message : "Starting...");
+            wizardLayout.show(wizardPanel, PAGE_APPLYING);
+        });
     }
 
     /**
      * Update the apply progress bar.
      */
     public void updateApplyProgress(int current, int total, String message) {
-        int percent = total > 0 ? (int) ((current * 100L) / total) : 0;
-        applyProgressBar.setValue(percent);
-        applyProgressBar.setString(String.format("%d/%d (%d%%)", current, total, percent));
-        if (message != null) {
-            applyProgressLabel.setText(message);
-        }
+        SwingUtilities.invokeLater(() -> {
+            int percent = total > 0 ? (int) ((current * 100L) / total) : 0;
+            applyProgressBar.setValue(percent);
+            applyProgressBar.setString(String.format("%d/%d (%d%%)", current, total, percent));
+            if (message != null) {
+                applyProgressLabel.setText(message);
+            }
+        });
+    }
+
+    /**
+     * Hide the apply progress (no-op since we show complete page instead).
+     * Provided for API consistency with other progress patterns.
+     */
+    public void hideApplyProgress() {
+        // The wizard navigates directly to the complete page,
+        // so there's nothing to hide. This method exists for API consistency.
     }
 
     /**
      * Show the complete page with results.
      */
     public void showCompletePage(String message, boolean success) {
-        if (success) {
-            completeIcon.setText("✓");
-            completeIcon.setForeground(new Color(0, 128, 0));
-        } else {
-            completeIcon.setText("✗");
-            completeIcon.setForeground(Color.RED);
-        }
-        completeMessage.setText(message != null ? message : "Operation Complete");
-        wizardLayout.show(wizardPanel, PAGE_COMPLETE);
+        SwingUtilities.invokeLater(() -> {
+            if (success) {
+                completeIcon.setText("✓");
+                completeIcon.setForeground(new Color(0, 128, 0));
+            } else {
+                completeIcon.setText("✗");
+                completeIcon.setForeground(Color.RED);
+            }
+            completeMessage.setText(message != null ? message : "Operation Complete");
+            wizardLayout.show(wizardPanel, PAGE_COMPLETE);
+        });
     }
 
     /**

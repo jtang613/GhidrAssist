@@ -278,6 +278,15 @@ public class SymGraphService {
                 symbol.setDataType(getStringOrNull(symObj, "data_type"));
                 symbol.setConfidence(getDoubleOrDefault(symObj, "confidence", 0.0));
                 symbol.setProvenance(getStringOrDefault(symObj, "provenance", "unknown"));
+                symbol.setContent(getStringOrNull(symObj, "content"));
+
+                // Parse metadata if present (for variables, comments, structs, enums)
+                if (symObj.has("metadata") && !symObj.get("metadata").isJsonNull()) {
+                    Map<String, Object> metadata = gson.fromJson(
+                            symObj.get("metadata"), new TypeToken<Map<String, Object>>() {}.getType());
+                    symbol.setMetadata(metadata);
+                }
+
                 symbols.add(symbol);
             }
 
@@ -336,12 +345,69 @@ public class SymGraphService {
                     node.setAddress(getLongOrDefault(nodeObj, "address", 0));
                     node.setNodeType(getStringOrDefault(nodeObj, "node_type", "function"));
                     node.setName(getStringOrNull(nodeObj, "name"));
-                    node.setSummary(getStringOrNull(nodeObj, "summary"));
+                    node.setSummary(getStringOrNull(nodeObj, "llm_summary"));
+
+                    // Build properties map from top-level fields AND nested properties
+                    // Backend sends RE analysis fields at the top level, not nested in "properties"
+                    Map<String, Object> props = new HashMap<>();
+
+                    // First, copy any nested properties object
                     if (nodeObj.has("properties") && nodeObj.get("properties").isJsonObject()) {
-                        Map<String, Object> props = gson.fromJson(
+                        Map<String, Object> nestedProps = gson.fromJson(
                                 nodeObj.get("properties"), new TypeToken<Map<String, Object>>() {}.getType());
-                        node.setProperties(props);
+                        props.putAll(nestedProps);
                     }
+
+                    // Then parse top-level RE analysis fields (these override nested if present)
+                    if (nodeObj.has("raw_content") && !nodeObj.get("raw_content").isJsonNull()) {
+                        props.put("raw_content", nodeObj.get("raw_content").getAsString());
+                    }
+                    if (nodeObj.has("confidence") && !nodeObj.get("confidence").isJsonNull()) {
+                        props.put("confidence", nodeObj.get("confidence").getAsDouble());
+                    }
+                    if (nodeObj.has("security_flags") && !nodeObj.get("security_flags").isJsonNull()) {
+                        props.put("security_flags", gson.fromJson(nodeObj.get("security_flags"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("network_apis") && !nodeObj.get("network_apis").isJsonNull()) {
+                        props.put("network_apis", gson.fromJson(nodeObj.get("network_apis"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("file_io_apis") && !nodeObj.get("file_io_apis").isJsonNull()) {
+                        props.put("file_io_apis", gson.fromJson(nodeObj.get("file_io_apis"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("ip_addresses") && !nodeObj.get("ip_addresses").isJsonNull()) {
+                        props.put("ip_addresses", gson.fromJson(nodeObj.get("ip_addresses"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("urls") && !nodeObj.get("urls").isJsonNull()) {
+                        props.put("urls", gson.fromJson(nodeObj.get("urls"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("file_paths") && !nodeObj.get("file_paths").isJsonNull()) {
+                        props.put("file_paths", gson.fromJson(nodeObj.get("file_paths"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("domains") && !nodeObj.get("domains").isJsonNull()) {
+                        props.put("domains", gson.fromJson(nodeObj.get("domains"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("registry_keys") && !nodeObj.get("registry_keys").isJsonNull()) {
+                        props.put("registry_keys", gson.fromJson(nodeObj.get("registry_keys"),
+                                new TypeToken<List<String>>() {}.getType()));
+                    }
+                    if (nodeObj.has("risk_level") && !nodeObj.get("risk_level").isJsonNull()) {
+                        props.put("risk_level", nodeObj.get("risk_level").getAsString());
+                    }
+                    if (nodeObj.has("activity_profile") && !nodeObj.get("activity_profile").isJsonNull()) {
+                        props.put("activity_profile", nodeObj.get("activity_profile").getAsString());
+                    }
+                    if (nodeObj.has("analysis_depth") && !nodeObj.get("analysis_depth").isJsonNull()) {
+                        props.put("analysis_depth", nodeObj.get("analysis_depth").getAsInt());
+                    }
+
+                    node.setProperties(props);
                     nodes.add(node);
                 }
             }
@@ -714,8 +780,12 @@ public class SymGraphService {
         int skippedConfidence = 0;
 
         for (Symbol remoteSym : remoteSymbols) {
-            // Skip remote symbols with default/auto-generated names
-            if (SymGraphUtils.isDefaultName(remoteSym.getName())) {
+            // Comments don't require names - they store text in content, not name
+            String symbolType = remoteSym.getSymbolType();
+            boolean isComment = "comment".equals(symbolType);
+
+            // Skip remote symbols with default/auto-generated names (but not comments)
+            if (!isComment && SymGraphUtils.isDefaultName(remoteSym.getName())) {
                 skippedDefault++;
                 continue;
             }

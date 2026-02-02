@@ -1384,6 +1384,9 @@ public class BinaryKnowledgeGraph {
 
     /**
      * Mark all nodes in the graph as stale.
+     * Used at the start of incremental reindex to identify unchanged nodes.
+     *
+     * @return Number of nodes marked stale
      */
     public int markAllStale() {
         String sql = "UPDATE graph_nodes SET is_stale = 1 WHERE binary_id = ?";
@@ -1392,6 +1395,46 @@ public class BinaryKnowledgeGraph {
             return stmt.executeUpdate();
         } catch (SQLException e) {
             Msg.error(this, "Failed to mark nodes stale: " + e.getMessage(), e);
+        }
+        return 0;
+    }
+
+    /**
+     * Get count of nodes with LLM summaries (non-stale with summary).
+     * Useful for tracking how many summaries were preserved during incremental reindex.
+     *
+     * @return Count of nodes with preserved summaries
+     */
+    public int getPreservedSummaryCount() {
+        String sql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ? " +
+                     "AND is_stale = 0 AND llm_summary IS NOT NULL AND TRIM(llm_summary) != ''";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get preserved summary count: " + e.getMessage(), e);
+        }
+        return 0;
+    }
+
+    /**
+     * Get count of nodes that are stale (need re-summarization).
+     *
+     * @return Count of stale nodes
+     */
+    public int getStaleNodeCount() {
+        String sql = "SELECT COUNT(*) FROM graph_nodes WHERE binary_id = ? AND is_stale = 1";
+        try (PreparedStatement stmt = connection.prepareStatement(sql)) {
+            stmt.setString(1, binaryId);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                return rs.getInt(1);
+            }
+        } catch (SQLException e) {
+            Msg.error(this, "Failed to get stale node count: " + e.getMessage(), e);
         }
         return 0;
     }

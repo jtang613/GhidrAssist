@@ -10,14 +10,13 @@ import ghidra.util.task.TaskMonitor;
 import ghidrassist.AnalysisDB;
 import ghidrassist.GhidrAssistPlugin;
 import ghidrassist.graphrag.BinaryKnowledgeGraph;
-import ghidrassist.graphrag.nodes.EdgeType;
 import ghidrassist.graphrag.nodes.KnowledgeNode;
 import ghidrassist.graphrag.nodes.NodeType;
 import ghidrassist.services.symgraph.SymGraphService;
 import ghidrassist.services.symgraph.SymGraphModels.*;
 import ghidrassist.ui.tabs.SymGraphTab;
-
-import com.google.gson.Gson;
+import ghidrassist.workers.SymGraphApplyWorker;
+import ghidrassist.workers.SymGraphPullWorker;
 
 import javax.swing.*;
 import java.util.ArrayList;
@@ -37,6 +36,8 @@ public class SymGraphController {
     private final AnalysisDB analysisDB;
     private SymGraphService symGraphService;
     private SymGraphTab symGraphTab;
+    private SymGraphApplyWorker applyWorker;
+    private SymGraphPullWorker pullWorker;
 
     public SymGraphController(GhidrAssistPlugin plugin, AnalysisDB analysisDB) {
         this.plugin = plugin;
@@ -271,6 +272,12 @@ public class SymGraphController {
             return;
         }
 
+        // If a worker is already running, cancel it
+        if (pullWorker != null && !pullWorker.isDone()) {
+            pullWorker.requestCancel();
+            return;
+        }
+
         String sha256 = getProgramSHA256();
         if (sha256 == null) {
             Msg.showInfo(this, symGraphTab, "No Binary", "No binary loaded or unable to compute hash.");
@@ -295,91 +302,91 @@ public class SymGraphController {
         }
 
         Msg.info(this, "Fetching symbols from SymGraph: " + sha256 + " (types: " + symbolTypes + ")");
-        symGraphTab.setPullStatus("Fetching...", null);
         symGraphTab.clearConflicts();
         symGraphTab.setGraphPreviewData(null, 0, 0, 0);
         symGraphTab.setButtonsEnabled(false);
 
-        Task task = new Task("Pull from SymGraph", true, true, false) {
-            @Override
-            public void run(TaskMonitor monitor) {
-                try {
-                    // Fetch symbols for each selected type
-                    List<Symbol> allRemoteSymbols = new ArrayList<>();
+        pullWorker = new SymGraphPullWorker(
+            plugin.getCurrentProgram(),
+            symGraphService,
+            sha256,
+            symbolTypes,
+            minConfidence,
+            includeGraph
+        );
 
-                    for (String symType : symbolTypes) {
-                        if (monitor.isCancelled()) {
-                            return;
-                        }
-                        monitor.setMessage("Fetching " + symType + " symbols...");
-                        List<Symbol> remoteSymbols = symGraphService.getSymbols(sha256, symType);
-                        allRemoteSymbols.addAll(remoteSymbols);
-                        Msg.info(this, "Fetched " + remoteSymbols.size() + " " + symType + " symbols from API");
-                    }
+        setupPullWorkerCallbacks(pullWorker);
+        pullWorker.execute();
+    }
 
-                    GraphExport graphExport = null;
-                    int graphNodes = 0;
-                    int graphEdges = 0;
-                    int graphCommunities = 0;
+    /**
+     * Set up callbacks for the pull worker.
+     */
+    private void setupPullWorkerCallbacks(SymGraphPullWorker worker) {
+        // Progress callback - called on EDT
+        worker.setProgressCallback(progress -> {
+            symGraphTab.updatePullProgress(progress.current, 100, progress.message);
+        });
 
-                    if (includeGraph) {
-                        monitor.setMessage("Fetching graph data...");
-                        graphExport = symGraphService.exportGraph(sha256);
-                        if (graphExport != null) {
-                            graphNodes = graphExport.getNodes().size();
-                            graphEdges = graphExport.getEdges().size();
-                            graphCommunities = getGraphCommunityCount(graphExport);
-                        }
-                    }
+        // Completed callback - called on EDT
+        worker.setCompletedCallback(result -> {
+            symGraphTab.hidePullProgress();
+            symGraphTab.setButtonsEnabled(true);
 
-                    if (allRemoteSymbols.isEmpty() && graphExport == null) {
-                        SwingUtilities.invokeLater(() -> {
-                            symGraphTab.setButtonsEnabled(true);
-                            symGraphTab.setPullStatus("No symbols found", false);
-                        });
-                        return;
-                    }
+            if (result.cancelled) {
+                symGraphTab.setPullStatus("Cancelled", false);
+            } else if (result.error != null) {
+                symGraphTab.setGraphPreviewData(null, 0, 0, 0);
+                symGraphTab.setPullStatus("Error: " + result.error, false);
+            } else if (result.conflicts.isEmpty() && result.graphExport == null) {
+                symGraphTab.setPullStatus("No symbols found", false);
+            } else {
+                symGraphTab.setGraphPreviewData(result.graphExport, result.graphNodes,
+                    result.graphEdges, result.graphCommunities);
+                symGraphTab.populateConflicts(result.conflicts);
 
-                    monitor.setMessage("Building conflict list...");
-                    Map<Long, String> localSymbols = getLocalSymbolMap();
-                    // Use the overloaded method with minConfidence
-                    List<ConflictEntry> conflicts = symGraphService.buildConflictEntries(
-                        localSymbols, allRemoteSymbols, minConfidence);
-
-                    final GraphExport finalGraphExport = graphExport;
-                    final int finalGraphNodes = graphNodes;
-                    final int finalGraphEdges = graphEdges;
-                    final int finalGraphCommunities = graphCommunities;
-
-                    SwingUtilities.invokeLater(() -> {
-                        symGraphTab.setButtonsEnabled(true);
-                        symGraphTab.setGraphPreviewData(finalGraphExport, finalGraphNodes, finalGraphEdges, finalGraphCommunities);
-                        symGraphTab.populateConflicts(conflicts);
-                        int conflictCount = (int) conflicts.stream()
-                            .filter(c -> c.getAction() == ConflictAction.CONFLICT).count();
-                        int newCount = (int) conflicts.stream()
-                            .filter(c -> c.getAction() == ConflictAction.NEW).count();
-                        String status = String.format("Found %d symbols (%d conflicts, %d new)",
-                            conflicts.size(), conflictCount, newCount);
-                        if (conflicts.isEmpty() && finalGraphExport != null) {
-                            status = "No symbols found (graph data available)";
-                        } else if (finalGraphExport != null) {
-                            status += String.format(" | Graph: %d nodes, %d edges, %d communities",
-                                finalGraphNodes, finalGraphEdges, finalGraphCommunities);
-                        }
-                        symGraphTab.setPullStatus(status, true);
-                    });
-                } catch (Exception e) {
-                    Msg.error(this, "Pull preview error: " + e.getMessage(), e);
-                    SwingUtilities.invokeLater(() -> {
-                        symGraphTab.setButtonsEnabled(true);
-                        symGraphTab.setGraphPreviewData(null, 0, 0, 0);
-                        symGraphTab.setPullStatus("Error: " + e.getMessage(), false);
-                    });
+                int conflictCount = (int) result.conflicts.stream()
+                    .filter(c -> c.getAction() == ConflictAction.CONFLICT).count();
+                int newCount = (int) result.conflicts.stream()
+                    .filter(c -> c.getAction() == ConflictAction.NEW).count();
+                String status = String.format("Found %d symbols (%d conflicts, %d new)",
+                    result.conflicts.size(), conflictCount, newCount);
+                if (result.conflicts.isEmpty() && result.graphExport != null) {
+                    status = "No symbols found (graph data available)";
+                } else if (result.graphExport != null) {
+                    status += String.format(" | Graph: %d nodes, %d edges, %d communities",
+                        result.graphNodes, result.graphEdges, result.graphCommunities);
                 }
+                symGraphTab.setPullStatus(status, true);
             }
-        };
-        TaskLauncher.launch(task);
+        });
+
+        // Cancelled callback - called on EDT
+        worker.setCancelledCallback(() -> {
+            symGraphTab.hidePullProgress();
+            symGraphTab.setButtonsEnabled(true);
+            symGraphTab.setPullStatus("Cancelled", false);
+        });
+
+        // Failed callback - called on EDT
+        worker.setFailedCallback(error -> {
+            symGraphTab.hidePullProgress();
+            symGraphTab.setButtonsEnabled(true);
+            symGraphTab.setGraphPreviewData(null, 0, 0, 0);
+            symGraphTab.setPullStatus("Error: " + error, false);
+        });
+
+        // Show progress
+        symGraphTab.showPullProgress("Fetching...");
+    }
+
+    /**
+     * Cancel the current pull operation if running.
+     */
+    public void cancelPull() {
+        if (pullWorker != null && !pullWorker.isDone()) {
+            pullWorker.requestCancel();
+        }
     }
 
     // ==== Apply Operations ====
@@ -389,6 +396,12 @@ public class SymGraphController {
      */
     public void handleApplySelected(List<ConflictEntry> selectedConflicts) {
         if (symGraphTab == null || plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        // If a worker is already running, cancel it
+        if (applyWorker != null && !applyWorker.isDone()) {
+            applyWorker.requestCancel();
             return;
         }
 
@@ -404,72 +417,17 @@ public class SymGraphController {
             return;
         }
 
-        Task task = new Task("Apply SymGraph Symbols", true, true, false) {
-            @Override
-            public void run(TaskMonitor monitor) {
-                int appliedCount = 0;
-                int transactionId = plugin.getCurrentProgram().startTransaction("Apply SymGraph Symbols");
+        applyWorker = new SymGraphApplyWorker(
+            plugin.getCurrentProgram(),
+            analysisDB,
+            selectedConflicts,
+            graphExport,
+            programHash,
+            symGraphTab.getGraphMergePolicy()
+        );
 
-                try {
-                    if (graphExport != null) {
-                        mergeGraphData(graphExport, programHash, symGraphTab.getGraphMergePolicy());
-                    }
-
-                    for (ConflictEntry conflict : selectedConflicts) {
-                        if (conflict.getRemoteSymbol() == null || conflict.getRemoteSymbol().getName() == null) {
-                            continue;
-                        }
-
-                        try {
-                            long addr = conflict.getAddress();
-                            Address address = plugin.getCurrentProgram().getAddressFactory()
-                                .getDefaultAddressSpace().getAddress(addr);
-
-                            String symbolType = conflict.getRemoteSymbol().getSymbolType();
-
-                            if ("variable".equals(symbolType)) {
-                                // Variable - use storage-aware application
-                                Function func = plugin.getCurrentProgram().getFunctionManager()
-                                    .getFunctionContaining(address);
-                                if (func != null && func.getEntryPoint().getOffset() == addr) {
-                                    if (applyVariableSymbol(func, conflict.getRemoteSymbol())) {
-                                        appliedCount++;
-                                    }
-                                }
-                            } else {
-                                // Function or other symbol
-                                Function func = plugin.getCurrentProgram().getFunctionManager()
-                                    .getFunctionAt(address);
-
-                                if (func != null) {
-                                    func.setName(conflict.getRemoteSymbol().getName(),
-                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                                    appliedCount++;
-                                }
-                            }
-                        } catch (Exception e) {
-                            Msg.error(this, "Error applying symbol at 0x" +
-                                Long.toHexString(conflict.getAddress()) + ": " + e.getMessage());
-                        }
-                    }
-
-                    plugin.getCurrentProgram().endTransaction(transactionId, true);
-
-                    final int count = appliedCount;
-                    SwingUtilities.invokeLater(() -> {
-                        symGraphTab.setPullStatus("Applied " + count + " symbols", true);
-                        if (count > 0) {
-                            Msg.showInfo(this, symGraphTab, "Success",
-                                "Applied " + count + " symbols to binary.");
-                        }
-                    });
-                } catch (Exception e) {
-                    plugin.getCurrentProgram().endTransaction(transactionId, false);
-                    throw e;
-                }
-            }
-        };
-        TaskLauncher.launch(task);
+        setupApplyWorkerCallbacks(applyWorker, selectedConflicts.size());
+        applyWorker.execute();
     }
 
     /**
@@ -477,6 +435,12 @@ public class SymGraphController {
      */
     public void handleApplyAllNew() {
         if (symGraphTab == null || plugin.getCurrentProgram() == null) {
+            return;
+        }
+
+        // If a worker is already running, cancel it
+        if (applyWorker != null && !applyWorker.isDone()) {
+            applyWorker.requestCancel();
             return;
         }
 
@@ -493,95 +457,83 @@ public class SymGraphController {
             return;
         }
 
-        final int total = newConflicts.size();
-        String applyingMessage = "Applying " + total + " new symbols...";
-        if (total == 0 && graphExport != null) {
-            applyingMessage = "Applying graph data...";
-        }
-        symGraphTab.showApplyingPage(applyingMessage);
+        applyWorker = new SymGraphApplyWorker(
+            plugin.getCurrentProgram(),
+            analysisDB,
+            newConflicts,
+            graphExport,
+            programHash,
+            symGraphTab.getGraphMergePolicy()
+        );
 
-        Task task = new Task("Apply New SymGraph Symbols", true, true, false) {
-            @Override
-            public void run(TaskMonitor monitor) {
-                int appliedCount = 0;
-                int transactionId = plugin.getCurrentProgram().startTransaction("Apply SymGraph Symbols");
+        setupApplyWorkerCallbacks(applyWorker, newConflicts.size());
+        applyWorker.execute();
+    }
 
-                try {
-                    if (graphExport != null) {
-                        mergeGraphData(graphExport, programHash, symGraphTab.getGraphMergePolicy());
-                    }
+    /**
+     * Set up callbacks for the apply worker.
+     */
+    private void setupApplyWorkerCallbacks(SymGraphApplyWorker worker, int totalSymbols) {
+        // Progress callback - called on EDT
+        worker.setProgressCallback(progress -> {
+            symGraphTab.updateApplyProgress(progress.current, 100, progress.message);
+        });
 
-                    for (int i = 0; i < newConflicts.size(); i++) {
-                        ConflictEntry conflict = newConflicts.get(i);
-                        if (conflict.getRemoteSymbol() == null || conflict.getRemoteSymbol().getName() == null) {
-                            continue;
-                        }
-
-                        // Update progress on EDT
-                        final int current = i + 1;
-                        final String progressMsg = "Applying symbol " + current + " of " + total;
-                        SwingUtilities.invokeLater(() -> {
-                            symGraphTab.updateApplyProgress(current, total, progressMsg);
-                        });
-
-                        try {
-                            long addrVal = conflict.getAddress();
-                            Address address = plugin.getCurrentProgram().getAddressFactory()
-                                .getDefaultAddressSpace().getAddress(addrVal);
-
-                            String symbolType = conflict.getRemoteSymbol().getSymbolType();
-
-                            if ("variable".equals(symbolType)) {
-                                // Variable - use storage-aware application
-                                Function func = plugin.getCurrentProgram().getFunctionManager()
-                                    .getFunctionContaining(address);
-                                if (func != null && func.getEntryPoint().getOffset() == addrVal) {
-                                    if (applyVariableSymbol(func, conflict.getRemoteSymbol())) {
-                                        appliedCount++;
-                                    }
-                                }
-                            } else {
-                                // Function or other symbol
-                                Function func = plugin.getCurrentProgram().getFunctionManager()
-                                    .getFunctionAt(address);
-
-                                if (func != null) {
-                                    func.setName(conflict.getRemoteSymbol().getName(),
-                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                                    appliedCount++;
-                                }
-                            }
-                        } catch (Exception e) {
-                            Msg.error(this, "Error applying symbol at 0x" +
-                                Long.toHexString(conflict.getAddress()) + ": " + e.getMessage());
-                        }
-
-                        // Check for cancellation
-                        if (monitor.isCancelled()) {
-                            break;
-                        }
-                    }
-
-                    plugin.getCurrentProgram().endTransaction(transactionId, true);
-
-                    final int count = appliedCount;
-                    final boolean cancelled = monitor.isCancelled();
-                    SwingUtilities.invokeLater(() -> {
-                        if (cancelled) {
-                            symGraphTab.showCompletePage("Cancelled after applying " + count + " symbols", false);
-                        } else {
-                            symGraphTab.showCompletePage("Applied " + count + " new symbols", true);
-                        }
-                    });
-                } catch (Exception e) {
-                    plugin.getCurrentProgram().endTransaction(transactionId, false);
-                    SwingUtilities.invokeLater(() -> {
-                        symGraphTab.showCompletePage("Error: " + e.getMessage(), false);
-                    });
+        // Completed callback - called on EDT
+        worker.setCompletedCallback(result -> {
+            symGraphTab.hideApplyProgress();
+            if (result.cancelled) {
+                symGraphTab.showCompletePage(
+                    String.format("Cancelled after applying %d symbols", result.symbolsApplied), false);
+            } else if (result.error != null) {
+                symGraphTab.showCompletePage("Error: " + result.error, false);
+            } else {
+                StringBuilder message = new StringBuilder("Applied ");
+                List<String> parts = new ArrayList<>();
+                if (result.symbolsApplied > 0) {
+                    parts.add(result.symbolsApplied + " symbols");
                 }
+                if (result.nodesApplied > 0) {
+                    parts.add(result.nodesApplied + " nodes");
+                }
+                if (result.edgesApplied > 0) {
+                    parts.add(result.edgesApplied + " edges");
+                }
+                if (parts.isEmpty()) {
+                    message.append("no changes");
+                } else {
+                    message.append(String.join(", ", parts));
+                }
+                symGraphTab.showCompletePage(message.toString(), true);
             }
-        };
-        TaskLauncher.launch(task);
+        });
+
+        // Cancelled callback - called on EDT
+        worker.setCancelledCallback(() -> {
+            symGraphTab.hideApplyProgress();
+            symGraphTab.showCompletePage("Apply cancelled", false);
+        });
+
+        // Failed callback - called on EDT
+        worker.setFailedCallback(error -> {
+            symGraphTab.hideApplyProgress();
+            symGraphTab.showCompletePage("Error: " + error, false);
+        });
+
+        // Show the applying page with progress
+        String message = totalSymbols > 0 ?
+            String.format("Applying %d symbols...", totalSymbols) :
+            "Applying graph data...";
+        symGraphTab.showApplyingPage(message);
+    }
+
+    /**
+     * Cancel the current apply operation if running.
+     */
+    public void cancelApply() {
+        if (applyWorker != null && !applyWorker.isDone()) {
+            applyWorker.requestCancel();
+        }
     }
 
     // ==== Binary Info ====
@@ -1194,228 +1146,6 @@ public class SymGraphController {
         }
 
         return nodeMap;
-    }
-
-    private Map<Long, String> getLocalSymbolMap() {
-        Map<Long, String> symbolMap = new HashMap<>();
-
-        if (plugin.getCurrentProgram() == null) {
-            return symbolMap;
-        }
-
-        try {
-            for (Function func : plugin.getCurrentProgram().getFunctionManager().getFunctions(true)) {
-                String qualifiedName = getQualifiedFunctionName(func);
-                // Use unified default name detection for cross-tool compatibility
-                if (!ghidrassist.services.symgraph.SymGraphUtils.isDefaultName(qualifiedName)) {
-                    symbolMap.put(func.getEntryPoint().getOffset(), qualifiedName);
-                }
-            }
-        } catch (Exception e) {
-            Msg.error(this, "Error getting local symbols: " + e.getMessage());
-        }
-
-        return symbolMap;
-    }
-
-    private int getGraphCommunityCount(GraphExport export) {
-        if (export == null || export.getMetadata() == null) {
-            return 0;
-        }
-        Object countValue = export.getMetadata().get("community_count");
-        if (countValue instanceof Number) {
-            return ((Number) countValue).intValue();
-        }
-        Object communitiesValue = export.getMetadata().get("communities");
-        if (communitiesValue instanceof List) {
-            return ((List<?>) communitiesValue).size();
-        }
-        return 0;
-    }
-
-    private List<String> getListProperty(Map<String, Object> props, String key) {
-        if (props == null) {
-            return new ArrayList<>();
-        }
-        Object value = props.get(key);
-        if (value instanceof List) {
-            List<String> list = new ArrayList<>();
-            for (Object item : (List<?>) value) {
-                if (item != null) {
-                    list.add(item.toString());
-                }
-            }
-            return list;
-        }
-        return new ArrayList<>();
-    }
-
-    private double getDoubleProperty(Map<String, Object> props, String key, double defaultValue) {
-        if (props == null) {
-            return defaultValue;
-        }
-        Object value = props.get(key);
-        if (value instanceof Number) {
-            return ((Number) value).doubleValue();
-        }
-        return defaultValue;
-    }
-
-    private void mergeGraphData(GraphExport export, String programHash, String mergePolicy) {
-        if (export == null) {
-            return;
-        }
-        BinaryKnowledgeGraph graph = analysisDB.getKnowledgeGraph(programHash);
-        if ("replace".equals(mergePolicy)) {
-            graph.clearGraph();
-        }
-
-        Map<Long, String> addressToId = new HashMap<>();
-        for (GraphNode node : export.getNodes()) {
-            NodeType nodeType = NodeType.fromString(node.getNodeType());
-            if (nodeType == null) {
-                nodeType = NodeType.FUNCTION;
-            }
-
-            KnowledgeNode existing = graph.getNodeByAddress(node.getAddress());
-            if ("prefer_local".equals(mergePolicy) && existing != null) {
-                addressToId.put(node.getAddress(), existing.getId());
-                continue;
-            }
-
-            KnowledgeNode localNode = node.getId() != null
-                    ? new KnowledgeNode(node.getId(), nodeType, programHash)
-                    : new KnowledgeNode(nodeType, programHash);
-            if (existing != null) {
-                localNode.setId(existing.getId());
-            }
-
-            localNode.setAddress(node.getAddress());
-            localNode.setName(node.getName());
-
-            Map<String, Object> props = node.getProperties();
-            String rawContent = props != null ? (String) props.get("raw_content") : null;
-            if (rawContent == null && props != null) {
-                rawContent = (String) props.get("raw_code");
-            }
-            String summary = node.getSummary();
-            if (summary == null && props != null) {
-                summary = (String) props.get("llm_summary");
-            }
-
-            localNode.setRawContent(rawContent);
-            localNode.setLlmSummary(summary);
-            localNode.setConfidence((float) getDoubleProperty(props, "confidence", 0.0));
-            localNode.setSecurityFlags(getListProperty(props, "security_flags"));
-            localNode.setNetworkAPIs(getListProperty(props, "network_apis"));
-            localNode.setFileIOAPIs(getListProperty(props, "file_io_apis"));
-            localNode.setIPAddresses(getListProperty(props, "ip_addresses"));
-            localNode.setURLs(getListProperty(props, "urls"));
-            localNode.setFilePaths(getListProperty(props, "file_paths"));
-            localNode.setDomains(getListProperty(props, "domains"));
-            localNode.setRegistryKeys(getListProperty(props, "registry_keys"));
-            if (props != null) {
-                localNode.setRiskLevel((String) props.get("risk_level"));
-                localNode.setActivityProfile((String) props.get("activity_profile"));
-                Object depth = props.get("analysis_depth");
-                if (depth instanceof Number) {
-                    localNode.setAnalysisDepth(((Number) depth).intValue());
-                }
-                Object isStale = props.get("is_stale");
-                if (isStale instanceof Boolean) {
-                    localNode.setStale((Boolean) isStale);
-                }
-                Object userEdited = props.get("user_edited");
-                if (userEdited instanceof Boolean) {
-                    localNode.setUserEdited((Boolean) userEdited);
-                }
-            }
-
-            graph.upsertNode(localNode);
-            addressToId.put(node.getAddress(), localNode.getId());
-        }
-
-        Gson gson = new Gson();
-        for (GraphEdge edge : export.getEdges()) {
-            String sourceId = addressToId.get(edge.getSourceAddress());
-            String targetId = addressToId.get(edge.getTargetAddress());
-            if (sourceId == null || targetId == null) {
-                continue;
-            }
-            EdgeType edgeType = EdgeType.fromString(edge.getEdgeType());
-            if (edgeType == null) {
-                edgeType = EdgeType.CALLS;
-            }
-            Map<String, Object> props = edge.getProperties();
-            double weight = getDoubleProperty(props, "weight", 1.0);
-            String metadata = props != null ? gson.toJson(props) : null;
-            graph.addEdge(sourceId, targetId, edgeType, weight, metadata);
-        }
-    }
-
-    private boolean applyVariableSymbol(Function func, Symbol remoteSymbol) {
-        if (remoteSymbol == null || remoteSymbol.getName() == null) {
-            return false;
-        }
-
-        Map<String, Object> metadata = remoteSymbol.getMetadata();
-        if (metadata == null) {
-            return false;
-        }
-
-        String storageClass = (String) metadata.get("storage_class");
-        String targetName = remoteSymbol.getName();
-
-        try {
-            if ("parameter".equals(storageClass)) {
-                Object paramIdxObj = metadata.get("parameter_index");
-                if (paramIdxObj != null) {
-                    int paramIdx = ((Number) paramIdxObj).intValue();
-                    ghidra.program.model.listing.Parameter[] params = func.getParameters();
-                    if (paramIdx < params.length) {
-                        params[paramIdx].setName(targetName,
-                            ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                        return true;
-                    }
-                }
-            } else if ("stack".equals(storageClass)) {
-                Object stackOffsetObj = metadata.get("stack_offset");
-                if (stackOffsetObj != null) {
-                    int stackOffset = ((Number) stackOffsetObj).intValue();
-                    for (ghidra.program.model.listing.Variable var : func.getLocalVariables()) {
-                        if (var.isStackVariable()) {
-                            try {
-                                if (var.getStackOffset() == stackOffset) {
-                                    var.setName(targetName,
-                                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                                    return true;
-                                }
-                            } catch (UnsupportedOperationException e) {
-                                // Not a simple stack var
-                            }
-                        }
-                    }
-                }
-            } else if ("register".equals(storageClass)) {
-                String regName = (String) metadata.get("register");
-                if (regName != null) {
-                    for (ghidra.program.model.listing.Variable var : func.getLocalVariables()) {
-                        if (var.isRegisterVariable()) {
-                            ghidra.program.model.lang.Register reg = var.getRegister();
-                            if (reg != null && regName.equals(reg.getName())) {
-                                var.setName(targetName,
-                                    ghidra.program.model.symbol.SourceType.USER_DEFINED);
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Msg.error(this, "Error applying variable: " + e.getMessage());
-        }
-
-        return false;
     }
 
     /**

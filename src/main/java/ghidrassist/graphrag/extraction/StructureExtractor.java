@@ -69,6 +69,9 @@ public class StructureExtractor {
     private static final int DECOMPILE_BASE_TIMEOUT = 30;  // seconds
     private static final int DECOMPILE_MAX_RETRIES = 3;
 
+    // Incremental mode: when true, preserves existing semantic data (summaries, embeddings, flags)
+    private boolean incrementalMode = false;
+
     /**
      * Create a StructureExtractor for a program.
      *
@@ -81,6 +84,30 @@ public class StructureExtractor {
         this.graph = graph;
         this.binaryId = graph.getBinaryId();
         this.monitor = monitor;
+    }
+
+    /**
+     * Set incremental mode for non-destructive reindexing.
+     *
+     * When enabled:
+     * - Existing semantic data (summaries, embeddings, flags) is preserved via COALESCE
+     * - Only structural data (names, addresses, edges) is updated
+     * - Nodes are marked stale only if content actually changed
+     *
+     * @param incremental true to enable incremental mode
+     */
+    public void setIncrementalMode(boolean incremental) {
+        this.incrementalMode = incremental;
+        if (incremental) {
+            Msg.info(this, "StructureExtractor: incremental mode enabled (preserving semantic data)");
+        }
+    }
+
+    /**
+     * Check if incremental mode is enabled.
+     */
+    public boolean isIncrementalMode() {
+        return incrementalMode;
     }
 
     /**
@@ -514,6 +541,8 @@ public class StructureExtractor {
     /**
      * Create a function node using a provided decompiler (for parallel execution).
      * Uses thread-local decompiler for parallel decompilation.
+     *
+     * In incremental mode, preserves existing semantic data and only marks stale if content changed.
      */
     private KnowledgeNode createFunctionNodeParallel(Function function, DecompInterface threadDecompiler) {
         try {
@@ -521,10 +550,14 @@ public class StructureExtractor {
             String name = function.getName();
 
             // Check if node already exists
-            KnowledgeNode node = graph.getNodeByAddress(address);
-            if (node == null) {
+            KnowledgeNode existingNode = graph.getNodeByAddress(address);
+            KnowledgeNode node;
+            boolean isExistingNode = (existingNode != null);
+
+            if (existingNode == null) {
                 node = KnowledgeNode.createFunction(binaryId, address, name);
             } else {
+                node = existingNode;
                 node.setName(name); // Update name in case of rename
             }
 
@@ -552,13 +585,30 @@ public class StructureExtractor {
                     " at " + function.getEntryPoint());
             }
 
-            node.setRawContent(content);
+            // In incremental mode, check if content actually changed before marking stale
+            if (incrementalMode && isExistingNode) {
+                boolean contentChanged = shouldMarkStale(existingNode, name, content);
+                if (contentChanged) {
+                    node.setRawContent(content);
+                    node.markStale();
+                    Msg.debug(this, "Content changed for " + name + ", marking stale");
+                } else {
+                    // Content unchanged - keep existing content and clear stale flag
+                    // (we marked all nodes stale at the start of reindex)
+                    node.setStale(false);
+                    Msg.debug(this, "Content unchanged for " + name + ", preserving semantic data");
+                }
+            } else {
+                // Non-incremental mode or new node - always update content
+                node.setRawContent(content);
+                node.markStale();
+            }
 
             // Extract security features (network APIs, file I/O, strings)
-            extractSecurityFeatures(function, node);
-
-            // Mark as needing LLM summary
-            node.markStale();
+            // In incremental mode, only update if we don't already have flags
+            if (!incrementalMode || !node.hasSecurityFlags()) {
+                extractSecurityFeatures(function, node);
+            }
 
             return node;
         } catch (Exception e) {
@@ -567,34 +617,98 @@ public class StructureExtractor {
         }
     }
 
+    /**
+     * Check if a node's content has changed significantly and needs re-summarization.
+     *
+     * In incremental mode, we only want to mark nodes stale if:
+     * - The function name changed
+     * - The decompiled content changed significantly (ignoring whitespace differences)
+     *
+     * This preserves existing LLM summaries for unchanged functions.
+     *
+     * @param existing   The existing node from the database
+     * @param newName    The new function name from Ghidra
+     * @param newContent The new decompiled content
+     * @return true if the node should be marked stale for re-summarization
+     */
+    private boolean shouldMarkStale(KnowledgeNode existing, String newName, String newContent) {
+        if (existing == null) {
+            return true; // New node, needs summarization
+        }
+
+        // User-edited summaries are never overwritten
+        if (existing.isUserEdited()) {
+            return false;
+        }
+
+        // Name changed
+        if (!java.util.Objects.equals(existing.getName(), newName)) {
+            return true;
+        }
+
+        // Content changed (compare normalized, ignoring whitespace)
+        String existingNorm = normalizeContent(existing.getRawContent());
+        String newNorm = normalizeContent(newContent);
+        return !java.util.Objects.equals(existingNorm, newNorm);
+    }
+
+    /**
+     * Normalize content for comparison by removing excessive whitespace.
+     */
+    private String normalizeContent(String s) {
+        if (s == null) {
+            return "";
+        }
+        return s.replaceAll("\\s+", " ").trim();
+    }
+
     private KnowledgeNode createFunctionNode(Function function) {
         try {
             long address = function.getEntryPoint().getOffset();
             String name = function.getName();
 
             // Check if node already exists
-            KnowledgeNode node = graph.getNodeByAddress(address);
-            if (node == null) {
+            KnowledgeNode existingNode = graph.getNodeByAddress(address);
+            KnowledgeNode node;
+            boolean isExistingNode = (existingNode != null);
+
+            if (existingNode == null) {
                 node = KnowledgeNode.createFunction(binaryId, address, name);
             } else {
+                node = existingNode;
                 node.setName(name); // Update name in case of rename
             }
 
             // Decompile and store raw content
+            String content = null;
             DecompileResults results = decompiler.decompileFunction(function, 60, monitor);
             if (results != null && results.decompileCompleted()) {
-                String code = results.getDecompiledFunction().getC();
-                node.setRawContent(code);
+                content = results.getDecompiledFunction().getC();
             } else {
                 // Fall back to disassembly
-                node.setRawContent(getDisassembly(function));
+                content = getDisassembly(function);
+            }
+
+            // In incremental mode, check if content actually changed before marking stale
+            if (incrementalMode && isExistingNode) {
+                boolean contentChanged = shouldMarkStale(existingNode, name, content);
+                if (contentChanged) {
+                    node.setRawContent(content);
+                    node.markStale();
+                } else {
+                    // Content unchanged - preserve semantic data
+                    node.setStale(false);
+                }
+            } else {
+                node.setRawContent(content);
+                node.markStale();
             }
 
             // Extract security features (network APIs, file I/O, strings)
-            extractSecurityFeatures(function, node);
-
-            // Mark as needing LLM summary
-            node.markStale();
+            // In incremental mode, only update if we don't already have flags
+            if (!incrementalMode || !node.hasSecurityFlags()) {
+                extractSecurityFeatures(function, node);
+            }
 
             return node;
         } catch (Exception e) {
