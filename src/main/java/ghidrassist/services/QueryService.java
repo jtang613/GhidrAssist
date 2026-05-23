@@ -55,11 +55,7 @@ public class QueryService {
             }
         }
         
-        // Add to conversation history
-        conversationHistory.append("**User**:\n").append(processedQuery).append("\n\n");
-        
-        // Ensure we have a session for this conversation
-        ensureSession();
+        addUserMessage(processedQuery, currentProviderType, null);
         
         return new QueryRequest(processedQuery, conversationHistory.toString(), useMCP);
     }
@@ -395,6 +391,29 @@ public class QueryService {
         List<PersistedChatMessage> dbMessages = analysisDB.getMessages(programHash, currentSessionId);
         if (!dbMessages.isEmpty()) {
             messageList = dbMessages;
+            // Merge any messages from legacy blob not already in GHChatMessages
+            String conversation = analysisDB.getChatConversation(currentSessionId);
+            if (conversation != null && !conversation.isEmpty()) {
+                List<PersistedChatMessage> blobMessages = migrateFromLegacyBlob(conversation);
+                int maxOrder = messageList.stream()
+                    .mapToInt(PersistedChatMessage::getOrder)
+                    .max().orElse(-1);
+                for (PersistedChatMessage blobMsg : blobMessages) {
+                    boolean exists = messageList.stream()
+                        .anyMatch(m -> m.getRole().equals(blobMsg.getRole())
+                                    && m.getOrder() == blobMsg.getOrder());
+                    if (!exists) {
+                        blobMsg.setOrder(++maxOrder);
+                        messageList.add(blobMsg);
+                        analysisDB.saveMessage(programHash, currentSessionId,
+                            blobMsg.getOrder(), blobMsg.getProviderType(),
+                            blobMsg.getNativeMessageData(), blobMsg.getRole(),
+                            blobMsg.getContent(), blobMsg.getMessageType());
+                    }
+                }
+                messageList.sort((a, b) -> Integer.compare(a.getOrder(), b.getOrder()));
+                for (int i = 0; i < messageList.size(); i++) messageList.get(i).setOrder(i);
+            }
             rebuildConversationHistory();
         } else {
             // Fall back to legacy blob and migrate
